@@ -8,7 +8,7 @@ use crate::storage::{self, StorageBackend};
 use crate::video;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
 
 /// Events emitted by the upload engine to the UI
@@ -49,9 +49,11 @@ pub struct UploadEngine {
     auto_clean: bool,
     strip_metadata: bool,
     chunk_size: u64,
+    upload_semaphore: Arc<Semaphore>,
 }
 
 impl UploadEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Database>,
         api: Arc<ApiClient>,
@@ -60,6 +62,7 @@ impl UploadEngine {
         auto_clean: bool,
         strip_metadata: bool,
         chunk_size_mb: u32,
+        max_concurrent: u32,
     ) -> Self {
         Self {
             db,
@@ -69,6 +72,7 @@ impl UploadEngine {
             auto_clean,
             strip_metadata,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
+            upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
         }
     }
 
@@ -132,7 +136,10 @@ impl UploadEngine {
             confirmed_ids.push(task.id.clone());
 
             let engine = Arc::clone(self);
+            let sem = Arc::clone(&self.upload_semaphore);
             tokio::spawn(async move {
+                // Limit concurrent uploads
+                let _permit = sem.acquire().await.expect("semaphore closed");
                 match engine.process_task(&mut task).await {
                     Ok(()) => tracing::info!("Upload completed: {}", task.filename),
                     Err(e) => {

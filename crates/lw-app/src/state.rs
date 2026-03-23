@@ -46,6 +46,7 @@ impl CoreServices {
             config.upload.auto_clean,
             config.desensitization.strip_metadata,
             config.upload.chunk_size_mb,
+            config.upload.max_concurrent_uploads,
         ));
 
         Ok(Self {
