@@ -3,6 +3,8 @@ mod components;
 mod hooks;
 mod state;
 
+use dioxus::desktop::{Config, WindowCloseBehaviour};
+use dioxus::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -14,5 +16,15 @@ fn main() {
 
     tracing::info!("Starting Linewise Desktop");
 
-    dioxus::launch(app::App);
+    let cfg = Config::new()
+        .with_close_behaviour(WindowCloseBehaviour::WindowHides)
+        .with_window(
+            dioxus::desktop::WindowBuilder::new()
+                .with_title("Linewise Desktop")
+                .with_inner_size(dioxus::desktop::LogicalSize::new(900.0, 640.0)),
+        );
+
+    LaunchBuilder::desktop()
+        .with_cfg(cfg)
+        .launch(app::App);
 }

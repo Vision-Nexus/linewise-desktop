@@ -1,6 +1,7 @@
 use crate::components::login::LoginPage;
 use crate::components::upload_queue::UploadQueue;
 use crate::state::{AppState, CoreServices};
+use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
 use dioxus::prelude::*;
 
 #[component]
@@ -12,6 +13,32 @@ pub fn App() -> Element {
                 .block_on(CoreServices::init())
                 .expect("failed to initialize core services")
         })
+    });
+
+    // Initialize system tray
+    use_hook(|| {
+        let menu = build_tray_menu();
+        init_tray_icon(menu, None);
+    });
+
+    // Handle tray menu events
+    dioxus::desktop::use_tray_menu_event_handler(move |event| {
+        match event.id().0.as_str() {
+            "show" => {
+                let window = dioxus::desktop::window();
+                window.set_visible(true);
+                window.set_focus();
+            }
+            "quit" => std::process::exit(0),
+            _ => {}
+        }
+    });
+
+    // Handle tray icon click — show window
+    dioxus::desktop::use_tray_icon_event_handler(move |_event| {
+        let window = dioxus::desktop::window();
+        window.set_visible(true);
+        window.set_focus();
     });
 
     let app_state = use_context::<AppState>();
@@ -113,4 +140,13 @@ fn MainView() -> Element {
             }
         }
     }
+}
+
+fn build_tray_menu() -> dioxus::desktop::trayicon::DioxusTrayMenu {
+    let menu = Menu::new();
+    let show = MenuItem::with_id("show", "Open Linewise", true, None);
+    let quit = MenuItem::with_id("quit", "Quit", true, None);
+    menu.append_items(&[&show, &PredefinedMenuItem::separator(), &quit])
+        .expect("failed to build tray menu");
+    menu
 }
