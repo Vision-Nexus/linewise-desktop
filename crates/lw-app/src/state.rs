@@ -43,6 +43,7 @@ impl CoreServices {
             storage,
             event_tx,
             config.upload.auto_clean,
+            config.desensitization.strip_metadata,
             config.upload.chunk_size_mb,
         ));
 

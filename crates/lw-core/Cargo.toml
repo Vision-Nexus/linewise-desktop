@@ -21,3 +21,5 @@ keyring = { workspace = true }
 backon = { workspace = true }
 url = { workspace = true }
 mime_guess = "2"
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }

@@ -1,11 +1,12 @@
 use crate::api_client::ApiClient;
 use crate::db::Database;
 use crate::dedup;
+use crate::desensitize;
 use crate::error::{DbError, UploadError};
 use crate::models::{CreateDocumentMetadata, CreateDocumentRequest, UploadState, UploadTask};
 use crate::storage::{self, StorageBackend};
 use crate::video;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -46,6 +47,7 @@ pub struct UploadEngine {
     storage: Arc<StorageBackend>,
     event_tx: mpsc::UnboundedSender<UploadEvent>,
     auto_clean: bool,
+    strip_metadata: bool,
     chunk_size: u64,
 }
 
@@ -56,6 +58,7 @@ impl UploadEngine {
         storage: Arc<StorageBackend>,
         event_tx: mpsc::UnboundedSender<UploadEvent>,
         auto_clean: bool,
+        strip_metadata: bool,
         chunk_size_mb: u32,
     ) -> Self {
         Self {
@@ -64,6 +67,7 @@ impl UploadEngine {
             storage,
             event_tx,
             auto_clean,
+            strip_metadata,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
         }
     }
@@ -148,7 +152,34 @@ impl UploadEngine {
             }
         }
 
-        // Stage 3: Create document on backend
+        // Stage 3: Data desensitization (strip metadata before cross-border upload)
+        let mut desensitized_path: Option<PathBuf> = None;
+        if self.strip_metadata {
+            self.update_state(task, UploadState::Desensitizing).await;
+            match desensitize::strip_metadata(path, &task.mime_type).await {
+                Some(Ok(result)) => {
+                    tracing::info!(
+                        "Metadata stripped from {}: output at {}",
+                        task.filename,
+                        result.output_path.display()
+                    );
+                    desensitized_path = Some(result.output_path);
+                }
+                Some(Err(e)) => {
+                    tracing::warn!("Desensitization failed for {}: {e}", task.filename);
+                    // Continue with original file
+                }
+                None => {
+                    // File type doesn't need desensitization
+                }
+            }
+        }
+
+        // Use desensitized file for upload if available
+        let upload_path = desensitized_path.as_deref().unwrap_or(path);
+        let upload_size = tokio::fs::metadata(upload_path).await?.len();
+
+        // Stage 4: Create document on backend
         self.update_state(task, UploadState::Creating).await;
         let doc = self
             .api
@@ -160,7 +191,7 @@ impl UploadEngine {
                     description: task.filename.clone(),
                     metadata: CreateDocumentMetadata {
                         filename: task.filename.clone(),
-                        size: task.size,
+                        size: upload_size,
                         mime_type: Some(task.mime_type.clone()),
                     },
                 },
@@ -178,7 +209,7 @@ impl UploadEngine {
 
         let session = self
             .storage
-            .initiate_upload(&signed_url.url, &task.mime_type, task.size)
+            .initiate_upload(&signed_url.url, &task.mime_type, upload_size)
             .await?;
 
         task.session_id = Some(session.session_id.clone());
@@ -202,7 +233,7 @@ impl UploadEngine {
         let confirmed = storage::upload_file_chunked(
             self.storage.as_ref(),
             &session,
-            path,
+            upload_path,
             task.bytes_uploaded,
             self.chunk_size,
             &on_progress,
@@ -237,7 +268,12 @@ impl UploadEngine {
             )
             .await;
 
-        // Auto-clean
+        // Clean up desensitized temp file
+        if let Some(ref dp) = desensitized_path {
+            desensitize::cleanup_temp_file(dp);
+        }
+
+        // Auto-clean original file
         if self.auto_clean && let Err(e) = tokio::fs::remove_file(path).await {
             tracing::warn!("Failed to auto-clean {}: {e}", task.local_path);
         }
