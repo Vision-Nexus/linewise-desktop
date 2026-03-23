@@ -134,7 +134,7 @@ pub fn UploadQueue() -> Element {
         });
     };
 
-    let drop_border = if *is_dragging.read() && has_context { "2px dashed #3b82f6" } else { "2px dashed transparent" };
+    let drop_border = if *is_dragging.read() && has_context { "2px dashed var(--border-focus)" } else { "2px dashed transparent" };
 
     // Split tasks into sections
     let staged: Vec<_> = tasks.iter().filter(|t| t.state == UploadState::Staged).cloned().collect();
@@ -186,7 +186,7 @@ pub fn UploadQueue() -> Element {
 
             if !has_context {
                 div {
-                    style: "text-align: center; padding: 48px 16px; color: #9ca3af; font-size: 14px;",
+                    style: "text-align: center; padding: 48px 16px; color: var(--text-muted); font-size: 14px;",
                     "Select an organization and project to start uploading"
                 }
             } else {
@@ -233,7 +233,7 @@ pub fn UploadQueue() -> Element {
                 // Empty state
                 if staged.is_empty() && active.is_empty() && history.is_empty() {
                     div {
-                        style: "text-align: center; padding: 48px 16px; color: #9ca3af;",
+                        style: "text-align: center; padding: 48px 16px; color: var(--text-muted);",
                         p { style: "font-size: 14px; margin: 0 0 4px;", "No files in queue" }
                         p { style: "font-size: 13px; margin: 0;", "Drop files here or click \"Add Files\"" }
                     }
@@ -248,9 +248,9 @@ fn SectionHeader(title: String, count: usize) -> Element {
     rsx! {
         div {
             style: "display: flex; align-items: center; gap: 8px; margin-bottom: 8px;",
-            span { style: "font-size: 13px; font-weight: 600; color: #374151;", "{title}" }
+            span { style: "font-size: 13px; font-weight: 600; color: var(--text);", "{title}" }
             span {
-                style: "font-size: 11px; color: #6b7280; background: #f3f4f6; padding: 2px 8px; border-radius: 10px;",
+                style: "font-size: 11px; color: var(--text-secondary); background: var(--bg-tertiary); padding: 2px 8px; border-radius: 10px;",
                 "{count}"
             }
         }
@@ -263,11 +263,11 @@ fn StagedRow(task: UploadTask, on_remove: EventHandler<String>) -> Element {
     rsx! {
         div {
             class: "staged-row fade-in",
-            style: "display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border: 1px solid #fde68a; border-radius: 6px; background: #fefce8; transition: background 0.15s, border-color 0.15s;",
+            style: "display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg); transition: background 0.15s, border-color 0.15s;",
             div {
                 style: "flex: 1; min-width: 0;",
                 div { style: "font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;", "{task.filename}" }
-                div { style: "font-size: 12px; color: #9ca3af; margin-top: 2px;", "{format_size(task.size)}" }
+                div { style: "font-size: 12px; color: var(--text-muted); margin-top: 2px;", "{format_size(task.size)}" }
             }
             button {
                 class: "btn-danger-sm",
@@ -288,17 +288,17 @@ fn UploadTaskRow(task: UploadTask) -> Element {
     };
 
     let (status_color, status_bg) = match task.state {
-        UploadState::Completed => ("#22c55e", "#f0fdf4"),
-        UploadState::Failed => ("#ef4444", "#fef2f2"),
-        UploadState::Uploading => ("#3b82f6", "#eff6ff"),
-        UploadState::Paused => ("#f59e0b", "#fffbeb"),
-        _ => ("#6b7280", "#f9fafb"),
+        UploadState::Completed => ("var(--success)", "var(--success-bg)"),
+        UploadState::Failed => ("var(--error)", "var(--error-bg)"),
+        UploadState::Uploading => ("var(--info)", "var(--info-bg)"),
+        UploadState::Paused => ("var(--warning)", "var(--warning-bg)"),
+        _ => ("var(--text-muted)", "var(--bg-secondary)"),
     };
 
     rsx! {
         div {
             class: "card-row",
-            style: "padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: {status_bg}; transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;",
+            style: "padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: {status_bg}; transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;",
 
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
@@ -316,33 +316,33 @@ fn UploadTaskRow(task: UploadTask) -> Element {
             }
 
             div {
-                style: "font-size: 12px; color: #9ca3af; margin-top: 2px;",
+                style: "font-size: 12px; color: var(--text-muted); margin-top: 2px;",
                 "{format_size(task.size)}"
             }
 
             if task.state == UploadState::Uploading {
                 div {
-                    style: "margin-top: 6px; height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden;",
+                    style: "margin-top: 6px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden;",
                     div {
-                        style: "height: 100%; width: {progress}%; background: #3b82f6; transition: width 0.3s ease;",
+                        style: "height: 100%; width: {progress}%; background: var(--info); transition: width 0.3s ease;",
                     }
                 }
                 div {
-                    style: "font-size: 11px; color: #9ca3af; margin-top: 2px;",
+                    style: "font-size: 11px; color: var(--text-muted); margin-top: 2px;",
                     "{progress}% — {format_size(task.bytes_uploaded)} / {format_size(task.size)}"
                 }
             }
 
             if let Some(ref err) = task.error_message {
                 div {
-                    style: "font-size: 12px; color: #ef4444; margin-top: 4px; padding: 6px 8px; background: #fef2f2; border-radius: 4px;",
+                    style: "font-size: 12px; color: var(--error); margin-top: 4px; padding: 6px 8px; background: var(--error-bg); border-radius: 4px;",
                     "{err}"
                 }
             }
 
             for warning in task.validation_warnings.iter() {
                 div {
-                    style: "font-size: 12px; color: #92400e; margin-top: 2px; padding: 4px 8px; background: #fffbeb; border-radius: 4px;",
+                    style: "font-size: 12px; color: var(--warning); margin-top: 2px; padding: 4px 8px; background: var(--warning-bg); border-radius: 4px;",
                     "{warning}"
                 }
             }

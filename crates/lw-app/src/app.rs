@@ -6,39 +6,134 @@ use dioxus::prelude::*;
 
 /// Global CSS for hover/active states (can't do :hover in inline styles)
 const GLOBAL_CSS: &str = r#"
+/* ── CSS Variables: Light theme (default) ─────────────────────────── */
+:root {
+  --bg: #ffffff;
+  --bg-secondary: #f9fafb;
+  --bg-tertiary: #f3f4f6;
+  --text: #111827;
+  --text-secondary: #6b7280;
+  --text-muted: #9ca3af;
+  --border: #e5e7eb;
+  --border-hover: #d1d5db;
+  --border-focus: #2563eb;
+
+  /* Status colors */
+  --success: #22c55e;
+  --success-bg: #f0fdf4;
+  --error: #ef4444;
+  --error-bg: #fef2f2;
+  --warning: #f59e0b;
+  --warning-bg: #fffbeb;
+  --info: #3b82f6;
+  --info-bg: #eff6ff;
+  --staged-bg: #fefce8;
+  --staged-border: #fde68a;
+  --staged-hover: #fef9c3;
+
+  /* Button */
+  --btn-primary: #2563eb;
+  --btn-primary-hover: #1d4ed8;
+  --btn-primary-active: #1e40af;
+  --btn-success: #22c55e;
+  --btn-success-hover: #16a34a;
+  --btn-success-active: #15803d;
+  --btn-outline-bg: white;
+  --btn-outline-hover: #f9fafb;
+  --btn-outline-active: #f3f4f6;
+  --btn-disabled: #e5e7eb;
+  --btn-disabled-text: #9ca3af;
+  --btn-danger-hover: #fef2f2;
+  --btn-danger-active: #fee2e2;
+
+  /* Input/Select */
+  --input-bg: white;
+  --input-border: #d1d5db;
+
+  --scrollbar-thumb: #d1d5db;
+  --scrollbar-hover: #9ca3af;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-md: 0 1px 3px rgba(0,0,0,0.15);
+  --focus-ring: 0 0 0 2px rgba(37,99,235,0.15);
+}
+
+/* ── Dark theme ───────────────────────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1a2e;
+    --bg-secondary: #16213e;
+    --bg-tertiary: #1e293b;
+    --text: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --border: #334155;
+    --border-hover: #475569;
+    --border-focus: #3b82f6;
+
+    --success-bg: #052e16;
+    --error-bg: #450a0a;
+    --warning-bg: #451a03;
+    --info-bg: #172554;
+    --staged-bg: #422006;
+    --staged-border: #854d0e;
+    --staged-hover: #4a2506;
+
+    --btn-outline-bg: #1e293b;
+    --btn-outline-hover: #334155;
+    --btn-outline-active: #475569;
+    --btn-disabled: #334155;
+    --btn-disabled-text: #64748b;
+    --btn-danger-hover: #450a0a;
+    --btn-danger-active: #7f1d1d;
+
+    --input-bg: #1e293b;
+    --input-border: #475569;
+
+    --scrollbar-thumb: #475569;
+    --scrollbar-hover: #64748b;
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
+    --shadow-md: 0 1px 3px rgba(0,0,0,0.4);
+    --focus-ring: 0 0 0 2px rgba(59,130,246,0.25);
+  }
+}
+
+/* ── Base ─────────────────────────────────────────────────────────── */
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; font-size: 14px; color: #111827; background: #ffffff; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+}
 
-/* Button hover/active animations */
-.btn-primary:hover { background: #1d4ed8 !important; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
-.btn-primary:active { background: #1e40af !important; transform: scale(0.97); }
-.btn-success:hover { background: #16a34a !important; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
-.btn-success:active { background: #15803d !important; transform: scale(0.97); }
-.btn-outline:hover { background: #f9fafb !important; border-color: #9ca3af !important; }
-.btn-outline:active { background: #f3f4f6 !important; transform: scale(0.97); }
-.btn-danger-sm:hover { background: #fef2f2 !important; border-color: #ef4444 !important; }
-.btn-danger-sm:active { background: #fee2e2 !important; transform: scale(0.97); }
+/* ── Button hover/active ─────────────────────────────────────────── */
+.btn-primary:hover { background: var(--btn-primary-hover) !important; box-shadow: var(--shadow-md); }
+.btn-primary:active { background: var(--btn-primary-active) !important; transform: scale(0.97); }
+.btn-success:hover { background: var(--btn-success-hover) !important; box-shadow: var(--shadow-md); }
+.btn-success:active { background: var(--btn-success-active) !important; transform: scale(0.97); }
+.btn-outline:hover { background: var(--btn-outline-hover) !important; border-color: var(--border-hover) !important; }
+.btn-outline:active { background: var(--btn-outline-active) !important; transform: scale(0.97); }
+.btn-danger-sm:hover { background: var(--btn-danger-hover) !important; border-color: var(--error) !important; }
+.btn-danger-sm:active { background: var(--btn-danger-active) !important; transform: scale(0.97); }
 
-/* Select hover */
-select:hover { border-color: #9ca3af; }
-select:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.15); outline: none; }
+/* ── Form controls ───────────────────────────────────────────────── */
+select { background: var(--input-bg); color: var(--text); border-color: var(--input-border); }
+select:hover { border-color: var(--border-hover); }
+select:focus { border-color: var(--border-focus); box-shadow: var(--focus-ring); outline: none; }
+input { background: var(--input-bg) !important; color: var(--text) !important; border-color: var(--input-border) !important; }
+input:focus { border-color: var(--border-focus) !important; box-shadow: var(--focus-ring) !important; outline: none; }
 
-/* Input focus */
-input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 2px rgba(37,99,235,0.15) !important; outline: none; }
+/* ── Card / row hover ────────────────────────────────────────────── */
+.card-row:hover { border-color: var(--border-hover) !important; box-shadow: var(--shadow-sm); }
+.staged-row:hover { background: var(--staged-hover) !important; }
 
-/* Card row hover */
-.card-row:hover { border-color: #d1d5db !important; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
-
-/* Staged row hover */
-.staged-row:hover { background: #fef9c3 !important; }
-
-/* Scrollbar styling */
+/* ── Scrollbar ───────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
-/* Smooth transitions for state changes */
+/* ── Animations ──────────────────────────────────────────────────── */
 .fade-in { animation: fadeIn 0.2s ease-in; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 "#;

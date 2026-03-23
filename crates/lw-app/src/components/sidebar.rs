@@ -14,11 +14,11 @@ pub fn Sidebar() -> Element {
 
     rsx! {
         aside {
-            style: "width: {styles::SIDEBAR_WIDTH}px; height: 100vh; display: flex; flex-direction: column; border-right: 1px solid #e5e7eb; background: #f9fafb; flex-shrink: 0;",
+            style: "width: {styles::SIDEBAR_WIDTH}px; height: 100vh; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--bg-secondary); flex-shrink: 0;",
 
             // App title
             div {
-                style: "height: {styles::TOPBAR_HEIGHT}px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid #e5e7eb;",
+                style: "height: {styles::TOPBAR_HEIGHT}px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border);",
                 h1 { style: "font-size: 15px; font-weight: 600;", "Linewise" }
             }
 
@@ -26,10 +26,10 @@ pub fn Sidebar() -> Element {
             div {
                 style: "padding: 12px; display: flex; flex-direction: column; gap: 8px;",
 
-                label { style: "font-size: 11px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;", "Organization" }
+                label { style: "font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;", "Organization" }
                 crate::components::tenant_select::TenantSelector {}
 
-                label { style: "font-size: 11px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px;", "Project" }
+                label { style: "font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px;", "Project" }
                 crate::components::project_select::ProjectSelector {}
             }
 
@@ -38,9 +38,9 @@ pub fn Sidebar() -> Element {
 
             // User info & sign out at bottom
             div {
-                style: "padding: 12px; border-top: 1px solid #e5e7eb;",
+                style: "padding: 12px; border-top: 1px solid var(--border);",
                 div {
-                    style: "font-size: 12px; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 8px;",
+                    style: "font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 8px;",
                     "{user_email}"
                 }
                 SignOutButton {}
