@@ -98,12 +98,85 @@ pub async fn upload_file_chunked(
         let mut buf = vec![0u8; this_chunk];
         file.read_exact(&mut buf).await?;
 
-        let confirmed = backend.upload_chunk(session, &buf, offset).await?;
+        let confirmed = upload_chunk_with_retry(backend, session, &buf, offset).await?;
         offset = confirmed;
         on_progress(offset, total);
     }
 
     Ok(offset)
+}
+
+/// Upload a single chunk with automatic retry on network errors.
+/// Uses exponential backoff: 1s → 2s → 4s → 8s → 16s (max 5 retries).
+/// Only retries on network/timeout errors, not on 4xx API errors.
+async fn upload_chunk_with_retry(
+    backend: &StorageBackend,
+    session: &UploadSession,
+    data: &[u8],
+    offset: u64,
+) -> Result<u64, UploadError> {
+    const MAX_RETRIES: u32 = 5;
+    const INITIAL_DELAY_MS: u64 = 1000;
+
+    let mut attempt = 0;
+    loop {
+        match backend.upload_chunk(session, data, offset).await {
+            Ok(confirmed) => return Ok(confirmed),
+            Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
+                attempt += 1;
+                let delay = INITIAL_DELAY_MS * 2u64.pow(attempt - 1);
+                tracing::warn!(
+                    "Chunk upload failed (attempt {attempt}/{MAX_RETRIES}), retrying in {delay}ms: {e}"
+                );
+                // Wait for network recovery — poll connectivity before sleeping
+                wait_for_network(delay).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Check if an error is retryable (network/timeout, not auth/client errors)
+fn is_retryable(err: &UploadError) -> bool {
+    match err {
+        UploadError::Network(_) => true,
+        UploadError::Api { status, .. } => {
+            // Retry on 5xx server errors and 429 rate limit
+            *status >= 500 || *status == 429 || *status == 408
+        }
+        UploadError::GcsUpload { .. } => true,
+        _ => false,
+    }
+}
+
+/// Wait for network recovery with exponential backoff.
+/// Checks connectivity by attempting a lightweight request.
+async fn wait_for_network(max_wait_ms: u64) {
+    let check_interval = std::time::Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(max_wait_ms);
+
+    // First, sleep the backoff duration
+    tokio::time::sleep(std::time::Duration::from_millis(max_wait_ms)).await;
+
+    // Then poll for connectivity if still before a reasonable deadline
+    let extended_deadline = deadline + std::time::Duration::from_secs(120);
+    loop {
+        if tokio::time::Instant::now() > extended_deadline {
+            break; // Give up waiting, let the retry logic handle it
+        }
+        match reqwest::Client::new()
+            .head("https://storage.googleapis.com")
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(_) => break, // Network is back
+            Err(_) => {
+                tracing::debug!("Waiting for network recovery...");
+                tokio::time::sleep(check_interval).await;
+            }
+        }
+    }
 }
 
 // ── GCS Backend ────────────────────────────────────────────────────────

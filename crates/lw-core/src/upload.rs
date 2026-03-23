@@ -427,6 +427,71 @@ impl UploadEngine {
         Ok(())
     }
 
+    /// Spawn a background task that auto-retries failed uploads when network recovers.
+    /// Checks every 30 seconds for failed tasks with "Network error" and retries them.
+    pub fn spawn_auto_retry(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let engine = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+
+                // Check if network is available
+                let online = reqwest::Client::new()
+                    .head("https://storage.googleapis.com")
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await
+                    .is_ok();
+
+                if !online {
+                    continue;
+                }
+
+                // Find failed tasks that are retryable (network errors)
+                let failed = match engine.db.get_failed_retryable().await {
+                    Ok(tasks) => tasks,
+                    Err(_) => continue,
+                };
+
+                if failed.is_empty() {
+                    continue;
+                }
+
+                tracing::info!("Auto-retrying {} failed uploads after network recovery", failed.len());
+
+                for task in failed {
+                    let eng = Arc::clone(&engine);
+                    let sem = Arc::clone(&engine.upload_semaphore);
+                    tokio::spawn(Self::retry_task(eng, sem, task));
+                }
+            }
+        })
+    }
+
+    async fn retry_task(eng: Arc<Self>, sem: Arc<Semaphore>, mut task: UploadTask) {
+        let _permit = sem.acquire().await.expect("semaphore closed");
+        let _ = eng.db.update_upload_state(&task.id, UploadState::Pending, None).await;
+        let _ = eng.event_tx.send(UploadEvent::StateChanged {
+            task_id: task.id.clone(),
+            state: UploadState::Pending,
+        });
+        task.state = UploadState::Pending;
+        match eng.process_task(&mut task).await {
+            Ok(()) => tracing::info!("Auto-retry succeeded: {}", task.filename),
+            Err(e) => {
+                tracing::warn!("Auto-retry failed for {}: {e}", task.filename);
+                let _ = eng.db.update_upload_state(
+                    &task.id, UploadState::Failed, Some(&e.to_string()),
+                ).await;
+                let _ = eng.event_tx.send(UploadEvent::Failed {
+                    task_id: task.id,
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
+
     async fn update_state(&self, task: &mut UploadTask, state: UploadState) {
         let _ = self.event_tx.send(UploadEvent::StateChanged {
             task_id: task.id.clone(),

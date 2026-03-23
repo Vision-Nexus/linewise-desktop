@@ -215,6 +215,29 @@ impl Database {
         Ok(result.rows_affected())
     }
 
+    /// Get failed uploads that are retryable (network errors, server errors, interrupted).
+    pub async fn get_failed_retryable(&self) -> Result<Vec<UploadTask>, DbError> {
+        let rows = sqlx::query_as!(
+            UploadRow,
+            "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
+                    document_id, session_id, bytes_uploaded, state, error_message,
+                    hash, validation_warnings, retry_count
+             FROM upload_queue
+             WHERE state = 'FAILED'
+               AND retry_count < 10
+               AND (error_message LIKE '%Network%'
+                    OR error_message LIKE '%timeout%'
+                    OR error_message LIKE '%no healthy upstream%'
+                    OR error_message LIKE '%Interrupted%'
+                    OR error_message LIKE '%error sending request%')
+             ORDER BY created_at ASC
+             LIMIT 20",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(UploadTask::from).collect())
+    }
+
     pub async fn get_staged_uploads(&self) -> Result<Vec<UploadTask>, DbError> {
         let rows = sqlx::query_as!(
             UploadRow,

@@ -49,6 +49,9 @@ impl CoreServices {
             config.upload.max_concurrent_uploads,
         ));
 
+        // Spawn background auto-retry for failed uploads on network recovery
+        upload_engine.spawn_auto_retry();
+
         Ok(Self {
             auth,
             api,
