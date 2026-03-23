@@ -18,6 +18,13 @@ pub fn UploadQueue() -> Element {
         let db = db_for_load.clone();
         let mut app_state = app_state_load.clone();
         async move {
+            // Reset stale in-progress uploads to FAILED
+            match db.reset_stale_uploads().await {
+                Ok(n) if n > 0 => tracing::info!("Reset {n} stale uploads to FAILED"),
+                Err(e) => tracing::warn!("Failed to reset stale uploads: {e}"),
+                _ => {}
+            }
+            // Load history
             match db.get_all_uploads().await {
                 Ok(tasks) if !tasks.is_empty() => {
                     tracing::info!("Loaded {} upload tasks from history", tasks.len());

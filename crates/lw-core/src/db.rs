@@ -154,6 +154,18 @@ impl Database {
         Ok(())
     }
 
+    /// Reset any in-progress uploads to FAILED on startup.
+    /// These were interrupted by app exit and can't be resumed without re-initiating.
+    pub async fn reset_stale_uploads(&self) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "UPDATE upload_queue SET state = 'FAILED', error_message = 'Interrupted by app restart', updated_at = datetime('now')
+             WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'PENDING')",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn get_staged_uploads(&self) -> Result<Vec<UploadTask>, DbError> {
         let rows = sqlx::query(
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
