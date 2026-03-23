@@ -41,5 +41,6 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 backon = "1"
 url = "2"
 
-# Dioxus
+# UI
 dioxus = { version = "0.6", features = ["desktop"] }
+rfd = "0.15"

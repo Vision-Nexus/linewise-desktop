@@ -37,7 +37,7 @@ impl Environment {
 }
 
 fn default_environment() -> Environment {
-    Environment::Production
+    Environment::Dev
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,7 +126,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             server: ServerConfig {
-                environment: Environment::Production,
+                environment: Environment::Dev,
             },
             upload: UploadConfig {
                 auto_clean: true,

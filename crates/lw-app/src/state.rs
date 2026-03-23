@@ -1,5 +1,53 @@
 use dioxus::prelude::*;
+use lw_core::api_client::ApiClient;
+use lw_core::auth::AuthService;
+use lw_core::config::AppConfig;
+use lw_core::db::Database;
 use lw_core::models::{Project, Tenant, UploadTask, UserInfo};
+use lw_core::upload::{UploadEngine, UploadEvent};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+const FIREBASE_API_KEY: &str = "AIzaSyDqUP3c44v-S22hyPJdjSTCNAFai_-3914";
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct CoreServices {
+    pub auth: Arc<AuthService>,
+    pub api: Arc<ApiClient>,
+    pub db: Arc<Database>,
+    pub upload_engine: Arc<UploadEngine>,
+    pub config: AppConfig,
+    pub event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<UploadEvent>>>,
+}
+
+impl CoreServices {
+    pub fn init() -> Result<Self, String> {
+        let config = AppConfig::load().map_err(|e| format!("Config error: {e}"))?;
+        let db = Database::open().map_err(|e| format!("Database error: {e}"))?;
+        let db = Arc::new(db);
+
+        let auth = Arc::new(AuthService::new(FIREBASE_API_KEY.to_string()));
+        let api = Arc::new(ApiClient::new(config.server.environment, Arc::clone(&auth)));
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let upload_engine = Arc::new(UploadEngine::new(
+            Arc::clone(&db),
+            Arc::clone(&api),
+            event_tx,
+            config.upload.auto_clean,
+        ));
+
+        Ok(Self {
+            auth,
+            api,
+            db,
+            upload_engine,
+            config,
+            event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
+        })
+    }
+}
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -9,6 +57,7 @@ pub struct AppState {
     pub selected_tenant: Signal<Option<Tenant>>,
     pub selected_project: Signal<Option<Project>>,
     pub upload_tasks: Signal<Vec<UploadTask>>,
+    pub projects: Signal<Vec<Project>>,
     pub is_loading: Signal<bool>,
     pub error_message: Signal<Option<String>>,
 }
@@ -21,6 +70,7 @@ impl AppState {
             selected_tenant: Signal::new(None),
             selected_project: Signal::new(None),
             upload_tasks: Signal::new(Vec::new()),
+            projects: Signal::new(Vec::new()),
             is_loading: Signal::new(false),
             error_message: Signal::new(None),
         }

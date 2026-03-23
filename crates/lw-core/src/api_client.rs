@@ -2,7 +2,7 @@ use crate::auth::AuthService;
 use crate::config::Environment;
 use crate::error::UploadError;
 use crate::models::{
-    CreateDocumentRequest, Project, ReferenceDocument, SignedUploadUrl, UserInfo,
+    CreateDocumentRequest, Project, ReferenceDocument, SignedUploadUrl, WhoAmIResponse,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use std::sync::Arc;
@@ -41,7 +41,7 @@ impl ApiClient {
     }
 
     /// GET /api/users/whoami — get current user info and tenant list
-    pub async fn whoami(&self) -> Result<UserInfo, UploadError> {
+    pub async fn whoami(&self) -> Result<WhoAmIResponse, UploadError> {
         let headers = self.auth_headers().await?;
         let resp = self
             .client

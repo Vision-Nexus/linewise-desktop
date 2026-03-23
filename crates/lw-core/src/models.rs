@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-/// Mirrors backend Tenant type
+/// Mirrors backend TenantInfo (from UserModels.scala)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tenant {
     pub id: String,
     pub name: String,
+    pub display_name: String,
 }
 
 /// Mirrors backend Project type
@@ -72,14 +73,57 @@ pub struct AuthTokens {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Current authenticated user info
+/// WhoAmI response from backend (UserRouteHelpers.scala)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WhoAmIResponse {
+    pub firebase: FirebaseUserInfo,
+    pub user: Option<WhoAmIUser>,
+}
+
+/// Firebase user from WhoAmI (subset of FirebaseUser fields we need)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirebaseUserInfo {
+    pub uid: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub is_email_verified: bool,
+}
+
+/// User from WhoAmI response (from UserModels.scala)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhoAmIUser {
+    pub id: String,
+    pub email: String,
+    pub tenant: String,
+    #[serde(default)]
+    pub tenants: Vec<String>,
+    pub tenant_infos: Option<Vec<Tenant>>,
+}
+
+/// Convenience type used in app state
+#[derive(Debug, Clone)]
 pub struct UserInfo {
     pub uid: String,
     pub email: String,
     pub display_name: Option<String>,
     pub tenants: Vec<Tenant>,
+}
+
+impl UserInfo {
+    pub fn from_whoami(resp: WhoAmIResponse) -> Option<Self> {
+        let user = resp.user?;
+        let tenants = user.tenant_infos.unwrap_or_default();
+        Some(Self {
+            uid: resp.firebase.uid,
+            email: user.email,
+            display_name: resp.firebase.name,
+            tenants,
+        })
+    }
 }
 
 /// Upload task state persisted in SQLite
