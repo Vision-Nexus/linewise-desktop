@@ -154,6 +154,21 @@ impl Database {
         Ok(())
     }
 
+    pub async fn get_staged_uploads(&self) -> Result<Vec<UploadTask>, DbError> {
+        let rows = sqlx::query(
+            "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
+                    document_id, session_id, bytes_uploaded, state, error_message,
+                    hash, validation_warnings, retry_count
+             FROM upload_queue
+             WHERE state = 'STAGED'
+             ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(row_to_task).collect())
+    }
+
     pub async fn get_pending_uploads(&self) -> Result<Vec<UploadTask>, DbError> {
         let rows = sqlx::query(
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,

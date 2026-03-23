@@ -72,8 +72,9 @@ impl UploadEngine {
         }
     }
 
-    /// Queue a file for upload
-    pub async fn queue_file(
+    /// Stage a file for review (step 1 of two-step upload).
+    /// File is added to the list but NOT uploaded yet.
+    pub async fn stage_file(
         &self,
         path: &Path,
         tenant_id: &str,
@@ -104,7 +105,7 @@ impl UploadEngine {
             document_id: None,
             session_id: None,
             bytes_uploaded: 0,
-            state: UploadState::Pending,
+            state: UploadState::Staged,
             error_message: None,
             hash: None,
             validation_warnings: Vec::new(),
@@ -115,6 +116,47 @@ impl UploadEngine {
         let _ = self.event_tx.send(UploadEvent::TaskAdded(Box::new(task.clone())));
 
         Ok(task)
+    }
+
+    /// Confirm staged files for upload (step 2 of two-step upload).
+    /// Moves all STAGED tasks to PENDING and starts processing.
+    pub async fn confirm_staged(self: &Arc<Self>) -> Result<Vec<String>, DbError> {
+        let staged = self.db.get_staged_uploads().await?;
+        let mut confirmed_ids = Vec::new();
+
+        for mut task in staged {
+            self.db
+                .update_upload_state(&task.id, UploadState::Pending, None)
+                .await?;
+            task.state = UploadState::Pending;
+            confirmed_ids.push(task.id.clone());
+
+            let engine = Arc::clone(self);
+            tokio::spawn(async move {
+                match engine.process_task(&mut task).await {
+                    Ok(()) => tracing::info!("Upload completed: {}", task.filename),
+                    Err(e) => {
+                        tracing::error!("Upload failed for {}: {e}", task.filename);
+                        let _ = engine
+                            .db
+                            .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                            .await;
+                        let _ = engine.event_tx.send(UploadEvent::Failed {
+                            task_id: task.id,
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            });
+        }
+
+        Ok(confirmed_ids)
+    }
+
+    /// Remove a staged file (before upload confirmation).
+    pub async fn remove_staged(&self, task_id: &str) -> Result<(), DbError> {
+        self.db.delete_upload_task(task_id).await?;
+        Ok(())
     }
 
     /// Process a single upload task through all stages

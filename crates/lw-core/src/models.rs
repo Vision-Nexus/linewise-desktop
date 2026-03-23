@@ -157,6 +157,7 @@ impl UserInfo {
 /// Upload task state persisted in SQLite
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadState {
+    Staged,
     Pending,
     Validating,
     Desensitizing,
@@ -171,6 +172,7 @@ pub enum UploadState {
 impl UploadState {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Staged => "STAGED",
             Self::Pending => "PENDING",
             Self::Validating => "VALIDATING",
             Self::Desensitizing => "DESENSITIZING",
@@ -185,6 +187,7 @@ impl UploadState {
 
     pub fn parse(s: &str) -> Self {
         match s {
+            "STAGED" => Self::Staged,
             "PENDING" => Self::Pending,
             "VALIDATING" => Self::Validating,
             "DESENSITIZING" => Self::Desensitizing,
@@ -197,10 +200,22 @@ impl UploadState {
             _ => Self::Pending,
         }
     }
+
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Self::Pending
+                | Self::Validating
+                | Self::Desensitizing
+                | Self::Creating
+                | Self::Uploading
+                | Self::Verifying
+        )
+    }
 }
 
 /// Upload task record
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UploadTask {
     pub id: String,
     pub local_path: String,

@@ -11,7 +11,7 @@ Cross-platform desktop client for Linewise — handles data desensitization, res
 - Upload flow must match the web frontend protocol: create doc → get signed URL → PUT to GCS → verify
 - All state passed explicitly through function parameters — **no `thread_local!` or `std::thread_local`**
 - **Local `let mut` is permitted.** Prefer immutable bindings, but `let mut` inside a function body is fine for loop control and local accumulation. Mutable state must never escape the function — don't return `&mut`, don't store in struct fields, don't pass as `&mut` to other functions. If mutation needs to be shared, use explicit shared-ownership types (`Arc<RwLock<T>>`, Dioxus `Signal`).
-- **Database: always use `sqlx` (with SQLite) over `rusqlite`.** sqlx provides async access, compile-time query checking, and migration tooling. Use `sqlx::sqlite::SqlitePool` for connection pooling.
+- **Database: always use `sqlx` (with SQLite) over `rusqlite`.** sqlx provides async access, compile-time query checking, and migration tooling. Use `sqlx::sqlite::SqlitePool` for connection pooling. **Always use `sqlx::query!` macro** (compile-time checked) instead of `sqlx::query()` function (runtime string). This catches SQL errors at compile time.
 - Allowed external crates: see `Cargo.toml` workspace dependencies. Do NOT add new crates without justification.
 
 ## Build & Test
