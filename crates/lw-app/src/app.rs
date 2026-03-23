@@ -1,7 +1,6 @@
 use crate::components::login::LoginPage;
 use crate::components::upload_queue::UploadQueue;
 use crate::state::{AppState, CoreServices};
-use crate::styles;
 use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
 use dioxus::prelude::*;
 
@@ -128,55 +127,12 @@ async fn fetch_user_info(api: &lw_core::api_client::ApiClient, app_state: &mut A
 
 #[component]
 fn MainView() -> Element {
-    let app_state = use_context::<AppState>();
-    let services = use_context::<CoreServices>();
-
-    let app_state_signout = app_state.clone();
-    let on_sign_out = move |_| {
-        let auth = services.auth.clone();
-        let mut app_state = app_state_signout.clone();
-        spawn(async move {
-            auth.sign_out().await;
-            app_state.is_authenticated.set(false);
-            app_state.user_info.set(None);
-            app_state.selected_tenant.set(None);
-            app_state.selected_project.set(None);
-            app_state.projects.set(Vec::new());
-            app_state.upload_tasks.set(Vec::new());
-        });
-    };
-
-    let user_email = app_state
-        .user_info
-        .read()
-        .as_ref()
-        .map(|u| u.email.clone())
-        .unwrap_or_default();
-
     rsx! {
         div {
-            style: "display: flex; flex-direction: column; height: 100vh;",
+            style: "display: flex; height: 100vh;",
 
-            // Fixed-height topbar
-            header {
-                style: "display: flex; align-items: center; justify-content: space-between; height: {styles::TOPBAR_HEIGHT}px; padding: 0 16px; border-bottom: 1px solid #e5e7eb; background: #f9fafb; flex-shrink: 0;",
-                div {
-                    style: "display: flex; align-items: center; gap: 12px;",
-                    h1 { style: "font-size: 16px; font-weight: 600;", "Linewise Desktop" }
-                    span { style: "font-size: 12px; color: #6b7280;", "{user_email}" }
-                }
-                div {
-                    style: "display: flex; align-items: center; gap: 8px;",
-                    crate::components::tenant_select::TenantSelector {}
-                    crate::components::project_select::ProjectSelector {}
-                    button {
-                        class: "btn-outline",
-                        style: "{styles::BTN_OUTLINE}",
-                        onclick: on_sign_out,
-                        "Sign Out"
-                    }
-                }
-            }
+            // Fixed-width sidebar with tenant/project selectors
+            crate::components::sidebar::Sidebar {}
 
             // Flexible main content
             main {

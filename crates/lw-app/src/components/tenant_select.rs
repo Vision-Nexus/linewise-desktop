@@ -22,7 +22,7 @@ pub fn TenantSelector() -> Element {
 
     rsx! {
         select {
-            style: "{styles::SELECT}",
+            style: "{styles::SELECT} width: 100%;",
             value: "{selected_id}",
             onchange: move |evt| {
                 let id = evt.value();

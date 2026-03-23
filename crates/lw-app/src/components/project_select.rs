@@ -16,7 +16,7 @@ pub fn ProjectSelector() -> Element {
 
     rsx! {
         select {
-            style: "{styles::SELECT}",
+            style: "{styles::SELECT} width: 100%;",
             value: "{selected_id}",
             disabled: projects.is_empty(),
             onchange: move |evt| {
