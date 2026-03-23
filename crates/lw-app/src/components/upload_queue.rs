@@ -1,4 +1,5 @@
 use crate::state::{AppState, CoreServices};
+use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload::UploadEvent;
@@ -30,9 +31,12 @@ pub fn UploadQueue() -> Element {
     let has_context = app_state.selected_tenant.read().is_some()
         && app_state.selected_project.read().is_some();
 
+    let engine_for_add = services.upload_engine.clone();
+    let engine_for_drop = services.upload_engine.clone();
+
     let app_state_upload = app_state.clone();
     let on_add_files = move |_| {
-        let engine = services.upload_engine.clone();
+        let engine = engine_for_add.clone();
         let tenant_id = app_state_upload
             .selected_tenant
             .read()
@@ -74,9 +78,68 @@ pub fn UploadQueue() -> Element {
         });
     };
 
+    let mut is_dragging = use_signal(|| false);
+
+    // Handle file drop
+    let app_state_drop = app_state.clone();
+    let on_drop = move |evt: DragEvent| {
+        is_dragging.set(false);
+        if !has_context {
+            return;
+        }
+        let engine = engine_for_drop.clone();
+        let tenant_id = app_state_drop
+            .selected_tenant
+            .read()
+            .as_ref()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let project_id = app_state_drop
+            .selected_project
+            .read()
+            .as_ref()
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
+
+        let files = evt.files();
+        spawn(async move {
+            for file in files {
+                let path = file.path();
+                if path.as_os_str().is_empty() {
+                    continue;
+                }
+                match engine.queue_file(&path, &tenant_id, &project_id).await {
+                    Ok(task) => {
+                        tracing::info!("Queued (drop): {}", task.filename);
+                        let eng = engine.clone();
+                        let mut task = task;
+                        tokio::spawn(async move {
+                            if let Err(e) = eng.process_task(&mut task).await {
+                                tracing::error!("Upload failed for {}: {e}", task.filename);
+                            }
+                        });
+                    }
+                    Err(e) => tracing::error!("Failed to queue dropped file: {e}"),
+                }
+            }
+        });
+    };
+
+    let drop_border = if *is_dragging.read() && has_context {
+        "2px dashed #3b82f6"
+    } else {
+        "2px dashed transparent"
+    };
+
     rsx! {
         div {
-            style: "padding: 16px;",
+            style: "padding: 16px; border: {drop_border}; border-radius: 8px; min-height: 200px; transition: border 0.2s;",
+            ondragover: move |evt| {
+                evt.prevent_default();
+                is_dragging.set(true);
+            },
+            ondragleave: move |_| is_dragging.set(false),
+            ondrop: on_drop,
 
             {
                 let btn_bg = if has_context { "#2563eb" } else { "#9ca3af" };
@@ -104,7 +167,7 @@ pub fn UploadQueue() -> Element {
                 div {
                     style: "text-align: center; padding: 48px; color: #9ca3af;",
                     p { style: "font-size: 14px;", "No files in queue" }
-                    p { style: "font-size: 13px;", "Click \"Add Files\" to start uploading" }
+                    p { style: "font-size: 13px;", "Drop files here or click \"Add Files\"" }
                 }
             } else {
                 div { style: "display: flex; flex-direction: column; gap: 8px;",
