@@ -113,6 +113,47 @@ pub fn UploadQueue() -> Element {
         });
     };
 
+    // Retry failed upload
+    let engine_for_retry = services.upload_engine.clone();
+    let db_for_retry = services.db.clone();
+    let mut app_state_retry = app_state.clone();
+    let on_retry = move |task_id: String| {
+        let engine = engine_for_retry.clone();
+        let db = db_for_retry.clone();
+        spawn(async move {
+            // Reset state to Pending, clear error
+            let _ = db
+                .update_upload_state(&task_id, lw_core::models::UploadState::Pending, None)
+                .await;
+            // Update UI
+            let mut tasks = app_state_retry.upload_tasks.write();
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = UploadState::Pending;
+                task.error_message = None;
+                let mut task = task.clone();
+                drop(tasks);
+                // Re-process
+                let eng = engine.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = eng.process_task(&mut task).await {
+                        tracing::error!("Retry failed for {}: {e}", task.filename);
+                    }
+                });
+            }
+        });
+    };
+
+    // Remove from history (delete from DB + UI)
+    let mut app_state_clear = app_state.clone();
+    let db_for_clear = services.db.clone();
+    let on_clear = move |task_id: String| {
+        let db = db_for_clear.clone();
+        spawn(async move {
+            let _ = db.delete_upload_task(&task_id).await;
+            app_state_clear.upload_tasks.write().retain(|t| t.id != task_id);
+        });
+    };
+
     // DnD
     let mut is_dragging = use_signal(|| false);
     let app_state_drop = app_state.clone();
@@ -212,6 +253,8 @@ pub fn UploadQueue() -> Element {
                             UploadTaskRow {
                                 key: "{task.id}",
                                 task: task.clone(),
+                                on_retry: on_retry.clone(),
+                                on_remove: on_clear.clone(),
                             }
                         }
                     }
@@ -225,6 +268,8 @@ pub fn UploadQueue() -> Element {
                             UploadTaskRow {
                                 key: "{task.id}",
                                 task: task.clone(),
+                                on_retry: on_retry.clone(),
+                                on_remove: on_clear.clone(),
                             }
                         }
                     }
@@ -280,7 +325,11 @@ fn StagedRow(task: UploadTask, on_remove: EventHandler<String>) -> Element {
 }
 
 #[component]
-fn UploadTaskRow(task: UploadTask) -> Element {
+fn UploadTaskRow(
+    task: UploadTask,
+    on_retry: EventHandler<String>,
+    on_remove: EventHandler<String>,
+) -> Element {
     let progress = if task.size > 0 {
         (task.bytes_uploaded as f64 / task.size as f64 * 100.0) as u32
     } else {
@@ -309,9 +358,42 @@ fn UploadTaskRow(task: UploadTask) -> Element {
                         "{task.filename}"
                     }
                 }
-                span {
-                    style: "font-size: 11px; color: {status_color}; font-weight: 600; text-transform: uppercase; margin-left: 12px; white-space: nowrap;",
-                    "{task.state.as_str()}"
+                div {
+                    style: "display: flex; align-items: center; gap: 6px; margin-left: 8px; flex-shrink: 0;",
+                    span {
+                        style: "font-size: 11px; color: {status_color}; font-weight: 600; text-transform: uppercase;",
+                        "{task.state.as_str()}"
+                    }
+                    // Action buttons based on state
+                    {
+                        let task_id = task.id.clone();
+                        let task_id2 = task.id.clone();
+                        match task.state {
+                            UploadState::Failed => rsx! {
+                                button {
+                                    class: "btn-primary",
+                                    style: "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; background: var(--btn-primary); color: white; border: none; cursor: pointer; transition: background 0.15s, transform 0.08s;",
+                                    onclick: move |_| on_retry.call(task_id.clone()),
+                                    "Retry"
+                                }
+                                button {
+                                    class: "btn-danger-sm",
+                                    style: "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; background: transparent; color: var(--error); border: 1px solid var(--error); cursor: pointer; transition: background 0.15s, transform 0.08s;",
+                                    onclick: move |_| on_remove.call(task_id2.clone()),
+                                    "Remove"
+                                }
+                            },
+                            UploadState::Completed => rsx! {
+                                button {
+                                    class: "btn-danger-sm",
+                                    style: "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; background: transparent; color: var(--text-muted); border: 1px solid var(--border); cursor: pointer; transition: background 0.15s, transform 0.08s;",
+                                    onclick: move |_| on_remove.call(task_id.clone()),
+                                    "Clear"
+                                }
+                            },
+                            _ => rsx! {}
+                        }
+                    }
                 }
             }
 
