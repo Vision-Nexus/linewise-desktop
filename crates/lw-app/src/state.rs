@@ -30,12 +30,20 @@ impl CoreServices {
         let auth = Arc::new(AuthService::new(FIREBASE_API_KEY.to_string()));
         let api = Arc::new(ApiClient::new(config.server.environment, Arc::clone(&auth)));
 
+        // Select storage backend based on config
+        // TODO: Add S3 backend selection when China deployment is configured
+        let storage = Arc::new(lw_core::storage::StorageBackend::Gcs(
+            lw_core::storage::GcsBackend::new(),
+        ));
+
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let upload_engine = Arc::new(UploadEngine::new(
             Arc::clone(&db),
             Arc::clone(&api),
+            storage,
             event_tx,
             config.upload.auto_clean,
+            config.upload.chunk_size_mb,
         ));
 
         Ok(Self {

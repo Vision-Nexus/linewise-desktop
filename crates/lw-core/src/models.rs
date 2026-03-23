@@ -182,7 +182,7 @@ pub struct UploadTask {
     pub tenant_id: String,
     pub project_id: String,
     pub document_id: Option<String>,
-    pub gcs_session_uri: Option<String>,
+    pub session_id: Option<String>,
     pub bytes_uploaded: u64,
     pub state: UploadState,
     pub error_message: Option<String>,

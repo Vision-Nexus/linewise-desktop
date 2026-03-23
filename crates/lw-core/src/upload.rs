@@ -2,9 +2,8 @@ use crate::api_client::ApiClient;
 use crate::db::Database;
 use crate::dedup;
 use crate::error::{DbError, UploadError};
-use crate::models::{
-    CreateDocumentMetadata, CreateDocumentRequest, UploadState, UploadTask,
-};
+use crate::models::{CreateDocumentMetadata, CreateDocumentRequest, UploadState, UploadTask};
+use crate::storage::{self, StorageBackend};
 use crate::video;
 use std::path::Path;
 use std::sync::Arc;
@@ -44,22 +43,28 @@ pub enum UploadEvent {
 pub struct UploadEngine {
     db: Arc<Database>,
     api: Arc<ApiClient>,
+    storage: Arc<StorageBackend>,
     event_tx: mpsc::UnboundedSender<UploadEvent>,
     auto_clean: bool,
+    chunk_size: u64,
 }
 
 impl UploadEngine {
     pub fn new(
         db: Arc<Database>,
         api: Arc<ApiClient>,
+        storage: Arc<StorageBackend>,
         event_tx: mpsc::UnboundedSender<UploadEvent>,
         auto_clean: bool,
+        chunk_size_mb: u32,
     ) -> Self {
         Self {
             db,
             api,
+            storage,
             event_tx,
             auto_clean,
+            chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
         }
     }
 
@@ -93,7 +98,7 @@ impl UploadEngine {
             tenant_id: tenant_id.to_string(),
             project_id: project_id.to_string(),
             document_id: None,
-            gcs_session_uri: None,
+            session_id: None,
             bytes_uploaded: 0,
             state: UploadState::Pending,
             error_message: None,
@@ -122,9 +127,7 @@ impl UploadEngine {
                 task_id: task.id.clone(),
                 existing_document_id: existing_id.clone(),
             });
-            return Err(UploadError::Duplicate {
-                existing_id,
-            });
+            return Err(UploadError::Duplicate { existing_id });
         }
 
         // Stage 2: Video validation (if video file)
@@ -167,28 +170,47 @@ impl UploadEngine {
         task.document_id = Some(doc.id.clone());
         self.db.update_upload_document_id(&task.id, &doc.id)?;
 
-        // Stage 4: Get signed upload URL
+        // Stage 4: Get signed upload URL + initiate resumable session
         let signed_url = self
             .api
             .get_upload_url(&task.tenant_id, &task.project_id, &doc.id)
             .await?;
 
-        // Stage 5: Upload file
-        self.update_state(task, UploadState::Uploading);
-        let data = tokio::fs::read(path).await?;
-        let total = data.len() as u64;
-
-        self.api
-            .upload_to_signed_url(&signed_url.url, data, &task.mime_type)
+        let session = self
+            .storage
+            .initiate_upload(&signed_url.url, &task.mime_type, task.size)
             .await?;
 
-        task.bytes_uploaded = total;
-        let _ = self.db.update_upload_progress(&task.id, total);
-        let _ = self.event_tx.send(UploadEvent::Progress {
-            task_id: task.id.clone(),
-            bytes_uploaded: total,
-            total_bytes: total,
+        task.session_id = Some(session.session_id.clone());
+        self.db
+            .update_upload_session_id(&task.id, &session.session_id)?;
+
+        // Stage 5: Chunked resumable upload
+        self.update_state(task, UploadState::Uploading);
+
+        let event_tx = self.event_tx.clone();
+        let task_id = task.id.clone();
+        let db = self.db.clone();
+        let on_progress: storage::ProgressFn = Box::new(move |uploaded, total| {
+            let _ = db.update_upload_progress(&task_id, uploaded);
+            let _ = event_tx.send(UploadEvent::Progress {
+                task_id: task_id.clone(),
+                bytes_uploaded: uploaded,
+                total_bytes: total,
+            });
         });
+
+        let confirmed = storage::upload_file_chunked(
+            self.storage.as_ref(),
+            &session,
+            path,
+            task.bytes_uploaded, // resume from last confirmed offset
+            self.chunk_size,
+            &on_progress,
+        )
+        .await?;
+
+        task.bytes_uploaded = confirmed;
 
         // Stage 6: Verify
         self.update_state(task, UploadState::Verifying);
@@ -221,19 +243,27 @@ impl UploadEngine {
     }
 
     /// Resume pending uploads from database
-    pub async fn resume_pending(&self) -> Result<(), DbError> {
+    pub async fn resume_pending(self: &Arc<Self>) -> Result<(), DbError> {
         let tasks = self.db.get_pending_uploads()?;
         tracing::info!("Resuming {} pending uploads", tasks.len());
 
         for mut task in tasks {
-            let engine = UploadEngine {
-                db: Arc::clone(&self.db),
-                api: Arc::clone(&self.api),
-                event_tx: self.event_tx.clone(),
-                auto_clean: self.auto_clean,
-            };
+            let engine = Arc::clone(self);
 
             tokio::spawn(async move {
+                // If we have a session_id, query the server for actual progress
+                if let Some(ref sid) = task.session_id {
+                    let session = storage::UploadSession {
+                        session_id: sid.clone(),
+                        total_size: task.size,
+                        bytes_confirmed: task.bytes_uploaded,
+                    };
+                    match engine.storage.query_progress(&session).await {
+                        Ok(confirmed) => task.bytes_uploaded = confirmed,
+                        Err(e) => tracing::warn!("Could not query progress: {e}"),
+                    }
+                }
+
                 match engine.process_task(&mut task).await {
                     Ok(()) => tracing::info!("Upload completed: {}", task.filename),
                     Err(e) => {

@@ -5,5 +5,6 @@ pub mod db;
 pub mod dedup;
 pub mod error;
 pub mod models;
+pub mod storage;
 pub mod upload;
 pub mod video;
