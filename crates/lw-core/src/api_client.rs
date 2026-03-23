@@ -109,7 +109,7 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// POST /api/org/{tenant}/projects/{pid}/documents/{did}/upload-url
+    /// POST /api/org/{tenant}/projects/{pid}/documents/{did}/upload-url?resumable=true
     pub async fn get_upload_url(
         &self,
         tenant: &str,
@@ -120,7 +120,7 @@ impl ApiClient {
         let resp = self
             .client
             .post(format!(
-                "{}/api/org/{}/projects/{}/documents/{}/upload-url",
+                "{}/api/org/{}/projects/{}/documents/{}/upload-url?resumable=true",
                 self.base_url, tenant, project_id, document_id
             ))
             .headers(headers)
