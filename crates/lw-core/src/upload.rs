@@ -3,7 +3,7 @@ use crate::db::Database;
 use crate::dedup;
 use crate::desensitize;
 use crate::error::{DbError, UploadError};
-use crate::models::{CreateDocumentMetadata, CreateDocumentRequest, UploadState, UploadTask};
+use crate::models::{CreateDocumentMeta, CreateDocumentRequest, UploadState, UploadTask};
 use crate::storage::{self, StorageBackend};
 use crate::video;
 use std::path::{Path, PathBuf};
@@ -189,11 +189,13 @@ impl UploadEngine {
                 &CreateDocumentRequest {
                     collection: "documents".to_string(),
                     description: task.filename.clone(),
-                    metadata: CreateDocumentMetadata {
+                    metadata: CreateDocumentMeta {
                         filename: task.filename.clone(),
-                        size: upload_size,
-                        mime_type: Some(task.mime_type.clone()),
+                        size: Some(upload_size as i64),
+                        mime_type: task.mime_type.clone(),
                     },
+                    model_name: None,
+                    folder: None,
                 },
             )
             .await?;

@@ -18,51 +18,79 @@ pub struct Project {
     pub description: Option<String>,
 }
 
-/// Mirrors backend ReferenceDocument type
+/// Mirrors backend DocumentResponse (DocumentModels.scala)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReferenceDocument {
+pub struct DocumentResponse {
     pub id: String,
+    pub project_id: String,
     pub collection: String,
-    pub description: String,
-    pub metadata: DocumentMetadata,
+    pub metadata: DocumentMeta,
+    pub creator: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
     pub gcs_uri: Option<String>,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
+    pub folder: Option<String>,
+    // Skip complex nested types we don't need on the client
+    #[serde(default)]
+    pub rag: Option<serde_json::Value>,
+    #[serde(default)]
+    pub masking_config: Option<serde_json::Value>,
 }
 
+/// Mirrors backend DocumentMeta (DocumentModels.scala)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DocumentMetadata {
+pub struct DocumentMeta {
     pub filename: String,
-    pub size: u64,
-    pub mime_type: Option<String>,
+    pub mime_type: String,
+    #[serde(default)]
+    pub size: Option<i64>,
+    #[serde(default)]
+    pub md5_hash: Option<String>,
+    // Skip transcode/videoMeta/masking — not needed on desktop client
+    #[serde(default)]
+    pub transcode: Option<serde_json::Value>,
+    #[serde(default)]
+    pub video_meta: Option<serde_json::Value>,
+    #[serde(default)]
+    pub masking: Option<serde_json::Value>,
 }
 
-/// Request to create a document
+/// Mirrors backend CreateDocumentRequest (DocumentModels.scala)
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDocumentRequest {
     pub collection: String,
     pub description: String,
-    pub metadata: CreateDocumentMetadata,
+    pub metadata: CreateDocumentMeta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
+/// Metadata for CreateDocumentRequest — matches DocumentMeta fields
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateDocumentMetadata {
+pub struct CreateDocumentMeta {
     pub filename: String,
-    pub size: u64,
+    pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
+    pub size: Option<i64>,
 }
 
-/// Signed upload URL response
+/// Mirrors backend PresignedUrlResponse (GCSModels.scala)
 #[derive(Debug, Deserialize)]
-pub struct SignedUploadUrl {
+#[serde(rename_all = "camelCase")]
+pub struct PresignedUrlResponse {
     pub url: String,
     pub uri: String,
-    pub expires: i64,
+    pub expires: String,
+    #[serde(default)]
+    pub fields: Option<serde_json::Value>,
 }
 
 /// Firebase Auth tokens

@@ -2,9 +2,9 @@ use crate::auth::AuthService;
 use crate::config::Environment;
 use crate::error::UploadError;
 use crate::models::{
-    CreateDocumentRequest, Project, ReferenceDocument, SignedUploadUrl, WhoAmIResponse,
+    CreateDocumentRequest, DocumentResponse, PresignedUrlResponse, Project, WhoAmIResponse,
 };
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use std::sync::Arc;
 
 pub struct ApiClient {
@@ -35,12 +35,12 @@ impl ApiClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("valid header"),
         );
         Ok(headers)
     }
 
-    /// GET /api/users/whoami — get current user info and tenant list
+    /// GET /api/users/whoami
     pub async fn whoami(&self) -> Result<WhoAmIResponse, UploadError> {
         let headers = self.auth_headers().await?;
         let resp = self
@@ -60,7 +60,7 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// GET /api/org/{tenant}/projects — list projects
+    /// GET /api/org/{tenant}/projects
     pub async fn list_projects(&self, tenant: &str) -> Result<Vec<Project>, UploadError> {
         let headers = self.auth_headers().await?;
         let resp = self
@@ -80,13 +80,13 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// POST /api/org/{tenant}/projects/{pid}/documents — create a reference document
+    /// POST /api/org/{tenant}/projects/{pid}/documents
     pub async fn create_document(
         &self,
         tenant: &str,
         project_id: &str,
         request: &CreateDocumentRequest,
-    ) -> Result<ReferenceDocument, UploadError> {
+    ) -> Result<DocumentResponse, UploadError> {
         let headers = self.auth_headers().await?;
         let resp = self
             .client
@@ -115,7 +115,7 @@ impl ApiClient {
         tenant: &str,
         project_id: &str,
         document_id: &str,
-    ) -> Result<SignedUploadUrl, UploadError> {
+    ) -> Result<PresignedUrlResponse, UploadError> {
         let headers = self.auth_headers().await?;
         let resp = self
             .client
@@ -137,13 +137,13 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// GET /api/org/{tenant}/projects/{pid}/documents/{did} — check upload status
+    /// GET /api/org/{tenant}/projects/{pid}/documents/{did}
     pub async fn get_document(
         &self,
         tenant: &str,
         project_id: &str,
         document_id: &str,
-    ) -> Result<ReferenceDocument, UploadError> {
+    ) -> Result<DocumentResponse, UploadError> {
         let headers = self.auth_headers().await?;
         let resp = self
             .client
@@ -165,31 +165,6 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// PUT file to signed GCS URL (simple, non-resumable)
-    pub async fn upload_to_signed_url(
-        &self,
-        signed_url: &str,
-        data: Vec<u8>,
-        content_type: &str,
-    ) -> Result<(), UploadError> {
-        let resp = self
-            .client
-            .put(signed_url)
-            .header(CONTENT_TYPE, content_type)
-            .body(data)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(UploadError::Api {
-                status: resp.status().as_u16(),
-                message: format!("GCS upload failed: {}", resp.text().await.unwrap_or_default()),
-            });
-        }
-
-        Ok(())
-    }
-
     /// Verify document upload by polling until gcsUri is set
     pub async fn verify_upload(
         &self,
@@ -197,7 +172,7 @@ impl ApiClient {
         project_id: &str,
         document_id: &str,
         max_retries: u32,
-    ) -> Result<ReferenceDocument, UploadError> {
+    ) -> Result<DocumentResponse, UploadError> {
         for i in 0..max_retries {
             let doc = self.get_document(tenant, project_id, document_id).await?;
             if doc.gcs_uri.is_some() {

@@ -7,7 +7,7 @@ Cross-platform desktop client for Linewise — handles data desensitization, res
 - Core business logic lives in `crates/lw-core/` — zero UI dependencies
 - Desktop UI lives in `crates/lw-app/` — thin Dioxus shell over lw-core
 - Typed errors via `thiserror` ADT enums in `crates/lw-core/src/error.rs` — add variants as needed
-- Domain types in `crates/lw-core/src/models.rs` must mirror backend DTOs (see `linewise-frontend/src/data/entities.ts`)
+- **linewise-api (Scala) is the single source of truth for all API types.** When defining Rust DTOs in `models.rs`, always read the case classes from `linewise-api/src/` — never guess from frontend TypeScript types. The frontend may transform/rename fields.
 - Upload flow must match the web frontend protocol: create doc → get signed URL → PUT to GCS → verify
 - All state passed explicitly through function parameters — **no `thread_local!` or `std::thread_local`**
 - **Local `let mut` is permitted.** Prefer immutable bindings, but `let mut` inside a function body is fine for loop control and local accumulation. Mutable state must never escape the function — don't return `&mut`, don't store in struct fields, don't pass as `&mut` to other functions. If mutation needs to be shared, use explicit shared-ownership types (`Arc<RwLock<T>>`, Dioxus `Signal`).
