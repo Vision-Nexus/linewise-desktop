@@ -61,7 +61,7 @@ pub enum VideoValidationError {
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(#[from] sqlx::Error),
     #[error("Migration error: {0}")]
     Migration(String),
     #[error("Serialization error: {0}")]

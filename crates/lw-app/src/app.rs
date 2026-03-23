@@ -7,7 +7,11 @@ use dioxus::prelude::*;
 pub fn App() -> Element {
     use_context_provider(AppState::new);
     use_context_provider(|| {
-        CoreServices::init().expect("failed to initialize core services")
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(CoreServices::init())
+                .expect("failed to initialize core services")
+        })
     });
 
     let app_state = use_context::<AppState>();

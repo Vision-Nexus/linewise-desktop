@@ -107,7 +107,7 @@ impl UploadEngine {
             retry_count: 0,
         };
 
-        self.db.insert_upload_task(&task)?;
+        self.db.insert_upload_task(&task).await?;
         let _ = self.event_tx.send(UploadEvent::TaskAdded(Box::new(task.clone())));
 
         Ok(task)
@@ -122,7 +122,7 @@ impl UploadEngine {
         let hash = dedup::hash_file(path).await?;
         task.hash = Some(hash.clone());
 
-        if let Ok(Some(existing_id)) = self.db.find_by_hash(&hash) {
+        if let Ok(Some(existing_id)) = self.db.find_by_hash(&hash).await {
             let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
                 task_id: task.id.clone(),
                 existing_document_id: existing_id.clone(),
@@ -132,7 +132,7 @@ impl UploadEngine {
 
         // Stage 2: Video validation (if video file)
         if task.mime_type.starts_with("video/") {
-            self.update_state(task, UploadState::Validating);
+            self.update_state(task, UploadState::Validating).await;
             match video::validate_video(path).await {
                 Ok(result) if !result.warnings.is_empty() => {
                     task.validation_warnings = result.warnings.clone();
@@ -149,7 +149,7 @@ impl UploadEngine {
         }
 
         // Stage 3: Create document on backend
-        self.update_state(task, UploadState::Creating);
+        self.update_state(task, UploadState::Creating).await;
         let doc = self
             .api
             .create_document(
@@ -168,7 +168,7 @@ impl UploadEngine {
             .await?;
 
         task.document_id = Some(doc.id.clone());
-        self.db.update_upload_document_id(&task.id, &doc.id)?;
+        self.db.update_upload_document_id(&task.id, &doc.id).await?;
 
         // Stage 4: Get signed upload URL + initiate resumable session
         let signed_url = self
@@ -183,16 +183,15 @@ impl UploadEngine {
 
         task.session_id = Some(session.session_id.clone());
         self.db
-            .update_upload_session_id(&task.id, &session.session_id)?;
+            .update_upload_session_id(&task.id, &session.session_id)
+            .await?;
 
         // Stage 5: Chunked resumable upload
-        self.update_state(task, UploadState::Uploading);
+        self.update_state(task, UploadState::Uploading).await;
 
         let event_tx = self.event_tx.clone();
         let task_id = task.id.clone();
-        let db = self.db.clone();
         let on_progress: storage::ProgressFn = Box::new(move |uploaded, total| {
-            let _ = db.update_upload_progress(&task_id, uploaded);
             let _ = event_tx.send(UploadEvent::Progress {
                 task_id: task_id.clone(),
                 bytes_uploaded: uploaded,
@@ -204,35 +203,39 @@ impl UploadEngine {
             self.storage.as_ref(),
             &session,
             path,
-            task.bytes_uploaded, // resume from last confirmed offset
+            task.bytes_uploaded,
             self.chunk_size,
             &on_progress,
         )
         .await?;
 
         task.bytes_uploaded = confirmed;
+        let _ = self.db.update_upload_progress(&task.id, confirmed).await;
 
         // Stage 6: Verify
-        self.update_state(task, UploadState::Verifying);
+        self.update_state(task, UploadState::Verifying).await;
         self.api
             .verify_upload(&task.tenant_id, &task.project_id, &doc.id, 10)
             .await?;
 
         // Stage 7: Complete
-        self.update_state(task, UploadState::Completed);
+        self.update_state(task, UploadState::Completed).await;
         let _ = self.event_tx.send(UploadEvent::Completed {
             task_id: task.id.clone(),
         });
 
         // Record hash for future dedup
-        let _ = self.db.insert_file_hash(
-            &hash,
-            &task.filename,
-            task.size,
-            &task.tenant_id,
-            &task.project_id,
-            &doc.id,
-        );
+        let _ = self
+            .db
+            .insert_file_hash(
+                &hash,
+                &task.filename,
+                task.size,
+                &task.tenant_id,
+                &task.project_id,
+                &doc.id,
+            )
+            .await;
 
         // Auto-clean
         if self.auto_clean && let Err(e) = tokio::fs::remove_file(path).await {
@@ -244,14 +247,13 @@ impl UploadEngine {
 
     /// Resume pending uploads from database
     pub async fn resume_pending(self: &Arc<Self>) -> Result<(), DbError> {
-        let tasks = self.db.get_pending_uploads()?;
+        let tasks = self.db.get_pending_uploads().await?;
         tracing::info!("Resuming {} pending uploads", tasks.len());
 
         for mut task in tasks {
             let engine = Arc::clone(self);
 
             tokio::spawn(async move {
-                // If we have a session_id, query the server for actual progress
                 if let Some(ref sid) = task.session_id {
                     let session = storage::UploadSession {
                         session_id: sid.clone(),
@@ -268,11 +270,10 @@ impl UploadEngine {
                     Ok(()) => tracing::info!("Upload completed: {}", task.filename),
                     Err(e) => {
                         tracing::error!("Upload failed for {}: {e}", task.filename);
-                        let _ = engine.db.update_upload_state(
-                            &task.id,
-                            UploadState::Failed,
-                            Some(&e.to_string()),
-                        );
+                        let _ = engine
+                            .db
+                            .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                            .await;
                         let _ = engine.event_tx.send(UploadEvent::Failed {
                             task_id: task.id,
                             error: e.to_string(),
@@ -285,12 +286,15 @@ impl UploadEngine {
         Ok(())
     }
 
-    fn update_state(&self, task: &mut UploadTask, state: UploadState) {
+    async fn update_state(&self, task: &mut UploadTask, state: UploadState) {
         let _ = self.event_tx.send(UploadEvent::StateChanged {
             task_id: task.id.clone(),
             state: state.clone(),
         });
-        let _ = self.db.update_upload_state(&task.id, state.clone(), None);
+        let _ = self
+            .db
+            .update_upload_state(&task.id, state.clone(), None)
+            .await;
         task.state = state;
     }
 }

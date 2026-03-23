@@ -22,9 +22,9 @@ pub struct CoreServices {
 }
 
 impl CoreServices {
-    pub fn init() -> Result<Self, String> {
+    pub async fn init() -> Result<Self, String> {
         let config = AppConfig::load().map_err(|e| format!("Config error: {e}"))?;
-        let db = Database::open().map_err(|e| format!("Database error: {e}"))?;
+        let db = Database::open().await.map_err(|e| format!("Database error: {e}"))?;
         let db = Arc::new(db);
 
         let auth = Arc::new(AuthService::new(FIREBASE_API_KEY.to_string()));

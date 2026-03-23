@@ -19,5 +19,5 @@ pub async fn hash_file(path: &Path) -> Result<String, std::io::Error> {
 /// Check if a file is a duplicate based on its hash
 pub async fn check_duplicate(db: &Database, path: &Path) -> Result<Option<String>, AppError> {
     let hash = hash_file(path).await.map_err(|e| AppError::Upload(crate::error::UploadError::Io(e)))?;
-    db.find_by_hash(&hash).map_err(AppError::Database)
+    db.find_by_hash(&hash).await.map_err(AppError::Database)
 }
