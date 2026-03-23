@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Mirrors backend TenantInfo (from UserModels.scala)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tenant {
     pub id: String,
@@ -10,7 +10,7 @@ pub struct Tenant {
 }
 
 /// Mirrors backend Project type
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: String,

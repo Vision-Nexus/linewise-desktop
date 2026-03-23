@@ -1,15 +1,67 @@
-use crate::state::AppState;
+use crate::state::{AppState, CoreServices};
 use crate::styles;
 use dioxus::prelude::*;
+use lw_core::models::{Project, Tenant};
 
 #[component]
 pub fn Sidebar() -> Element {
-    let app_state = use_context::<AppState>();
+    let mut app_state = use_context::<AppState>();
+    let services = use_context::<CoreServices>();
+
     let user_email = app_state
         .user_info
         .read()
         .as_ref()
         .map(|u| u.email.clone())
+        .unwrap_or_default();
+
+    let tenants = app_state
+        .user_info
+        .read()
+        .as_ref()
+        .map(|u| u.tenants.clone())
+        .unwrap_or_default();
+
+    // Fetch projects for all tenants on mount
+    let api = services.api.clone();
+    let app_state_fetch = app_state.clone();
+    use_future(move || {
+        let api = api.clone();
+        let tenants = tenants.clone();
+        let mut app_state = app_state_fetch.clone();
+        async move {
+            for tenant in &tenants {
+                match api.list_projects(&tenant.id).await {
+                    Ok(projects) => {
+                        app_state
+                            .tenant_projects
+                            .write()
+                            .insert(tenant.id.clone(), projects);
+                    }
+                    Err(e) => tracing::warn!("Failed to fetch projects for {}: {e}", tenant.id),
+                }
+            }
+        }
+    });
+
+    let selected_tenant_id = app_state
+        .selected_tenant
+        .read()
+        .as_ref()
+        .map(|t| t.id.clone())
+        .unwrap_or_default();
+    let selected_project_id = app_state
+        .selected_project
+        .read()
+        .as_ref()
+        .map(|p| p.id.clone())
+        .unwrap_or_default();
+
+    let tenant_list = app_state
+        .user_info
+        .read()
+        .as_ref()
+        .map(|u| u.tenants.clone())
         .unwrap_or_default();
 
     rsx! {
@@ -18,27 +70,42 @@ pub fn Sidebar() -> Element {
 
             // App title
             div {
-                style: "height: {styles::TOPBAR_HEIGHT}px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border);",
+                style: "height: {styles::TOPBAR_HEIGHT}px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;",
                 h1 { style: "font-size: 15px; font-weight: 600;", "Linewise" }
             }
 
-            // Tenant & Project selectors
+            // Tree nav — scrollable
             div {
-                style: "padding: 12px; display: flex; flex-direction: column; gap: 8px;",
+                style: "flex: 1; overflow-y: auto; padding: 8px 0;",
 
-                label { style: "font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;", "Organization" }
-                crate::components::tenant_select::TenantSelector {}
+                for tenant in tenant_list.iter() {
+                    TenantNode {
+                        key: "{tenant.id}",
+                        tenant: tenant.clone(),
+                        projects: app_state.tenant_projects.read().get(&tenant.id).cloned().unwrap_or_default(),
+                        is_selected: tenant.id == selected_tenant_id,
+                        selected_project_id: selected_project_id.clone(),
+                        on_select_project: move |args: (Tenant, Project)| {
+                            app_state.selected_tenant.set(Some(args.0.clone()));
+                            app_state.selected_project.set(Some(args.1.clone()));
+                            // Also update the flat projects list for upload queue
+                            let projects = app_state.tenant_projects.read().get(&args.0.id).cloned().unwrap_or_default();
+                            app_state.projects.set(projects);
+                        },
+                    }
+                }
 
-                label { style: "font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px;", "Project" }
-                crate::components::project_select::ProjectSelector {}
+                if tenant_list.is_empty() {
+                    div {
+                        style: "padding: 16px; font-size: 13px; color: var(--text-muted);",
+                        "No organizations"
+                    }
+                }
             }
 
-            // Spacer
-            div { style: "flex: 1;" }
-
-            // User info & sign out at bottom
+            // User info & sign out
             div {
-                style: "padding: 12px; border-top: 1px solid var(--border);",
+                style: "padding: 12px; border-top: 1px solid var(--border); flex-shrink: 0;",
                 div {
                     style: "font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 8px;",
                     "{user_email}"
@@ -50,8 +117,75 @@ pub fn Sidebar() -> Element {
 }
 
 #[component]
+fn TenantNode(
+    tenant: Tenant,
+    projects: Vec<Project>,
+    is_selected: bool,
+    selected_project_id: String,
+    on_select_project: EventHandler<(Tenant, Project)>,
+) -> Element {
+    let mut expanded = use_signal(|| true);
+
+    let toggle = move |_| {
+        let current = *expanded.read();
+        expanded.set(!current);
+    };
+
+    let arrow = if *expanded.read() { "\u{25BE}" } else { "\u{25B8}" }; // ▾ / ▸
+
+    rsx! {
+        div {
+            // Tenant header
+            div {
+                class: "card-row",
+                style: "display: flex; align-items: center; gap: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text); transition: background 0.12s;",
+                onclick: toggle,
+                span { style: "font-size: 10px; color: var(--text-muted); width: 12px;", "{arrow}" }
+                span { "{tenant.display_name}" }
+                span {
+                    style: "font-size: 11px; color: var(--text-muted); font-weight: 400; margin-left: auto;",
+                    "{projects.len()}"
+                }
+            }
+
+            // Project list
+            if *expanded.read() {
+                div {
+                    style: "padding-left: 8px;",
+                    for project in projects.iter() {
+                        {
+                            let is_active = project.id == selected_project_id;
+                            let bg = if is_active { "var(--info-bg)" } else { "transparent" };
+                            let color = if is_active { "var(--info)" } else { "var(--text-secondary)" };
+                            let font_weight = if is_active { "600" } else { "400" };
+                            let tenant = tenant.clone();
+                            let project = project.clone();
+                            rsx! {
+                                div {
+                                    key: "{project.id}",
+                                    class: "card-row",
+                                    style: "display: flex; align-items: center; padding: 5px 12px 5px 22px; cursor: pointer; font-size: 13px; color: {color}; font-weight: {font_weight}; background: {bg}; border-radius: 4px; margin: 1px 4px; transition: background 0.12s, color 0.12s;",
+                                    onclick: move |_| on_select_project.call((tenant.clone(), project.clone())),
+                                    "{project.name}"
+                                }
+                            }
+                        }
+                    }
+                    if projects.is_empty() {
+                        div {
+                            style: "padding: 4px 12px 4px 22px; font-size: 12px; color: var(--text-muted); font-style: italic;",
+                            "No projects"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn SignOutButton() -> Element {
-    let services = use_context::<crate::state::CoreServices>();
+    let services = use_context::<CoreServices>();
     let app_state = use_context::<AppState>();
     let app_state_signout = app_state.clone();
 

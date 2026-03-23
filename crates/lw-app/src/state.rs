@@ -4,6 +4,7 @@ use lw_core::auth::AuthService;
 use lw_core::config::AppConfig;
 use lw_core::db::Database;
 use lw_core::models::{Project, Tenant, UploadTask, UserInfo};
+use std::collections::HashMap;
 use lw_core::upload::{UploadEngine, UploadEvent};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -67,6 +68,7 @@ pub struct AppState {
     pub selected_project: Signal<Option<Project>>,
     pub upload_tasks: Signal<Vec<UploadTask>>,
     pub projects: Signal<Vec<Project>>,
+    pub tenant_projects: Signal<HashMap<String, Vec<Project>>>,
     pub is_loading: Signal<bool>,
     pub error_message: Signal<Option<String>>,
 }
@@ -80,6 +82,7 @@ impl AppState {
             selected_project: Signal::new(None),
             upload_tasks: Signal::new(Vec::new()),
             projects: Signal::new(Vec::new()),
+            tenant_projects: Signal::new(HashMap::new()),
             is_loading: Signal::new(false),
             error_message: Signal::new(None),
         }
