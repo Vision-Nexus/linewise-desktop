@@ -4,11 +4,17 @@ use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
 
-/// Target video parameters for validation
-const TARGET_FPS: f64 = 30.0;
-const TARGET_HEIGHT: u32 = 1080;
-const TARGET_WIDTH: u32 = 1920;
-const TARGET_BITRATE_KBPS: u64 = 30_000;
+/// Expected video parameters with tolerance ranges (advisory, not blocking)
+const FPS_MIN: f64 = 20.0;
+const FPS_MAX: f64 = 40.0;
+const FPS_TARGET: f64 = 30.0;
+const RESOLUTION_MIN_HEIGHT: u32 = 720;
+const BITRATE_MIN_KBPS: u64 = 10_000;
+const BITRATE_MAX_KBPS: u64 = 35_000;
+const BITRATE_TARGET_KBPS: u64 = 30_000;
+
+/// Link to guide users on how to change camera settings
+pub const CAMERA_SETTINGS_GUIDE: &str = "https://docs.linewise.io/camera-settings";
 
 #[derive(Debug, Deserialize)]
 struct FfprobeOutput {
@@ -114,21 +120,33 @@ pub async fn validate_video(path: &Path) -> Result<VideoValidationResult, VideoV
 
         let mut warnings = Vec::new();
 
-        if (fps - TARGET_FPS).abs() > 1.0 {
+        // FPS: acceptable range 20-40, target 30
+        if fps > 0.0 && !(FPS_MIN..=FPS_MAX).contains(&fps) {
             warnings.push(format!(
-                "Frame rate {fps:.1}fps differs from target {TARGET_FPS}fps"
+                "Frame rate {fps:.1}fps is outside recommended range ({FPS_MIN:.0}-{FPS_MAX:.0}fps, target {FPS_TARGET:.0}fps)"
             ));
         }
 
-        if height != TARGET_HEIGHT || width != TARGET_WIDTH {
+        // Resolution: warn if below 720p
+        if height > 0 && height < RESOLUTION_MIN_HEIGHT {
             warnings.push(format!(
-                "Resolution {width}x{height} differs from target {TARGET_WIDTH}x{TARGET_HEIGHT}"
+                "Resolution {width}x{height} is below minimum recommended ({RESOLUTION_MIN_HEIGHT}p)"
             ));
         }
 
-        if bitrate_kbps > 0 && (bitrate_kbps as i64 - TARGET_BITRATE_KBPS as i64).unsigned_abs() > 10_000 {
+        // Bitrate: acceptable range 10M-35M
+        if bitrate_kbps > 0 && !(BITRATE_MIN_KBPS..=BITRATE_MAX_KBPS).contains(&bitrate_kbps) {
             warnings.push(format!(
-                "Bitrate {bitrate_kbps}kbps differs from target {TARGET_BITRATE_KBPS}kbps"
+                "Bitrate {bitrate_kbps}kbps is outside recommended range ({}-{}Mbps, target {}Mbps)",
+                BITRATE_MIN_KBPS / 1000,
+                BITRATE_MAX_KBPS / 1000,
+                BITRATE_TARGET_KBPS / 1000,
+            ));
+        }
+
+        if !warnings.is_empty() {
+            warnings.push(format!(
+                "See how to adjust your camera settings: {CAMERA_SETTINGS_GUIDE}"
             ));
         }
 
