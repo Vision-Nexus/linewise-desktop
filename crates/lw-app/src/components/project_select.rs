@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::styles;
 use dioxus::prelude::*;
 
 #[component]
@@ -15,7 +16,7 @@ pub fn ProjectSelector() -> Element {
 
     rsx! {
         select {
-            style: "padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px;",
+            style: "{styles::SELECT}",
             value: "{selected_id}",
             disabled: projects.is_empty(),
             onchange: move |evt| {

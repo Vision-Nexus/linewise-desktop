@@ -1,4 +1,5 @@
 use crate::state::{AppState, CoreServices};
+use crate::styles;
 use dioxus::prelude::*;
 
 #[component]
@@ -50,10 +51,10 @@ pub fn LoginPage() -> Element {
 
     rsx! {
         div {
-            style: "display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; gap: 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;",
+            style: "display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; gap: 20px;",
 
-            h1 { style: "margin: 0;", "Linewise Desktop" }
-            p { style: "margin: 0; color: #666;", "Sign in to continue" }
+            h1 { style: "font-size: 22px; font-weight: 600;", "Linewise Desktop" }
+            p { style: "color: #6b7280; font-size: 14px;", "Sign in to continue" }
 
             form {
                 onsubmit: on_submit,
@@ -65,7 +66,7 @@ pub fn LoginPage() -> Element {
                     value: "{email}",
                     oninput: move |evt| email.set(evt.value()),
                     required: true,
-                    style: "padding: 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; outline: none;",
+                    style: "{styles::INPUT}",
                 }
 
                 input {
@@ -74,36 +75,39 @@ pub fn LoginPage() -> Element {
                     value: "{password}",
                     oninput: move |evt| password.set(evt.value()),
                     required: true,
-                    style: "padding: 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; outline: none;",
+                    style: "{styles::INPUT}",
                 }
 
                 button {
                     r#type: "submit",
+                    class: "btn-primary",
                     disabled: *loading.read(),
-                    style: "padding: 10px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500;",
+                    style: "{styles::BTN_PRIMARY} width: 100%; height: 38px; font-size: 14px;",
                     if *loading.read() { "Signing in..." } else { "Sign In" }
                 }
             }
 
             if let Some(err) = error.read().as_ref() {
-                p {
-                    style: "color: #ef4444; font-size: 13px; max-width: 320px; text-align: center;",
+                div {
+                    class: "fade-in",
+                    style: "max-width: 320px; padding: 10px 14px; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 6px; color: #991b1b; font-size: 13px;",
                     "{err}"
                 }
             }
 
             div {
-                style: "margin-top: 8px; display: flex; gap: 8px;",
+                style: "margin-top: 4px; display: flex; gap: 8px;",
                 button {
-                    style: "padding: 8px 16px; border: 1px solid #d1d5db; border-radius: 6px; cursor: pointer; background: white; font-size: 13px;",
+                    class: "btn-outline",
+                    style: "{styles::BTN_OUTLINE}",
                     onclick: move |_| {
-                        // TODO: OAuth via local HTTP redirect
                         tracing::info!("Google OAuth sign-in (not yet implemented)");
                     },
                     "Google"
                 }
                 button {
-                    style: "padding: 8px 16px; border: 1px solid #d1d5db; border-radius: 6px; cursor: pointer; background: white; font-size: 13px;",
+                    class: "btn-outline",
+                    style: "{styles::BTN_OUTLINE}",
                     onclick: move |_| {
                         tracing::info!("Microsoft OAuth sign-in (not yet implemented)");
                     },

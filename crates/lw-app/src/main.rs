@@ -2,6 +2,7 @@ mod app;
 mod components;
 mod hooks;
 mod state;
+pub mod styles;
 
 use dioxus::desktop::{Config, WindowCloseBehaviour};
 use dioxus::prelude::*;

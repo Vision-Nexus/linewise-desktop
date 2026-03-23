@@ -1,8 +1,48 @@
 use crate::components::login::LoginPage;
 use crate::components::upload_queue::UploadQueue;
 use crate::state::{AppState, CoreServices};
+use crate::styles;
 use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
 use dioxus::prelude::*;
+
+/// Global CSS for hover/active states (can't do :hover in inline styles)
+const GLOBAL_CSS: &str = r#"
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; font-size: 14px; color: #111827; background: #ffffff; }
+
+/* Button hover/active animations */
+.btn-primary:hover { background: #1d4ed8 !important; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+.btn-primary:active { background: #1e40af !important; transform: scale(0.97); }
+.btn-success:hover { background: #16a34a !important; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+.btn-success:active { background: #15803d !important; transform: scale(0.97); }
+.btn-outline:hover { background: #f9fafb !important; border-color: #9ca3af !important; }
+.btn-outline:active { background: #f3f4f6 !important; transform: scale(0.97); }
+.btn-danger-sm:hover { background: #fef2f2 !important; border-color: #ef4444 !important; }
+.btn-danger-sm:active { background: #fee2e2 !important; transform: scale(0.97); }
+
+/* Select hover */
+select:hover { border-color: #9ca3af; }
+select:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.15); outline: none; }
+
+/* Input focus */
+input:focus { border-color: #2563eb !important; box-shadow: 0 0 0 2px rgba(37,99,235,0.15) !important; outline: none; }
+
+/* Card row hover */
+.card-row:hover { border-color: #d1d5db !important; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+
+/* Staged row hover */
+.staged-row:hover { background: #fef9c3 !important; }
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* Smooth transitions for state changes */
+.fade-in { animation: fadeIn 0.2s ease-in; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+"#;
 
 #[component]
 pub fn App() -> Element {
@@ -60,10 +100,13 @@ pub fn App() -> Element {
 
     let is_authenticated = *app_state.is_authenticated.read();
 
-    if !is_authenticated {
-        rsx! { LoginPage {} }
-    } else {
-        rsx! { MainView {} }
+    rsx! {
+        style { "{GLOBAL_CSS}" }
+        if !is_authenticated {
+            LoginPage {}
+        } else {
+            MainView {}
+        }
     }
 }
 
@@ -88,7 +131,6 @@ fn MainView() -> Element {
     let app_state = use_context::<AppState>();
     let services = use_context::<CoreServices>();
 
-    // Clone for closures
     let app_state_signout = app_state.clone();
     let on_sign_out = move |_| {
         let auth = services.auth.clone();
@@ -113,29 +155,32 @@ fn MainView() -> Element {
 
     rsx! {
         div {
-            style: "display: flex; flex-direction: column; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;",
+            style: "display: flex; flex-direction: column; height: 100vh;",
 
+            // Fixed-height topbar
             header {
-                style: "display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #e5e7eb; background: #f9fafb;",
+                style: "display: flex; align-items: center; justify-content: space-between; height: {styles::TOPBAR_HEIGHT}px; padding: 0 16px; border-bottom: 1px solid #e5e7eb; background: #f9fafb; flex-shrink: 0;",
                 div {
                     style: "display: flex; align-items: center; gap: 12px;",
-                    h1 { style: "margin: 0; font-size: 18px;", "Linewise Desktop" }
-                    span { style: "font-size: 13px; color: #666;", "{user_email}" }
+                    h1 { style: "font-size: 16px; font-weight: 600;", "Linewise Desktop" }
+                    span { style: "font-size: 12px; color: #6b7280;", "{user_email}" }
                 }
                 div {
-                    style: "display: flex; align-items: center; gap: 12px;",
+                    style: "display: flex; align-items: center; gap: 8px;",
                     crate::components::tenant_select::TenantSelector {}
                     crate::components::project_select::ProjectSelector {}
                     button {
-                        style: "padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: white; font-size: 13px;",
+                        class: "btn-outline",
+                        style: "{styles::BTN_OUTLINE}",
                         onclick: on_sign_out,
                         "Sign Out"
                     }
                 }
             }
 
+            // Flexible main content
             main {
-                style: "flex: 1; overflow-y: auto;",
+                style: "flex: 1; overflow-y: auto; padding: 16px;",
                 UploadQueue {}
             }
         }

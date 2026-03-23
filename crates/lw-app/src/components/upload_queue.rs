@@ -1,14 +1,10 @@
 use crate::state::{AppState, CoreServices};
+use crate::styles;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload::UploadEvent;
 use std::path::PathBuf;
-
-const STYLE_BTN_PRIMARY: &str = "height: 32px; padding: 0 16px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.15s, transform 0.1s;";
-const STYLE_BTN_DANGER: &str = "height: 28px; padding: 0 10px; background: transparent; color: #ef4444; border: 1px solid #ef4444; border-radius: 4px; cursor: pointer; font-size: 12px; transition: background 0.15s, transform 0.1s;";
-const STYLE_BTN_SUCCESS: &str = "height: 32px; padding: 0 16px; background: #22c55e; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.15s, transform 0.1s;";
-const STYLE_BTN_DISABLED: &str = "height: 32px; padding: 0 16px; background: #9ca3af; color: white; border: none; border-radius: 6px; cursor: not-allowed; font-size: 13px; font-weight: 500;";
 
 #[component]
 pub fn UploadQueue() -> Element {
@@ -160,7 +156,8 @@ pub fn UploadQueue() -> Element {
                     style: "display: flex; gap: 8px; align-items: center;",
                     if has_context {
                         button {
-                            style: "{STYLE_BTN_PRIMARY}",
+                            class: "btn-primary",
+                            style: "{styles::BTN_PRIMARY}",
                             onclick: on_add_files,
                             "Add Files"
                         }
@@ -173,7 +170,8 @@ pub fn UploadQueue() -> Element {
                                 };
                                 rsx! {
                                     button {
-                                        style: "{STYLE_BTN_SUCCESS}",
+                                        class: "btn-success",
+                                        style: "{styles::BTN_SUCCESS}",
                                         onclick: on_confirm,
                                         "{label}"
                                     }
@@ -181,7 +179,7 @@ pub fn UploadQueue() -> Element {
                             }
                         }
                     } else {
-                        button { style: "{STYLE_BTN_DISABLED}", disabled: true, "Add Files" }
+                        button { style: "{styles::BTN_DISABLED}", disabled: true, "Add Files" }
                     }
                 }
             }
@@ -264,14 +262,16 @@ fn StagedRow(task: UploadTask, on_remove: EventHandler<String>) -> Element {
     let task_id = task.id.clone();
     rsx! {
         div {
-            style: "display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fefce8; transition: background 0.15s;",
+            class: "staged-row fade-in",
+            style: "display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border: 1px solid #fde68a; border-radius: 6px; background: #fefce8; transition: background 0.15s, border-color 0.15s;",
             div {
                 style: "flex: 1; min-width: 0;",
                 div { style: "font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;", "{task.filename}" }
                 div { style: "font-size: 12px; color: #9ca3af; margin-top: 2px;", "{format_size(task.size)}" }
             }
             button {
-                style: "{STYLE_BTN_DANGER}",
+                class: "btn-danger-sm",
+                style: "{styles::BTN_DANGER_SM}",
                 onclick: move |_| on_remove.call(task_id.clone()),
                 "Remove"
             }
@@ -297,7 +297,8 @@ fn UploadTaskRow(task: UploadTask) -> Element {
 
     rsx! {
         div {
-            style: "padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: {status_bg}; transition: background 0.15s;",
+            class: "card-row",
+            style: "padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 6px; background: {status_bg}; transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;",
 
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
