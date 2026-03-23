@@ -10,6 +10,24 @@ pub fn UploadQueue() -> Element {
     let app_state = use_context::<AppState>();
     let services = use_context::<CoreServices>();
 
+    // Load history from SQLite on mount
+    let app_state_load = app_state.clone();
+    let db_for_load = services.db.clone();
+    use_future(move || {
+        let db = db_for_load.clone();
+        let mut app_state = app_state_load.clone();
+        async move {
+            match db.get_all_uploads().await {
+                Ok(tasks) if !tasks.is_empty() => {
+                    tracing::info!("Loaded {} upload tasks from history", tasks.len());
+                    app_state.upload_tasks.set(tasks);
+                }
+                Err(e) => tracing::warn!("Failed to load upload history: {e}"),
+                _ => {}
+            }
+        }
+    });
+
     // Poll upload events and update task list
     let app_state_events = app_state.clone();
     use_future(move || {
