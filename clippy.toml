@@ -1,0 +1,6 @@
+too-many-lines-threshold = 200
+excessive-nesting-threshold = 5
+
+[[disallowed-macros]]
+path = "std::thread_local"
+reason = "Avoid thread-local state"
