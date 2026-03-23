@@ -159,25 +159,30 @@ impl UploadEngine {
         Ok(())
     }
 
-    /// Process a single upload task through all stages
+    /// Process a single upload task through all stages.
+    /// Resumes from where it left off — skips stages already completed
+    /// (has document_id → skip create, has session_id → skip initiate).
     pub async fn process_task(&self, task: &mut UploadTask) -> Result<(), UploadError> {
         let path_buf = std::path::PathBuf::from(&task.local_path);
         let path = path_buf.as_path();
 
-        // Stage 1: Dedup check
-        let hash = dedup::hash_file(path).await?;
-        task.hash = Some(hash.clone());
+        // Stage 1: Dedup check (skip if already hashed)
+        if task.hash.is_none() {
+            let hash = dedup::hash_file(path).await?;
+            task.hash = Some(hash.clone());
 
-        if let Ok(Some(existing_id)) = self.db.find_by_hash(&hash).await {
-            let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
-                task_id: task.id.clone(),
-                existing_document_id: existing_id.clone(),
-            });
-            return Err(UploadError::Duplicate { existing_id });
+            if let Ok(Some(existing_id)) = self.db.find_by_hash(&hash).await {
+                let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
+                    task_id: task.id.clone(),
+                    existing_document_id: existing_id.clone(),
+                });
+                return Err(UploadError::Duplicate { existing_id });
+            }
         }
+        let hash = task.hash.clone().unwrap_or_default();
 
-        // Stage 2: Video validation (if video file)
-        if task.mime_type.starts_with("video/") {
+        // Stage 2: Video validation (skip if already validated)
+        if task.validation_warnings.is_empty() && task.mime_type.starts_with("video/") {
             self.update_state(task, UploadState::Validating).await;
             match video::validate_video(path).await {
                 Ok(result) if !result.warnings.is_empty() => {
@@ -194,7 +199,7 @@ impl UploadEngine {
             }
         }
 
-        // Stage 3: Data desensitization (strip metadata before cross-border upload)
+        // Stage 3: Data desensitization
         let mut desensitized_path: Option<PathBuf> = None;
         if self.strip_metadata {
             self.update_state(task, UploadState::Desensitizing).await;
@@ -209,59 +214,106 @@ impl UploadEngine {
                 }
                 Some(Err(e)) => {
                     tracing::warn!("Desensitization failed for {}: {e}", task.filename);
-                    // Continue with original file
                 }
-                None => {
-                    // File type doesn't need desensitization
-                }
+                None => {}
             }
         }
 
-        // Use desensitized file for upload if available
         let upload_path = desensitized_path.as_deref().unwrap_or(path);
         let upload_size = tokio::fs::metadata(upload_path).await?.len();
 
-        // Stage 4: Create document on backend
-        self.update_state(task, UploadState::Creating).await;
-        let doc = self
-            .api
-            .create_document(
-                &task.tenant_id,
-                &task.project_id,
-                &CreateDocumentRequest {
-                    collection: "documents".to_string(),
-                    description: task.filename.clone(),
-                    metadata: CreateDocumentMeta {
-                        filename: task.filename.clone(),
-                        size: Some(upload_size as i64),
-                        mime_type: task.mime_type.clone(),
+        // Stage 4: Create document (skip if already has document_id)
+        let doc_id = if let Some(ref doc_id) = task.document_id {
+            tracing::info!("Resuming: document already created ({})", doc_id);
+            doc_id.clone()
+        } else {
+            self.update_state(task, UploadState::Creating).await;
+            let doc = self
+                .api
+                .create_document(
+                    &task.tenant_id,
+                    &task.project_id,
+                    &CreateDocumentRequest {
+                        collection: "documents".to_string(),
+                        description: task.filename.clone(),
+                        metadata: CreateDocumentMeta {
+                            filename: task.filename.clone(),
+                            size: Some(upload_size as i64),
+                            mime_type: task.mime_type.clone(),
+                        },
+                        model_name: None,
+                        folder: None,
                     },
-                    model_name: None,
-                    folder: None,
-                },
-            )
-            .await?;
+                )
+                .await?;
+            task.document_id = Some(doc.id.clone());
+            self.db.update_upload_document_id(&task.id, &doc.id).await?;
+            doc.id
+        };
 
-        task.document_id = Some(doc.id.clone());
-        self.db.update_upload_document_id(&task.id, &doc.id).await?;
+        // Stage 5: Initiate resumable session (skip if already has session_id)
+        let session = if let Some(ref sid) = task.session_id {
+            tracing::info!("Resuming: session already initiated, querying progress");
+            let s = storage::UploadSession {
+                session_id: sid.clone(),
+                total_size: upload_size,
+                bytes_confirmed: task.bytes_uploaded,
+            };
+            // Query server for actual progress
+            match self.storage.query_progress(&s).await {
+                Ok(confirmed) => {
+                    task.bytes_uploaded = confirmed;
+                    tracing::info!("Resuming from byte {confirmed}/{upload_size}");
+                }
+                Err(e) => {
+                    tracing::warn!("Could not query progress, re-initiating session: {e}");
+                    // Session expired — get new URL and re-initiate
+                    let signed_url = self
+                        .api
+                        .get_upload_url(&task.tenant_id, &task.project_id, &doc_id)
+                        .await?;
+                    let new_session = self
+                        .storage
+                        .initiate_upload(&signed_url.url, &task.mime_type, upload_size)
+                        .await?;
+                    task.session_id = Some(new_session.session_id.clone());
+                    task.bytes_uploaded = 0;
+                    self.db
+                        .update_upload_session_id(&task.id, &new_session.session_id)
+                        .await?;
+                    return self.do_upload(task, &new_session, upload_path, upload_size, &hash, &desensitized_path).await;
+                }
+            }
+            s
+        } else {
+            let signed_url = self
+                .api
+                .get_upload_url(&task.tenant_id, &task.project_id, &doc_id)
+                .await?;
+            let session = self
+                .storage
+                .initiate_upload(&signed_url.url, &task.mime_type, upload_size)
+                .await?;
+            task.session_id = Some(session.session_id.clone());
+            self.db
+                .update_upload_session_id(&task.id, &session.session_id)
+                .await?;
+            session
+        };
 
-        // Stage 4: Get signed upload URL + initiate resumable session
-        let signed_url = self
-            .api
-            .get_upload_url(&task.tenant_id, &task.project_id, &doc.id)
-            .await?;
+        // Stage 6: Chunked resumable upload (resumes from bytes_uploaded offset)
+        self.do_upload(task, &session, upload_path, upload_size, &hash, &desensitized_path).await
+    }
 
-        let session = self
-            .storage
-            .initiate_upload(&signed_url.url, &task.mime_type, upload_size)
-            .await?;
-
-        task.session_id = Some(session.session_id.clone());
-        self.db
-            .update_upload_session_id(&task.id, &session.session_id)
-            .await?;
-
-        // Stage 5: Chunked resumable upload
+    async fn do_upload(
+        &self,
+        task: &mut UploadTask,
+        session: &storage::UploadSession,
+        upload_path: &std::path::Path,
+        _upload_size: u64,
+        hash: &str,
+        desensitized_path: &Option<PathBuf>,
+    ) -> Result<(), UploadError> {
         self.update_state(task, UploadState::Uploading).await;
 
         let event_tx = self.event_tx.clone();
@@ -276,7 +328,7 @@ impl UploadEngine {
 
         let confirmed = storage::upload_file_chunked(
             self.storage.as_ref(),
-            &session,
+            session,
             upload_path,
             task.bytes_uploaded,
             self.chunk_size,
@@ -287,13 +339,15 @@ impl UploadEngine {
         task.bytes_uploaded = confirmed;
         let _ = self.db.update_upload_progress(&task.id, confirmed).await;
 
-        // Stage 6: Verify
+        let doc_id = task.document_id.clone().unwrap_or_default();
+
+        // Verify
         self.update_state(task, UploadState::Verifying).await;
         self.api
-            .verify_upload(&task.tenant_id, &task.project_id, &doc.id, 10)
+            .verify_upload(&task.tenant_id, &task.project_id, &doc_id, 10)
             .await?;
 
-        // Stage 7: Complete
+        // Complete
         self.update_state(task, UploadState::Completed).await;
         let _ = self.event_tx.send(UploadEvent::Completed {
             task_id: task.id.clone(),
@@ -303,22 +357,22 @@ impl UploadEngine {
         let _ = self
             .db
             .insert_file_hash(
-                &hash,
+                hash,
                 &task.filename,
                 task.size,
                 &task.tenant_id,
                 &task.project_id,
-                &doc.id,
+                &doc_id,
             )
             .await;
 
         // Clean up desensitized temp file
-        if let Some(ref dp) = desensitized_path {
+        if let Some(dp) = desensitized_path {
             desensitize::cleanup_temp_file(dp);
         }
 
         // Auto-clean original file
-        if self.auto_clean && let Err(e) = tokio::fs::remove_file(path).await {
+        if self.auto_clean && let Err(e) = tokio::fs::remove_file(&task.local_path).await {
             tracing::warn!("Failed to auto-clean {}: {e}", task.local_path);
         }
 

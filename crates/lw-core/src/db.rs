@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::error::DbError;
 use crate::models::{UploadState, UploadTask};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 use std::str::FromStr;
 
 pub struct Database {
@@ -44,6 +44,53 @@ CREATE TABLE IF NOT EXISTS upload_queue (
 CREATE INDEX IF NOT EXISTS idx_upload_queue_state ON upload_queue(state);
 ";
 
+/// Row type matching SQLite nullability for sqlx::query_as!
+/// SQLite treats all columns as potentially nullable, so we use Option everywhere
+/// and convert in From impl.
+#[derive(Debug)]
+struct UploadRow {
+    id: Option<String>,
+    local_path: Option<String>,
+    filename: Option<String>,
+    size: Option<i64>,
+    mime_type: Option<String>,
+    tenant_id: Option<String>,
+    project_id: Option<String>,
+    document_id: Option<String>,
+    session_id: Option<String>,
+    bytes_uploaded: Option<i64>,
+    state: Option<String>,
+    error_message: Option<String>,
+    hash: Option<String>,
+    validation_warnings: Option<String>,
+    retry_count: Option<i64>,
+}
+
+impl From<UploadRow> for UploadTask {
+    fn from(r: UploadRow) -> Self {
+        let warnings: Vec<String> =
+            serde_json::from_str(r.validation_warnings.as_deref().unwrap_or("[]"))
+                .unwrap_or_default();
+        Self {
+            id: r.id.unwrap_or_default(),
+            local_path: r.local_path.unwrap_or_default(),
+            filename: r.filename.unwrap_or_default(),
+            size: r.size.unwrap_or(0) as u64,
+            mime_type: r.mime_type.unwrap_or_default(),
+            tenant_id: r.tenant_id.unwrap_or_default(),
+            project_id: r.project_id.unwrap_or_default(),
+            document_id: r.document_id,
+            session_id: r.session_id,
+            bytes_uploaded: r.bytes_uploaded.unwrap_or(0) as u64,
+            state: UploadState::parse(r.state.as_deref().unwrap_or("PENDING")),
+            error_message: r.error_message,
+            hash: r.hash,
+            validation_warnings: warnings,
+            retry_count: r.retry_count.unwrap_or(0) as u32,
+        }
+    }
+}
+
 impl Database {
     pub async fn open() -> Result<Self, DbError> {
         let db_path = AppConfig::db_path();
@@ -73,20 +120,22 @@ impl Database {
 
     pub async fn insert_upload_task(&self, task: &UploadTask) -> Result<(), DbError> {
         let warnings_json = serde_json::to_string(&task.validation_warnings)?;
-        sqlx::query(
+        let size = task.size as i64;
+        let state = task.state.as_str();
+        sqlx::query!(
             "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, validation_warnings)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            task.id,
+            task.local_path,
+            task.filename,
+            size,
+            task.mime_type,
+            task.tenant_id,
+            task.project_id,
+            state,
+            task.hash,
+            warnings_json,
         )
-        .bind(&task.id)
-        .bind(&task.local_path)
-        .bind(&task.filename)
-        .bind(task.size as i64)
-        .bind(&task.mime_type)
-        .bind(&task.tenant_id)
-        .bind(&task.project_id)
-        .bind(task.state.as_str())
-        .bind(&task.hash)
-        .bind(&warnings_json)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -98,12 +147,13 @@ impl Database {
         state: UploadState,
         error_message: Option<&str>,
     ) -> Result<(), DbError> {
-        sqlx::query(
-            "UPDATE upload_queue SET state = $1, error_message = $2, updated_at = datetime('now') WHERE id = $3",
+        let state_str = state.as_str();
+        sqlx::query!(
+            "UPDATE upload_queue SET state = ?, error_message = ?, updated_at = datetime('now') WHERE id = ?",
+            state_str,
+            error_message,
+            id,
         )
-        .bind(state.as_str())
-        .bind(error_message)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -114,11 +164,12 @@ impl Database {
         id: &str,
         bytes_uploaded: u64,
     ) -> Result<(), DbError> {
-        sqlx::query(
-            "UPDATE upload_queue SET bytes_uploaded = $1, updated_at = datetime('now') WHERE id = $2",
+        let bytes = bytes_uploaded as i64;
+        sqlx::query!(
+            "UPDATE upload_queue SET bytes_uploaded = ?, updated_at = datetime('now') WHERE id = ?",
+            bytes,
+            id,
         )
-        .bind(bytes_uploaded as i64)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -129,11 +180,11 @@ impl Database {
         id: &str,
         document_id: &str,
     ) -> Result<(), DbError> {
-        sqlx::query(
-            "UPDATE upload_queue SET document_id = $1, updated_at = datetime('now') WHERE id = $2",
+        sqlx::query!(
+            "UPDATE upload_queue SET document_id = ?, updated_at = datetime('now') WHERE id = ?",
+            document_id,
+            id,
         )
-        .bind(document_id)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -144,20 +195,18 @@ impl Database {
         id: &str,
         session_id: &str,
     ) -> Result<(), DbError> {
-        sqlx::query(
-            "UPDATE upload_queue SET session_id = $1, updated_at = datetime('now') WHERE id = $2",
+        sqlx::query!(
+            "UPDATE upload_queue SET session_id = ?, updated_at = datetime('now') WHERE id = ?",
+            session_id,
+            id,
         )
-        .bind(session_id)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Reset any in-progress uploads to FAILED on startup.
-    /// These were interrupted by app exit and can't be resumed without re-initiating.
     pub async fn reset_stale_uploads(&self) -> Result<u64, DbError> {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE upload_queue SET state = 'FAILED', error_message = 'Interrupted by app restart', updated_at = datetime('now')
              WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'PENDING')",
         )
@@ -167,22 +216,21 @@ impl Database {
     }
 
     pub async fn get_staged_uploads(&self) -> Result<Vec<UploadTask>, DbError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
                     hash, validation_warnings, retry_count
-             FROM upload_queue
-             WHERE state = 'STAGED'
-             ORDER BY created_at ASC",
+             FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
         .await?;
-
-        Ok(rows.iter().map(row_to_task).collect())
+        Ok(rows.into_iter().map(UploadTask::from).collect())
     }
 
     pub async fn get_pending_uploads(&self) -> Result<Vec<UploadTask>, DbError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
                     hash, validation_warnings, retry_count
@@ -192,28 +240,24 @@ impl Database {
         )
         .fetch_all(&self.pool)
         .await?;
-
-        Ok(rows.iter().map(row_to_task).collect())
+        Ok(rows.into_iter().map(UploadTask::from).collect())
     }
 
     pub async fn get_all_uploads(&self) -> Result<Vec<UploadTask>, DbError> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
                     hash, validation_warnings, retry_count
-             FROM upload_queue
-             ORDER BY created_at DESC
-             LIMIT 100",
+             FROM upload_queue ORDER BY created_at DESC LIMIT 100",
         )
         .fetch_all(&self.pool)
         .await?;
-
-        Ok(rows.iter().map(row_to_task).collect())
+        Ok(rows.into_iter().map(UploadTask::from).collect())
     }
 
     pub async fn delete_upload_task(&self, id: &str) -> Result<(), DbError> {
-        sqlx::query("DELETE FROM upload_queue WHERE id = $1")
-            .bind(id)
+        sqlx::query!("DELETE FROM upload_queue WHERE id = ?", id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -230,57 +274,24 @@ impl Database {
         project_id: &str,
         document_id: &str,
     ) -> Result<(), DbError> {
-        sqlx::query(
+        let size = size as i64;
+        sqlx::query!(
             "INSERT OR REPLACE INTO file_hashes (hash, filename, size, tenant_id, project_id, document_id)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             VALUES (?, ?, ?, ?, ?, ?)",
+            hash, filename, size, tenant_id, project_id, document_id,
         )
-        .bind(hash)
-        .bind(filename)
-        .bind(size as i64)
-        .bind(tenant_id)
-        .bind(project_id)
-        .bind(document_id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
     pub async fn find_by_hash(&self, hash: &str) -> Result<Option<String>, DbError> {
-        let row = sqlx::query("SELECT document_id FROM file_hashes WHERE hash = $1")
-            .bind(hash)
-            .fetch_optional(&self.pool)
-            .await?;
-
-        Ok(row.map(|r| r.get("document_id")))
-    }
-}
-
-fn row_to_task(row: &sqlx::sqlite::SqliteRow) -> UploadTask {
-    let warnings_str: String = row
-        .try_get::<Option<String>, _>("validation_warnings")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let warnings: Vec<String> = serde_json::from_str(&warnings_str).unwrap_or_default();
-    let size: i64 = row.get("size");
-    let bytes_uploaded: i64 = row.get("bytes_uploaded");
-    let retry_count: i32 = row.get("retry_count");
-
-    UploadTask {
-        id: row.get("id"),
-        local_path: row.get("local_path"),
-        filename: row.get("filename"),
-        size: size as u64,
-        mime_type: row.get("mime_type"),
-        tenant_id: row.get("tenant_id"),
-        project_id: row.get("project_id"),
-        document_id: row.get("document_id"),
-        session_id: row.get("session_id"),
-        bytes_uploaded: bytes_uploaded as u64,
-        state: UploadState::parse(row.get::<&str, _>("state")),
-        error_message: row.get("error_message"),
-        hash: row.get("hash"),
-        validation_warnings: warnings,
-        retry_count: retry_count as u32,
+        let row = sqlx::query!(
+            "SELECT document_id FROM file_hashes WHERE hash = ?",
+            hash,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.document_id))
     }
 }
