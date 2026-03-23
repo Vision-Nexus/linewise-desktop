@@ -8,8 +8,9 @@ use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE};
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-/// Default chunk size: 8 MiB (must be multiple of 256 KiB for GCS)
-const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+/// Default chunk size: 32 MiB (must be multiple of 256 KiB for GCS).
+/// Larger chunks = fewer requests = faster for big video files.
+const DEFAULT_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
 
 /// Handle to an in-progress resumable upload session, persisted in SQLite
 #[derive(Debug, Clone)]
@@ -120,7 +121,11 @@ impl Default for GcsBackend {
 impl GcsBackend {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("failed to build reqwest client"),
         }
     }
 
