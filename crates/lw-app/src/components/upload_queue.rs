@@ -150,6 +150,45 @@ pub fn UploadQueue() -> Element {
         });
     };
 
+    // Pause an active upload
+    let db_for_pause = services.db.clone();
+    let mut app_state_pause = app_state.clone();
+    let on_pause = move |task_id: String| {
+        let db = db_for_pause.clone();
+        spawn(async move {
+            let _ = db.update_upload_state(&task_id, UploadState::Paused, None).await;
+            let mut tasks = app_state_pause.upload_tasks.write();
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = UploadState::Paused;
+            }
+        });
+    };
+
+    // Resume a paused upload
+    let engine_for_resume = services.upload_engine.clone();
+    let db_for_resume = services.db.clone();
+    let mut app_state_resume = app_state.clone();
+    let on_resume = move |task_id: String| {
+        let engine = engine_for_resume.clone();
+        let db = db_for_resume.clone();
+        spawn(async move {
+            let _ = db.update_upload_state(&task_id, UploadState::Pending, None).await;
+            let mut tasks = app_state_resume.upload_tasks.write();
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = UploadState::Pending;
+                task.error_message = None;
+                let mut task = task.clone();
+                drop(tasks);
+                let eng = engine.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = eng.process_task(&mut task).await {
+                        tracing::error!("Resume failed for {}: {e}", task.filename);
+                    }
+                });
+            }
+        });
+    };
+
     // Remove from history (delete from DB + UI)
     let mut app_state_clear = app_state.clone();
     let db_for_clear = services.db.clone();
@@ -262,6 +301,8 @@ pub fn UploadQueue() -> Element {
                                 task: task.clone(),
                                 on_retry: on_retry.clone(),
                                 on_remove: on_clear.clone(),
+                                on_pause: on_pause.clone(),
+                                on_resume: on_resume.clone(),
                             }
                         }
                     }
@@ -277,6 +318,8 @@ pub fn UploadQueue() -> Element {
                                 task: task.clone(),
                                 on_retry: on_retry.clone(),
                                 on_remove: on_clear.clone(),
+                                on_pause: on_pause.clone(),
+                                on_resume: on_resume.clone(),
                             }
                         }
                     }
@@ -336,6 +379,8 @@ fn UploadTaskRow(
     task: UploadTask,
     on_retry: EventHandler<String>,
     on_remove: EventHandler<String>,
+    on_pause: EventHandler<String>,
+    on_resume: EventHandler<String>,
 ) -> Element {
     let progress = if task.size > 0 {
         (task.bytes_uploaded as f64 / task.size as f64 * 100.0) as u32
@@ -373,32 +418,61 @@ fn UploadTaskRow(
                     }
                     // Action buttons based on state
                     {
-                        let task_id = task.id.clone();
-                        let task_id2 = task.id.clone();
+                        let id1 = task.id.clone();
+                        let id2 = task.id.clone();
+                        let _id3 = task.id.clone();
+                        let small_btn = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; transition: background 0.15s, transform 0.08s;";
                         match task.state {
+                            UploadState::Uploading
+                            | UploadState::Validating
+                            | UploadState::Desensitizing
+                            | UploadState::Creating
+                            | UploadState::Verifying
+                            | UploadState::Pending => rsx! {
+                                button {
+                                    class: "btn-outline",
+                                    style: "{small_btn} background: transparent; color: var(--warning); border: 1px solid var(--warning);",
+                                    onclick: move |_| on_pause.call(id1.clone()),
+                                    "Pause"
+                                }
+                            },
+                            UploadState::Paused => rsx! {
+                                button {
+                                    class: "btn-primary",
+                                    style: "{small_btn} background: var(--btn-primary); color: white; border: none;",
+                                    onclick: move |_| on_resume.call(id1.clone()),
+                                    "Resume"
+                                }
+                                button {
+                                    class: "btn-danger-sm",
+                                    style: "{small_btn} background: transparent; color: var(--error); border: 1px solid var(--error);",
+                                    onclick: move |_| on_remove.call(id2.clone()),
+                                    "Remove"
+                                }
+                            },
                             UploadState::Failed => rsx! {
                                 button {
                                     class: "btn-primary",
-                                    style: "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; background: var(--btn-primary); color: white; border: none; cursor: pointer; transition: background 0.15s, transform 0.08s;",
-                                    onclick: move |_| on_retry.call(task_id.clone()),
+                                    style: "{small_btn} background: var(--btn-primary); color: white; border: none;",
+                                    onclick: move |_| on_retry.call(id1.clone()),
                                     "Retry"
                                 }
                                 button {
                                     class: "btn-danger-sm",
-                                    style: "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; background: transparent; color: var(--error); border: 1px solid var(--error); cursor: pointer; transition: background 0.15s, transform 0.08s;",
-                                    onclick: move |_| on_remove.call(task_id2.clone()),
+                                    style: "{small_btn} background: transparent; color: var(--error); border: 1px solid var(--error);",
+                                    onclick: move |_| on_remove.call(id2.clone()),
                                     "Remove"
                                 }
                             },
                             UploadState::Completed => rsx! {
                                 button {
-                                    class: "btn-danger-sm",
-                                    style: "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; background: transparent; color: var(--text-muted); border: 1px solid var(--border); cursor: pointer; transition: background 0.15s, transform 0.08s;",
-                                    onclick: move |_| on_remove.call(task_id.clone()),
+                                    class: "btn-outline",
+                                    style: "{small_btn} background: transparent; color: var(--text-muted); border: 1px solid var(--border);",
+                                    onclick: move |_| on_remove.call(id1.clone()),
                                     "Clear"
                                 }
                             },
-                            _ => rsx! {}
+                            UploadState::Staged => rsx! {},
                         }
                     }
                 }
