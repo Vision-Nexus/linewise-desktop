@@ -2,6 +2,8 @@
 
 Cross-platform desktop client for Linewise — handles data desensitization, resumable uploads, video validation, and action camera integration. Built with Rust + Dioxus.
 
+**Docs**: [README.md](README.md) | [ARCHITECTURE.md](ARCHITECTURE.md) (Mermaid diagrams)
+
 ## Contract
 
 - Core business logic lives in `crates/lw-core/` — zero UI dependencies
