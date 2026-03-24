@@ -29,6 +29,8 @@ pub fn ChatPanel(config: ChatConfig) -> Element {
     let mut draft = use_signal(String::new);
     let mut error_msg: Signal<Option<String>> = use_signal(|| None);
     let mut history_open = use_signal(|| false);
+    let mut at_bottom = use_signal(|| true);
+    let mut messages_el: Signal<Option<MountedEvent>> = use_signal(|| None);
 
     // Load sessions on mount and when tenant changes
     let config_load = config.clone();
@@ -115,6 +117,17 @@ pub fn ChatPanel(config: ChatConfig) -> Element {
         });
     };
 
+    // Auto-scroll to bottom when streaming text updates and user is following
+    use_effect(move || {
+        let _text = streaming_text.read();
+        if *at_bottom.read() && let Some(el) = messages_el.read().as_ref() {
+            let el = el.clone();
+            spawn(async move {
+                let _ = el.data().scroll_to(ScrollBehavior::Smooth).await;
+            });
+        }
+    });
+
     // Send message
     let config_send = config.clone();
     let mut do_send = move |_: ()| {
@@ -200,7 +213,7 @@ pub fn ChatPanel(config: ChatConfig) -> Element {
                         }
                         // History dropdown
                         if show_history {
-                            div { class: "chat-history-dropdown",
+                            div { class: "chat-history-dropdown slide-down",
                                 div { class: "chat-history-title", "History" }
                                 if current_sessions.is_empty() {
                                     div { class: "chat-history-empty", "No conversations yet" }
@@ -238,18 +251,30 @@ pub fn ChatPanel(config: ChatConfig) -> Element {
                 }
             }
 
-            div { class: "chat-messages",
+            div { class: "chat-messages-wrapper", style: "position: relative; flex: 1; overflow: hidden; display: flex; flex-direction: column;",
+            div {
+                class: "chat-messages",
+                onmounted: move |evt: MountedEvent| messages_el.set(Some(evt)),
+                onscroll: move |evt: Event<ScrollData>| {
+                    let data = evt.data();
+                    let gap = data.scroll_height() as f64 - data.scroll_top() - data.client_height() as f64;
+                    at_bottom.set(gap < 40.0);
+                },
                 if msgs.is_empty() && !is_active {
                     div { class: "chat-empty", "Ask a question about your project..." }
                 }
 
                 for (i, msg) in msgs.iter().enumerate() {
-                    ChatBubble { key: "{i}", message: msg.clone() }
+                    div { key: "{i}", class: "fade-in",
+                        ChatBubble { message: msg.clone() }
+                    }
                 }
 
                 if is_active {
                     for tc in tools.iter() {
-                        ToolCallCard { info: tc.clone() }
+                        div { class: "fade-in-left",
+                            ToolCallCard { info: tc.clone() }
+                        }
                     }
 
                     if !streaming.is_empty() {
@@ -266,11 +291,32 @@ pub fn ChatPanel(config: ChatConfig) -> Element {
 
                 if let Some(err_text) = err.as_ref() {
                     div {
+                        class: "fade-in",
                         style: "color: var(--error, #ef4444); font-size: 13px; padding: 8px;",
                         "{err_text}"
                     }
                 }
             }
+            // Scroll-to-bottom button — only shown when not following tail
+            if !*at_bottom.read() {
+                button {
+                    class: "chat-scroll-btn fade-in",
+                    onclick: move |_| {
+                        if let Some(el) = messages_el.read().as_ref() {
+                            let el = el.clone();
+                            spawn(async move {
+                                let _ = el.data().scroll_to(
+                                    ScrollBehavior::Smooth,
+                                ).await;
+                            });
+                        }
+                        at_bottom.set(true);
+                    },
+                    title: "Scroll to bottom",
+                    "↓"
+                }
+            }
+            } // close chat-messages-wrapper
 
             div { class: "chat-input",
                 textarea {

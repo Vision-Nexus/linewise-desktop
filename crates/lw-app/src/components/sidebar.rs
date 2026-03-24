@@ -131,11 +131,8 @@ fn TenantNode(
         expanded.set(!current);
     };
 
-    let arrow = if *expanded.read() {
-        "\u{25BE}"
-    } else {
-        "\u{25B8}"
-    }; // ▾ / ▸
+    let is_open = *expanded.read();
+    let arrow_class = if is_open { "collapse-arrow open" } else { "collapse-arrow" };
 
     rsx! {
         div {
@@ -144,7 +141,7 @@ fn TenantNode(
                 class: "card-row",
                 style: "display: flex; align-items: center; gap: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text); transition: background 0.12s;",
                 onclick: toggle,
-                span { style: "font-size: 10px; color: var(--text-muted); width: 12px;", "{arrow}" }
+                span { class: "{arrow_class}", style: "font-size: 10px; color: var(--text-muted); width: 12px;", "▸" }
                 span { "{tenant.display_name}" }
                 span {
                     style: "font-size: 11px; color: var(--text-muted); font-weight: 400; margin-left: auto;",
@@ -153,22 +150,23 @@ fn TenantNode(
             }
 
             // Project list
-            if *expanded.read() {
+            if is_open {
                 div {
                     style: "padding-left: 8px;",
-                    for project in projects.iter() {
+                    for (idx, project) in projects.iter().enumerate() {
                         {
                             let is_active = project.id == selected_project_id;
                             let bg = if is_active { "var(--info-bg)" } else { "transparent" };
                             let color = if is_active { "var(--info)" } else { "var(--text-secondary)" };
                             let font_weight = if is_active { "600" } else { "400" };
+                            let delay = idx * 30;
                             let tenant = tenant.clone();
                             let project = project.clone();
                             rsx! {
                                 div {
                                     key: "{project.id}",
-                                    class: "card-row",
-                                    style: "display: flex; align-items: center; padding: 5px 12px 5px 22px; cursor: pointer; font-size: 13px; color: {color}; font-weight: {font_weight}; background: {bg}; border-radius: 4px; margin: 1px 4px; transition: background 0.12s, color 0.12s;",
+                                    class: "card-row stagger",
+                                    style: "display: flex; align-items: center; padding: 5px 12px 5px 22px; cursor: pointer; font-size: 13px; color: {color}; font-weight: {font_weight}; background: {bg}; border-radius: 4px; margin: 1px 4px; transition: background 0.12s, color 0.12s; animation-delay: {delay}ms;",
                                     onclick: move |_| on_select_project.call((tenant.clone(), project.clone())),
                                     "{project.name}"
                                 }
@@ -192,8 +190,13 @@ fn SignOutButton() -> Element {
     let services = use_context::<CoreServices>();
     let app_state = use_context::<AppState>();
     let app_state_signout = app_state.clone();
+    let mut signing_out = use_signal(|| false);
 
     let on_sign_out = move |_| {
+        if *signing_out.read() {
+            return;
+        }
+        signing_out.set(true);
         let auth = services.auth.clone();
         let mut app_state = app_state_signout.clone();
         spawn(async move {
@@ -207,12 +210,20 @@ fn SignOutButton() -> Element {
         });
     };
 
+    let is_busy = *signing_out.read();
+
     rsx! {
         button {
             class: "btn-outline",
             style: "{styles::BTN_OUTLINE} width: 100%;",
             onclick: on_sign_out,
-            "Sign Out"
+            disabled: is_busy,
+            if is_busy {
+                span { class: "spinner spinner-sm", style: "margin-right: 6px;" }
+                "Signing out..."
+            } else {
+                "Sign Out"
+            }
         }
     }
 }

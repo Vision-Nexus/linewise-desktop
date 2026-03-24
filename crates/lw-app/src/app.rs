@@ -135,8 +135,40 @@ input:focus { border-color: var(--border-focus) !important; box-shadow: var(--fo
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
 /* ── Animations ──────────────────────────────────────────────────── */
-.fade-in { animation: fadeIn 0.2s ease-in; }
+.fade-in { animation: fadeIn 0.2s ease-out; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+.slide-in-right { animation: slideInRight 0.25s ease-out; }
+@keyframes slideInRight { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+
+.slide-down { animation: slideDown 0.2s ease-out; }
+@keyframes slideDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+
+.fade-in-left { animation: fadeInLeft 0.2s ease-out; }
+@keyframes fadeInLeft { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: translateX(0); } }
+
+/* Spinner for loading states */
+.spinner {
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid transparent; border-top-color: currentColor; border-radius: 50%;
+    animation: spin 0.6s linear infinite; vertical-align: middle;
+}
+.spinner-sm { width: 12px; height: 12px; border-width: 1.5px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Loading overlay for full-page states */
+.loading-screen {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100vh; gap: 12px; color: var(--text-secondary);
+}
+.loading-screen .spinner { width: 24px; height: 24px; border-width: 2.5px; color: var(--btn-primary); }
+
+/* Smooth transitions for collapsible content */
+.collapse-arrow { display: inline-block; transition: transform 0.15s ease; }
+.collapse-arrow.open { transform: rotate(90deg); }
+
+/* Stagger delay utility — set via inline style: animation-delay: Xms */
+.stagger { animation: fadeIn 0.2s ease-out backwards; }
 "#;
 
 #[component]
@@ -176,6 +208,7 @@ pub fn App() -> Element {
 
     let app_state = use_context::<AppState>();
     let services = use_context::<CoreServices>();
+    let mut restoring = use_signal(|| true);
 
     // Try to restore session on first render
     let app_state_restore = app_state.clone();
@@ -186,21 +219,27 @@ pub fn App() -> Element {
         async move {
             if let Ok(_tokens) = auth.try_restore_session().await {
                 tracing::info!("Session restored");
-                // Update auth token signal for chat
                 if let Ok(token) = auth.get_id_token().await {
                     app_state.auth_token.set(token);
                 }
                 fetch_user_info(&api, &mut app_state).await;
             }
+            restoring.set(false);
         }
     });
 
     let is_authenticated = *app_state.is_authenticated.read();
+    let is_restoring = *restoring.read();
 
     rsx! {
         style { "{GLOBAL_CSS}" }
         style { "{lw_chat::styles::CHAT_CSS}" }
-        if !is_authenticated {
+        if is_restoring {
+            div { class: "loading-screen",
+                span { class: "spinner" }
+                span { "Signing in..." }
+            }
+        } else if !is_authenticated {
             LoginPage {}
         } else {
             MainView {}
@@ -331,6 +370,7 @@ fn MainView() -> Element {
             // Right panel — chat (window already extended)
             if is_open {
                 div {
+                    class: "slide-in-right",
                     style: "width: 380px; flex-shrink: 0; border-left: 1px solid var(--border); \
                             display: flex; flex-direction: column; overflow: hidden;",
                     ChatPanel { config: chat_config }

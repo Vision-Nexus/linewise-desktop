@@ -338,4 +338,30 @@ pub const CHAT_CSS: &str = r#"
 }
 
 .md-content s { text-decoration: line-through; }
+
+/* Scroll-to-bottom button */
+.chat-scroll-btn {
+    position: absolute;
+    bottom: 8px;
+    right: 16px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-secondary);
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: var(--shadow-sm);
+    transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+    z-index: 10;
+}
+.chat-scroll-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text);
+    box-shadow: var(--shadow-md);
+}
 "#;

@@ -83,14 +83,19 @@ pub fn LoginPage() -> Element {
                     class: "btn-primary",
                     disabled: *loading.read(),
                     style: "{styles::BTN_PRIMARY} width: 100%; height: 38px; font-size: 14px;",
-                    if *loading.read() { "Signing in..." } else { "Sign In" }
+                    if *loading.read() {
+                        span { class: "spinner spinner-sm", style: "margin-right: 6px;" }
+                        "Signing in..."
+                    } else {
+                        "Sign In"
+                    }
                 }
             }
 
             if let Some(err) = error.read().as_ref() {
                 div {
                     class: "fade-in",
-                    style: "max-width: 320px; padding: 10px 14px; background: #fef2f2; border: 1px solid #fca5a5; border-radius: 6px; color: #991b1b; font-size: 13px;",
+                    style: "max-width: 320px; padding: 10px 14px; background: var(--error-bg); border: 1px solid var(--error); border-radius: 6px; color: var(--error); font-size: 13px;",
                     "{err}"
                 }
             }
