@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 lw-core = { path = "../lw-core" }
+lw-chat = { path = "../lw-chat" }
 dioxus = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

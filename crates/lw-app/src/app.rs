@@ -3,6 +3,7 @@ use crate::components::upload_queue::UploadQueue;
 use crate::state::{AppState, CoreServices};
 use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
 use dioxus::prelude::*;
+use lw_chat::{ChatConfig, ChatPanel};
 
 /// Global CSS for hover/active states (can't do :hover in inline styles)
 const GLOBAL_CSS: &str = r#"
@@ -156,16 +157,14 @@ pub fn App() -> Element {
     });
 
     // Handle tray menu events
-    dioxus::desktop::use_tray_menu_event_handler(move |event| {
-        match event.id().0.as_str() {
-            "show" => {
-                let window = dioxus::desktop::window();
-                window.set_visible(true);
-                window.set_focus();
-            }
-            "quit" => std::process::exit(0),
-            _ => {}
+    dioxus::desktop::use_tray_menu_event_handler(move |event| match event.id().0.as_str() {
+        "show" => {
+            let window = dioxus::desktop::window();
+            window.set_visible(true);
+            window.set_focus();
         }
+        "quit" => std::process::exit(0),
+        _ => {}
     });
 
     // Handle tray icon click — show window
@@ -187,6 +186,10 @@ pub fn App() -> Element {
         async move {
             if let Ok(_tokens) = auth.try_restore_session().await {
                 tracing::info!("Session restored");
+                // Update auth token signal for chat
+                if let Ok(token) = auth.get_id_token().await {
+                    app_state.auth_token.set(token);
+                }
                 fetch_user_info(&api, &mut app_state).await;
             }
         }
@@ -196,6 +199,7 @@ pub fn App() -> Element {
 
     rsx! {
         style { "{GLOBAL_CSS}" }
+        style { "{lw_chat::styles::CHAT_CSS}" }
         if !is_authenticated {
             LoginPage {}
         } else {
@@ -222,17 +226,115 @@ async fn fetch_user_info(api: &lw_core::api_client::ApiClient, app_state: &mut A
 
 #[component]
 fn MainView() -> Element {
+    let mut chat_open = use_signal(|| false);
+    let app_state = use_context::<AppState>();
+    let services = use_context::<CoreServices>();
+
+    let mut tenant_id = use_signal(String::new);
+    let mut project_id_sig: Signal<Option<String>> = use_signal(|| None);
+
+    // Sync tenant/project selections to chat config signals
+    use_effect(move || {
+        let t = app_state
+            .selected_tenant
+            .read()
+            .as_ref()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        tenant_id.set(t);
+    });
+
+    use_effect(move || {
+        let p = app_state
+            .selected_project
+            .read()
+            .as_ref()
+            .map(|p| p.id.clone());
+        project_id_sig.set(p);
+    });
+
+    let chat_config = ChatConfig {
+        base_url: services
+            .config
+            .server
+            .environment
+            .api_base_url()
+            .to_string(),
+        auth_token: app_state.auth_token,
+        tenant: tenant_id,
+        project_id: project_id_sig,
+    };
+
+    let is_open = *chat_open.read();
+
+    // Resize window when chat panel opens/closes
+    use_effect(move || {
+        let open = *chat_open.read();
+        let desktop = dioxus::desktop::window();
+        let scale = desktop.scale_factor();
+        let current = desktop.inner_size();
+        let current_w = current.width as f64 / scale;
+        let current_h = current.height as f64 / scale;
+        let chat_w = 380.0;
+
+        let new_w = if open {
+            current_w + chat_w
+        } else {
+            (current_w - chat_w).max(900.0)
+        };
+
+        desktop.set_inner_size(dioxus::desktop::LogicalSize::new(new_w, current_h));
+    });
+
+    let toggle_class = if is_open { "btn-primary" } else { "btn-outline" };
+    let toggle_style = if is_open {
+        "width: 90px; padding: 4px 0; border-radius: 6px; font-size: 13px; \
+         cursor: pointer; border: 1px solid var(--btn-primary); \
+         background: var(--btn-primary); color: white; font-weight: 500; \
+         transition: background 0.15s, color 0.15s, border-color 0.15s; text-align: center;"
+    } else {
+        "width: 90px; padding: 4px 0; border-radius: 6px; font-size: 13px; \
+         cursor: pointer; border: 1px solid var(--border); \
+         background: var(--btn-outline-bg); color: var(--text); font-weight: 500; \
+         transition: background 0.15s, color 0.15s, border-color 0.15s; text-align: center;"
+    };
+    let toggle_label = if is_open { "Close Chat" } else { "Ask Linus" };
+
     rsx! {
         div {
             style: "display: flex; height: 100vh;",
 
-            // Fixed-width sidebar with tenant/project selectors
             crate::components::sidebar::Sidebar {}
 
-            // Flexible main content
-            main {
-                style: "flex: 1; overflow-y: auto; padding: 16px;",
-                UploadQueue {}
+            // Main content — upload queue
+            div {
+                style: "flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0;",
+
+                // Top bar with chat toggle
+                div {
+                    style: "display: flex; align-items: center; justify-content: flex-end; \
+                            padding: 6px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0;",
+                    button {
+                        class: "{toggle_class}",
+                        style: "{toggle_style}",
+                        onclick: move |_| chat_open.set(!is_open),
+                        "{toggle_label}"
+                    }
+                }
+
+                main {
+                    style: "flex: 1; overflow-y: auto; padding: 16px;",
+                    UploadQueue {}
+                }
+            }
+
+            // Right panel — chat (window already extended)
+            if is_open {
+                div {
+                    style: "width: 380px; flex-shrink: 0; border-left: 1px solid var(--border); \
+                            display: flex; flex-direction: column; overflow: hidden;",
+                    ChatPanel { config: chat_config }
+                }
             }
         }
     }

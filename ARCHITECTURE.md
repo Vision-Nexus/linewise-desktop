@@ -6,20 +6,33 @@
 graph TB
     subgraph "lw-app (Dioxus 0.7 Desktop)"
         direction TB
-        App["App<br/>System Tray · Session Restore<br/>Dark/Light Theme"]
+        App["App<br/>System Tray · Session Restore<br/>Dark/Light Theme · Tab Bar"]
         Sidebar["Sidebar<br/>Org → Project Tree"]
         Upload["Upload Queue<br/>Stage → Confirm → Progress<br/>DnD · Retry · Pause"]
         Login["Login<br/>Firebase Email/Password<br/>Google · Microsoft"]
-        State["AppState (Signals)<br/>user_info · selected_tenant/project<br/>upload_tasks · tenant_projects"]
+        State["AppState (Signals)<br/>user_info · selected_tenant/project<br/>upload_tasks · auth_token"]
         Core["CoreServices (Arc)"]
 
         App --> Sidebar
         App --> Upload
         App --> Login
+        App --> ChatUI
         Sidebar --> State
         Upload --> State
         Login --> State
         State --> Core
+    end
+
+    subgraph "lw-chat (Chat Component)"
+        direction TB
+        ChatUI["ChatPanel<br/>SSE streaming · bubbles<br/>tool call cards"]
+        MD["Markdown<br/>pulldown-cmark → RSX<br/>portable (no innerHTML)"]
+        SSE["SSE Client<br/>reqwest byte stream<br/>parse data: lines"]
+        ChatTypes["Types<br/>ChatEvent · ChatMessage<br/>ChatRequest · ChatConfig"]
+
+        ChatUI --> MD
+        ChatUI --> SSE
+        ChatUI --> ChatTypes
     end
 
     subgraph "lw-core (Business Logic)"
@@ -51,6 +64,7 @@ graph TB
     Core --> DB
 
     API -->|HTTPS| Backend["Linewise API<br/>(Scala/http4s)"]
+    SSE -->|"SSE POST"| Backend
     Storage -->|"Resumable PUT"| GCS["Google Cloud Storage"]
     Storage -->|"Multipart PUT"| S3["S3-Compatible<br/>(AWS/Alibaba/Tencent)"]
     Auth -->|REST| Firebase["Firebase Auth"]
@@ -147,6 +161,15 @@ graph LR
         A8[project_select.rs]
     end
 
+    subgraph "lw-chat"
+        H1[chat.rs]
+        H2[markdown.rs]
+        H3[client.rs]
+        H4[types.rs]
+        H5[error.rs]
+        H6[styles.rs]
+    end
+
     subgraph "lw-core"
         C1[upload.rs]
         C2[storage.rs]
@@ -161,6 +184,11 @@ graph LR
         C11[models.rs]
         C12[error.rs]
     end
+
+    A1 --> H1
+    H1 --> H2
+    H1 --> H3
+    H3 --> H4
 
     A5 --> C1
     A5 --> C3
@@ -183,6 +211,9 @@ graph LR
     style A4 fill:#dbeafe
     style A5 fill:#bfdbfe
     style A6 fill:#dbeafe
+    style H1 fill:#e0e7ff
+    style H2 fill:#e0e7ff
+    style H3 fill:#e0e7ff
     style C1 fill:#fef3c7
     style C2 fill:#fef3c7
     style C5 fill:#d1fae5
@@ -194,7 +225,7 @@ graph LR
 
 | Module | File | Purpose |
 |--------|------|---------|
-| **App** | `app.rs` | Root component, system tray, session restore, global CSS with dark/light theme |
+| **App** | `app.rs` | Root component, system tray, session restore, global CSS with dark/light theme, Upload/Chat tab bar |
 | **Sidebar** | `components/sidebar.rs` | Two-level org→project tree, expand/collapse, project selection |
 | **Upload Queue** | `components/upload_queue.rs` | Two-step upload (stage→confirm), DnD, progress, history, retry/pause/resume/remove |
 | **Login** | `components/login.rs` | Email/password login, OAuth buttons (Google, Microsoft) |
@@ -202,6 +233,17 @@ graph LR
 | **Project Select** | `components/project_select.rs` | Project dropdown (used in sidebar) |
 | **State** | `state.rs` | `AppState` (Dioxus Signals) + `CoreServices` (Arc shared services) |
 | **Styles** | `styles.rs` | Fixed-px layout constants, CSS variable button/input/select styles |
+
+### lw-chat (Chat Component — self-contained)
+
+| Module | File | Purpose |
+|--------|------|---------|
+| **ChatPanel** | `chat.rs` | Main chat UI: message list, streaming bubbles, tool call cards, input bar. Configurable via `ChatConfig` |
+| **Markdown** | `markdown.rs` | Portable pulldown-cmark → RSX renderer. Intermediate `MdNode` tree, no `dangerous_inner_html`. Handles all CommonMark + GFM extensions |
+| **SSE Client** | `client.rs` | Streaming HTTP client: POST to chat/completions, parse SSE `data:` lines into `ChatEvent` stream. Error-tolerant (yields parse errors, doesn't stop) |
+| **Types** | `types.rs` | `ChatMessage`, `ChatRole`, `ChatEvent` (6 variants: text_delta, thinking_delta, tool_call_start/delta/result, done), `ChatRequest`, `ChatContext`, `ChatMode` |
+| **Error** | `error.rs` | `ChatError`: Network, Api, Parse |
+| **Styles** | `styles.rs` | `CHAT_CSS` constant: chat panel + markdown content CSS with CSS variable tokens |
 
 ### lw-core (Business Logic — zero UI deps)
 
@@ -235,6 +277,8 @@ graph LR
 | Credentials | keyring 3.x (OS keychain) |
 | System Tray | tray-icon (via Dioxus desktop) |
 | Theming | CSS variables + `@media (prefers-color-scheme: dark)` |
+| Markdown | pulldown-cmark 0.12 (portable RSX renderer) |
+| Streaming | async-stream + tokio-stream (SSE parsing) |
 
 ## Configuration
 
@@ -274,3 +318,4 @@ file_filter = ["video/*"]
 | Get upload URL | POST | `.../documents/{did}/upload-url?resumable=true` |
 | Get document | GET | `.../documents/{did}` |
 | Verify upload | GET | `.../documents/{did}` (poll until gcsUri set) |
+| Chat completions | POST | `/api/org/{tenant}/chat/completions` (SSE stream) |

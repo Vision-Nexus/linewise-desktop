@@ -4,8 +4,8 @@ use lw_core::auth::AuthService;
 use lw_core::config::AppConfig;
 use lw_core::db::Database;
 use lw_core::models::{Project, Tenant, UploadTask, UserInfo};
-use std::collections::HashMap;
 use lw_core::upload::{UploadEngine, UploadEvent};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -25,7 +25,9 @@ pub struct CoreServices {
 impl CoreServices {
     pub async fn init() -> Result<Self, String> {
         let config = AppConfig::load().map_err(|e| format!("Config error: {e}"))?;
-        let db = Database::open().await.map_err(|e| format!("Database error: {e}"))?;
+        let db = Database::open()
+            .await
+            .map_err(|e| format!("Database error: {e}"))?;
         let db = Arc::new(db);
 
         let auth = Arc::new(AuthService::new(FIREBASE_API_KEY.to_string()));
@@ -75,6 +77,7 @@ pub struct AppState {
     pub tenant_projects: Signal<HashMap<String, Vec<Project>>>,
     pub is_loading: Signal<bool>,
     pub error_message: Signal<Option<String>>,
+    pub auth_token: Signal<String>,
 }
 
 impl AppState {
@@ -89,6 +92,7 @@ impl AppState {
             tenant_projects: Signal::new(HashMap::new()),
             is_loading: Signal::new(false),
             error_message: Signal::new(None),
+            auth_token: Signal::new(String::new()),
         }
     }
 }

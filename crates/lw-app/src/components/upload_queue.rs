@@ -54,10 +54,13 @@ pub fn UploadQueue() -> Element {
     });
 
     let tasks = app_state.upload_tasks.read();
-    let has_context = app_state.selected_tenant.read().is_some()
-        && app_state.selected_project.read().is_some();
+    let has_context =
+        app_state.selected_tenant.read().is_some() && app_state.selected_project.read().is_some();
 
-    let staged_count = tasks.iter().filter(|t| t.state == UploadState::Staged).count();
+    let staged_count = tasks
+        .iter()
+        .filter(|t| t.state == UploadState::Staged)
+        .count();
     let _active_count = tasks.iter().filter(|t| t.state.is_active()).count();
 
     // Stage files (step 1)
@@ -67,8 +70,18 @@ pub fn UploadQueue() -> Element {
     let app_state_add = app_state.clone();
     let on_add_files = move |_| {
         let engine = engine_for_add.clone();
-        let tenant_id = app_state_add.selected_tenant.read().as_ref().map(|t| t.id.clone()).unwrap_or_default();
-        let project_id = app_state_add.selected_project.read().as_ref().map(|p| p.id.clone()).unwrap_or_default();
+        let tenant_id = app_state_add
+            .selected_tenant
+            .read()
+            .as_ref()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let project_id = app_state_add
+            .selected_project
+            .read()
+            .as_ref()
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
 
         spawn(async move {
             let files = rfd::AsyncFileDialog::new()
@@ -116,7 +129,10 @@ pub fn UploadQueue() -> Element {
             if let Err(e) = engine.remove_staged(&task_id).await {
                 tracing::error!("Failed to remove staged file: {e}");
             }
-            app_state_remove.upload_tasks.write().retain(|t| t.id != task_id);
+            app_state_remove
+                .upload_tasks
+                .write()
+                .retain(|t| t.id != task_id);
         });
     };
 
@@ -156,7 +172,9 @@ pub fn UploadQueue() -> Element {
     let on_pause = move |task_id: String| {
         let db = db_for_pause.clone();
         spawn(async move {
-            let _ = db.update_upload_state(&task_id, UploadState::Paused, None).await;
+            let _ = db
+                .update_upload_state(&task_id, UploadState::Paused, None)
+                .await;
             let mut tasks = app_state_pause.upload_tasks.write();
             if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
                 task.state = UploadState::Paused;
@@ -172,7 +190,9 @@ pub fn UploadQueue() -> Element {
         let engine = engine_for_resume.clone();
         let db = db_for_resume.clone();
         spawn(async move {
-            let _ = db.update_upload_state(&task_id, UploadState::Pending, None).await;
+            let _ = db
+                .update_upload_state(&task_id, UploadState::Pending, None)
+                .await;
             let mut tasks = app_state_resume.upload_tasks.write();
             if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
                 task.state = UploadState::Pending;
@@ -196,7 +216,10 @@ pub fn UploadQueue() -> Element {
         let db = db_for_clear.clone();
         spawn(async move {
             let _ = db.delete_upload_task(&task_id).await;
-            app_state_clear.upload_tasks.write().retain(|t| t.id != task_id);
+            app_state_clear
+                .upload_tasks
+                .write()
+                .retain(|t| t.id != task_id);
         });
     };
 
@@ -205,15 +228,29 @@ pub fn UploadQueue() -> Element {
     let app_state_drop = app_state.clone();
     let on_drop = move |evt: DragEvent| {
         is_dragging.set(false);
-        if !has_context { return; }
+        if !has_context {
+            return;
+        }
         let engine = engine_for_drop.clone();
-        let tenant_id = app_state_drop.selected_tenant.read().as_ref().map(|t| t.id.clone()).unwrap_or_default();
-        let project_id = app_state_drop.selected_project.read().as_ref().map(|p| p.id.clone()).unwrap_or_default();
+        let tenant_id = app_state_drop
+            .selected_tenant
+            .read()
+            .as_ref()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let project_id = app_state_drop
+            .selected_project
+            .read()
+            .as_ref()
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
         let files = evt.files();
         spawn(async move {
             for file in files {
                 let path = file.path();
-                if path.as_os_str().is_empty() { continue; }
+                if path.as_os_str().is_empty() {
+                    continue;
+                }
                 if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
                     tracing::error!("Failed to stage dropped file: {e}");
                 }
@@ -221,12 +258,28 @@ pub fn UploadQueue() -> Element {
         });
     };
 
-    let drop_border = if *is_dragging.read() && has_context { "2px dashed var(--border-focus)" } else { "2px dashed transparent" };
+    let drop_border = if *is_dragging.read() && has_context {
+        "2px dashed var(--border-focus)"
+    } else {
+        "2px dashed transparent"
+    };
 
     // Split tasks into sections
-    let staged: Vec<_> = tasks.iter().filter(|t| t.state == UploadState::Staged).cloned().collect();
-    let active: Vec<_> = tasks.iter().filter(|t| t.state.is_active()).cloned().collect();
-    let history: Vec<_> = tasks.iter().filter(|t| matches!(t.state, UploadState::Completed | UploadState::Failed)).cloned().collect();
+    let staged: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.state == UploadState::Staged)
+        .cloned()
+        .collect();
+    let active: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.state.is_active())
+        .cloned()
+        .collect();
+    let history: Vec<_> = tasks
+        .iter()
+        .filter(|t| matches!(t.state, UploadState::Completed | UploadState::Failed))
+        .cloned()
+        .collect();
 
     rsx! {
         div {
@@ -388,6 +441,20 @@ fn UploadTaskRow(
         0
     };
 
+    let progress_color = if task.state == UploadState::Paused { "var(--warning)" } else { "var(--info)" };
+    let state_label = match task.state {
+        UploadState::Validating => "Validating...",
+        UploadState::Desensitizing => "Desensitizing...",
+        UploadState::Creating => "Creating...",
+        UploadState::Uploading => "Uploading",
+        UploadState::Verifying => "Verifying...",
+        UploadState::Paused => "Paused",
+        UploadState::Pending => "Pending...",
+        UploadState::Staged => "",
+        UploadState::Completed => "",
+        UploadState::Failed => "",
+    };
+
     let (status_color, status_bg) = match task.state {
         UploadState::Completed => ("var(--success)", "var(--success-bg)"),
         UploadState::Failed => ("var(--error)", "var(--error-bg)"),
@@ -483,16 +550,16 @@ fn UploadTaskRow(
                 "{format_size(task.size)}"
             }
 
-            if task.state == UploadState::Uploading {
+            if task.state.is_active() || task.state == UploadState::Paused {
                 div {
                     style: "margin-top: 6px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden;",
                     div {
-                        style: "height: 100%; width: {progress}%; background: var(--info); transition: width 0.3s ease;",
+                        style: "height: 100%; width: {progress}%; background: {progress_color}; transition: width 0.3s ease;",
                     }
                 }
                 div {
                     style: "font-size: 11px; color: var(--text-muted); margin-top: 2px;",
-                    "{progress}% — {format_size(task.bytes_uploaded)} / {format_size(task.size)}"
+                    "{state_label} {progress}% — {format_size(task.bytes_uploaded)} / {format_size(task.size)}"
                 }
             }
 
@@ -521,7 +588,11 @@ fn handle_upload_event(app_state: &mut AppState, event: UploadEvent) {
         UploadEvent::StateChanged { task_id, state } => {
             update_task(app_state, &task_id, |t| t.state = state);
         }
-        UploadEvent::Progress { task_id, bytes_uploaded, .. } => {
+        UploadEvent::Progress {
+            task_id,
+            bytes_uploaded,
+            ..
+        } => {
             update_task(app_state, &task_id, |t| t.bytes_uploaded = bytes_uploaded);
         }
         UploadEvent::ValidationWarnings { task_id, warnings } => {

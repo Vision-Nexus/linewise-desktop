@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lw-core", "crates/lw-app"]
+members = ["crates/lw-core", "crates/lw-chat", "crates/lw-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -41,6 +41,15 @@ backon = "1"
 url = "2"
 notify = "8"
 notify-debouncer-mini = "0.7"
+
+# Streaming
+bytes = "1"
+futures-core = "0.3"
+async-stream = "0.3"
+tokio-stream = "0.1"
+
+# Markdown
+pulldown-cmark = "0.12"
 
 # UI
 dioxus = { version = "0.7", features = ["desktop"] }
