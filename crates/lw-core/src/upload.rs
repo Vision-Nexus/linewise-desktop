@@ -8,7 +8,7 @@ use crate::storage::{self, StorageBackend};
 use crate::video;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 use uuid::Uuid;
 
 /// Events emitted by the upload engine to the UI
@@ -117,7 +117,9 @@ impl UploadEngine {
         };
 
         self.db.insert_upload_task(&task).await?;
-        let _ = self.event_tx.send(UploadEvent::TaskAdded(Box::new(task.clone())));
+        let _ = self
+            .event_tx
+            .send(UploadEvent::TaskAdded(Box::new(task.clone())));
 
         Ok(task)
     }
@@ -146,7 +148,11 @@ impl UploadEngine {
                         tracing::error!("Upload failed for {}: {e}", task.filename);
                         let _ = engine
                             .db
-                            .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                            .update_upload_state(
+                                &task.id,
+                                UploadState::Failed,
+                                Some(&e.to_string()),
+                            )
                             .await;
                         let _ = engine.event_tx.send(UploadEvent::Failed {
                             task_id: task.id,
@@ -288,7 +294,16 @@ impl UploadEngine {
                     self.db
                         .update_upload_session_id(&task.id, &new_session.session_id)
                         .await?;
-                    return self.do_upload(task, &new_session, upload_path, upload_size, &hash, &desensitized_path).await;
+                    return self
+                        .do_upload(
+                            task,
+                            &new_session,
+                            upload_path,
+                            upload_size,
+                            &hash,
+                            &desensitized_path,
+                        )
+                        .await;
                 }
             }
             s
@@ -309,7 +324,15 @@ impl UploadEngine {
         };
 
         // Stage 6: Chunked resumable upload (resumes from bytes_uploaded offset)
-        self.do_upload(task, &session, upload_path, upload_size, &hash, &desensitized_path).await
+        self.do_upload(
+            task,
+            &session,
+            upload_path,
+            upload_size,
+            &hash,
+            &desensitized_path,
+        )
+        .await
     }
 
     async fn do_upload(
@@ -379,7 +402,9 @@ impl UploadEngine {
         }
 
         // Auto-clean original file
-        if self.auto_clean && let Err(e) = tokio::fs::remove_file(&task.local_path).await {
+        if self.auto_clean
+            && let Err(e) = tokio::fs::remove_file(&task.local_path).await
+        {
             tracing::warn!("Failed to auto-clean {}: {e}", task.local_path);
         }
 
@@ -413,7 +438,11 @@ impl UploadEngine {
                         tracing::error!("Upload failed for {}: {e}", task.filename);
                         let _ = engine
                             .db
-                            .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                            .update_upload_state(
+                                &task.id,
+                                UploadState::Failed,
+                                Some(&e.to_string()),
+                            )
                             .await;
                         let _ = engine.event_tx.send(UploadEvent::Failed {
                             task_id: task.id,
@@ -458,7 +487,10 @@ impl UploadEngine {
                     continue;
                 }
 
-                tracing::info!("Auto-retrying {} failed uploads after network recovery", failed.len());
+                tracing::info!(
+                    "Auto-retrying {} failed uploads after network recovery",
+                    failed.len()
+                );
 
                 for task in failed {
                     let eng = Arc::clone(&engine);
@@ -471,7 +503,10 @@ impl UploadEngine {
 
     async fn retry_task(eng: Arc<Self>, sem: Arc<Semaphore>, mut task: UploadTask) {
         let _permit = sem.acquire().await.expect("semaphore closed");
-        let _ = eng.db.update_upload_state(&task.id, UploadState::Pending, None).await;
+        let _ = eng
+            .db
+            .update_upload_state(&task.id, UploadState::Pending, None)
+            .await;
         let _ = eng.event_tx.send(UploadEvent::StateChanged {
             task_id: task.id.clone(),
             state: UploadState::Pending,
@@ -481,9 +516,10 @@ impl UploadEngine {
             Ok(()) => tracing::info!("Auto-retry succeeded: {}", task.filename),
             Err(e) => {
                 tracing::warn!("Auto-retry failed for {}: {e}", task.filename);
-                let _ = eng.db.update_upload_state(
-                    &task.id, UploadState::Failed, Some(&e.to_string()),
-                ).await;
+                let _ = eng
+                    .db
+                    .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                    .await;
                 let _ = eng.event_tx.send(UploadEvent::Failed {
                     task_id: task.id,
                     error: e.to_string(),

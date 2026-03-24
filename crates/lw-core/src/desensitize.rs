@@ -25,9 +25,7 @@ pub struct DesensitizeResult {
 /// Strip all metadata from a video file using ffmpeg.
 /// Creates a new file in a temp directory with metadata removed.
 /// Uses `-c copy` for fast remuxing (no re-encoding).
-pub async fn strip_video_metadata(
-    input: &Path,
-) -> Result<DesensitizeResult, DesensitizeError> {
+pub async fn strip_video_metadata(input: &Path) -> Result<DesensitizeResult, DesensitizeError> {
     let input = input.to_path_buf();
 
     tokio::task::spawn_blocking(move || {
@@ -42,15 +40,19 @@ pub async fn strip_video_metadata(
 
         let result = Command::new("ffmpeg")
             .args([
-                "-y",              // overwrite output
+                "-y", // overwrite output
                 "-i",
             ])
             .arg(&input)
             .args([
-                "-map_metadata", "-1",   // strip all global metadata
-                "-map_chapters", "-1",   // strip chapter metadata
-                "-c", "copy",            // no re-encoding, fast copy
-                "-movflags", "+faststart",
+                "-map_metadata",
+                "-1", // strip all global metadata
+                "-map_chapters",
+                "-1", // strip chapter metadata
+                "-c",
+                "copy", // no re-encoding, fast copy
+                "-movflags",
+                "+faststart",
             ])
             .arg(&output)
             .output();
@@ -75,9 +77,7 @@ pub async fn strip_video_metadata(
 }
 
 /// Strip EXIF/metadata from an image file using ffmpeg.
-pub async fn strip_image_metadata(
-    input: &Path,
-) -> Result<DesensitizeResult, DesensitizeError> {
+pub async fn strip_image_metadata(input: &Path) -> Result<DesensitizeResult, DesensitizeError> {
     let input = input.to_path_buf();
 
     tokio::task::spawn_blocking(move || {

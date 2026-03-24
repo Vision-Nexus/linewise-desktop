@@ -37,8 +37,14 @@ impl StorageBackend {
         total_size: u64,
     ) -> Result<UploadSession, UploadError> {
         match self {
-            Self::Gcs(b) => b.initiate_upload(signed_url, content_type, total_size).await,
-            Self::S3(b) => b.initiate_upload(signed_url, content_type, total_size).await,
+            Self::Gcs(b) => {
+                b.initiate_upload(signed_url, content_type, total_size)
+                    .await
+            }
+            Self::S3(b) => {
+                b.initiate_upload(signed_url, content_type, total_size)
+                    .await
+            }
         }
     }
 
@@ -54,20 +60,14 @@ impl StorageBackend {
         }
     }
 
-    pub async fn query_progress(
-        &self,
-        session: &UploadSession,
-    ) -> Result<u64, UploadError> {
+    pub async fn query_progress(&self, session: &UploadSession) -> Result<u64, UploadError> {
         match self {
             Self::Gcs(b) => b.query_progress(session).await,
             Self::S3(b) => b.query_progress(session).await,
         }
     }
 
-    pub async fn abort_upload(
-        &self,
-        session: &UploadSession,
-    ) -> Result<(), UploadError> {
+    pub async fn abort_upload(&self, session: &UploadSession) -> Result<(), UploadError> {
         match self {
             Self::Gcs(b) => b.abort_upload(session).await,
             Self::S3(b) => b.abort_upload(session).await,
@@ -87,7 +87,11 @@ pub async fn upload_file_chunked(
     let mut file = tokio::fs::File::open(file_path).await?;
     let total = session.total_size;
     let mut offset = start_offset;
-    let chunk_size = if chunk_size > 0 { chunk_size } else { DEFAULT_CHUNK_SIZE };
+    let chunk_size = if chunk_size > 0 {
+        chunk_size
+    } else {
+        DEFAULT_CHUNK_SIZE
+    };
 
     if start_offset > 0 {
         file.seek(std::io::SeekFrom::Start(start_offset)).await?;
@@ -220,7 +224,10 @@ impl GcsBackend {
         if !resp.status().is_success() && resp.status().as_u16() != 201 {
             return Err(UploadError::Api {
                 status: resp.status().as_u16(),
-                message: format!("GCS initiate failed: {}", resp.text().await.unwrap_or_default()),
+                message: format!(
+                    "GCS initiate failed: {}",
+                    resp.text().await.unwrap_or_default()
+                ),
             });
         }
 
@@ -264,7 +271,10 @@ impl GcsBackend {
             308 => parse_gcs_range_header(&resp),
             status => Err(UploadError::Api {
                 status,
-                message: format!("GCS chunk failed: {}", resp.text().await.unwrap_or_default()),
+                message: format!(
+                    "GCS chunk failed: {}",
+                    resp.text().await.unwrap_or_default()
+                ),
             }),
         }
     }
@@ -324,12 +334,7 @@ pub struct S3Backend {
 }
 
 impl S3Backend {
-    pub fn new(
-        endpoint: String,
-        access_key: String,
-        secret_key: String,
-        region: String,
-    ) -> Self {
+    pub fn new(endpoint: String, access_key: String, secret_key: String, region: String) -> Self {
         Self {
             client: reqwest::Client::new(),
             endpoint,
@@ -357,7 +362,10 @@ impl S3Backend {
         if !resp.status().is_success() {
             return Err(UploadError::Api {
                 status: resp.status().as_u16(),
-                message: format!("S3 initiate failed: {}", resp.text().await.unwrap_or_default()),
+                message: format!(
+                    "S3 initiate failed: {}",
+                    resp.text().await.unwrap_or_default()
+                ),
             });
         }
 

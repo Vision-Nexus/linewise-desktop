@@ -131,7 +131,11 @@ fn TenantNode(
         expanded.set(!current);
     };
 
-    let arrow = if *expanded.read() { "\u{25BE}" } else { "\u{25B8}" }; // ▾ / ▸
+    let arrow = if *expanded.read() {
+        "\u{25BE}"
+    } else {
+        "\u{25B8}"
+    }; // ▾ / ▸
 
     rsx! {
         div {

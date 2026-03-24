@@ -1,7 +1,7 @@
 //! File system watcher — monitors directories for new files and queues them for upload.
 
 use crate::config::WatchFolderEntry;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;

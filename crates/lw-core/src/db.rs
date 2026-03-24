@@ -1,8 +1,8 @@
 use crate::config::AppConfig;
 use crate::error::DbError;
 use crate::models::{UploadState, UploadTask};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::str::FromStr;
 
 pub struct Database {
@@ -309,12 +309,9 @@ impl Database {
     }
 
     pub async fn find_by_hash(&self, hash: &str) -> Result<Option<String>, DbError> {
-        let row = sqlx::query!(
-            "SELECT document_id FROM file_hashes WHERE hash = ?",
-            hash,
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query!("SELECT document_id FROM file_hashes WHERE hash = ?", hash,)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|r| r.document_id))
     }
 }

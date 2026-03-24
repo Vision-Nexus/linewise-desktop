@@ -196,24 +196,24 @@ impl AuthService {
     }
 
     fn save_refresh_token_to_keyring(&self, token: &str) -> Result<(), AuthError> {
-        let entry =
-            keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| AuthError::Keyring(e.to_string()))?;
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|e| AuthError::Keyring(e.to_string()))?;
         entry
             .set_password(token)
             .map_err(|e| AuthError::Keyring(e.to_string()))
     }
 
     fn load_refresh_token_from_keyring(&self) -> Result<String, AuthError> {
-        let entry =
-            keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| AuthError::Keyring(e.to_string()))?;
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|e| AuthError::Keyring(e.to_string()))?;
         entry
             .get_password()
             .map_err(|e| AuthError::Keyring(e.to_string()))
     }
 
     fn delete_refresh_token_from_keyring(&self) -> Result<(), AuthError> {
-        let entry =
-            keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| AuthError::Keyring(e.to_string()))?;
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|e| AuthError::Keyring(e.to_string()))?;
         entry
             .delete_credential()
             .map_err(|e| AuthError::Keyring(e.to_string()))

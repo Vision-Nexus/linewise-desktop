@@ -162,11 +162,7 @@ fn parse_frame_rate(s: &str) -> Option<f64> {
         [num, den] => {
             let n: f64 = num.parse().ok()?;
             let d: f64 = den.parse().ok()?;
-            if d == 0.0 {
-                None
-            } else {
-                Some(n / d)
-            }
+            if d == 0.0 { None } else { Some(n / d) }
         }
         [num] => num.parse().ok(),
         _ => None,

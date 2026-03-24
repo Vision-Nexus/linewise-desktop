@@ -4,7 +4,7 @@ use crate::error::UploadError;
 use crate::models::{
     CreateDocumentRequest, DocumentResponse, PresignedUrlResponse, Project, WhoAmIResponse,
 };
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use std::sync::Arc;
 
 pub struct ApiClient {
