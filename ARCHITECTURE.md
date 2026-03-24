@@ -1,68 +1,191 @@
 # Architecture — Linewise Desktop
 
-## Overview
+## System Overview
 
+```mermaid
+graph TB
+    subgraph "lw-app (Dioxus 0.7 Desktop)"
+        direction TB
+        App["App<br/>System Tray · Session Restore<br/>Dark/Light Theme"]
+        Sidebar["Sidebar<br/>Org → Project Tree"]
+        Upload["Upload Queue<br/>Stage → Confirm → Progress<br/>DnD · Retry · Pause"]
+        Login["Login<br/>Firebase Email/Password<br/>Google · Microsoft"]
+        State["AppState (Signals)<br/>user_info · selected_tenant/project<br/>upload_tasks · tenant_projects"]
+        Core["CoreServices (Arc)"]
+
+        App --> Sidebar
+        App --> Upload
+        App --> Login
+        Sidebar --> State
+        Upload --> State
+        Login --> State
+        State --> Core
+    end
+
+    subgraph "lw-core (Business Logic)"
+        direction TB
+        Auth["Auth<br/>Firebase REST API<br/>Token Refresh · Keyring"]
+        API["API Client<br/>whoami · list_projects<br/>create_doc · upload-url · verify"]
+        Engine["Upload Engine<br/>stage → confirm → process<br/>resume · auto-retry<br/>4 concurrent (semaphore)"]
+        Storage["Storage Backend<br/>GCS (resumable POST)<br/>S3 (multipart)"]
+        DB["Database<br/>SQLite (sqlx query!)<br/>upload_queue · file_hashes"]
+        Desensitize["Desensitize<br/>ffmpeg -map_metadata -1<br/>video + image"]
+        Video["Video Validate<br/>ffprobe: fps 20-40<br/>bitrate 10-35Mbps<br/>advisory warnings"]
+        Watcher["File Watcher<br/>notify 8.x<br/>per-folder · MIME filter"]
+        Dedup["Dedup<br/>BLAKE3 hash<br/>SQLite lookup"]
+        Config["Config<br/>TOML · environment<br/>upload · desensitization"]
+
+        Engine --> Auth
+        Engine --> API
+        Engine --> Storage
+        Engine --> DB
+        Engine --> Desensitize
+        Engine --> Video
+        Engine --> Dedup
+        Watcher --> Engine
+    end
+
+    Core --> Auth
+    Core --> API
+    Core --> Engine
+    Core --> DB
+
+    API -->|HTTPS| Backend["Linewise API<br/>(Scala/http4s)"]
+    Storage -->|"Resumable PUT"| GCS["Google Cloud Storage"]
+    Storage -->|"Multipart PUT"| S3["S3-Compatible<br/>(AWS/Alibaba/Tencent)"]
+    Auth -->|REST| Firebase["Firebase Auth"]
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        lw-app (Dioxus)                         │
-│  ┌──────────┐ ┌──────────────┐ ┌────────────┐ ┌─────────────┐ │
-│  │  Sidebar  │ │ Upload Queue │ │   Login    │ │   Styles    │ │
-│  │  (tree)   │ │ (2-step +    │ │ (Firebase  │ │ (CSS vars,  │ │
-│  │  org→proj │ │  history)    │ │  REST)     │ │  dark/light)│ │
-│  └──────┬───┘ └──────┬───────┘ └─────┬──────┘ └─────────────┘ │
-│         │            │               │                         │
-│  ┌──────┴────────────┴───────────────┴──────────────────────┐  │
-│  │                    AppState (Signals)                     │  │
-│  │  is_authenticated, user_info, selected_tenant/project,   │  │
-│  │  upload_tasks, tenant_projects                           │  │
-│  └──────────────────────┬───────────────────────────────────┘  │
-│                         │                                      │
-│  ┌──────────────────────┴───────────────────────────────────┐  │
-│  │               CoreServices (Arc<...>)                     │  │
-│  │  auth, api, db, upload_engine, storage, config            │  │
-│  └──────────────────────┬───────────────────────────────────┘  │
-│         System Tray     │    Window: hide-to-tray              │
-└─────────────────────────┼──────────────────────────────────────┘
-                          │
-┌─────────────────────────┼──────────────────────────────────────┐
-│                      lw-core                                   │
-│                         │                                      │
-│  ┌──────────┐  ┌────────┴────────┐  ┌─────────────────────┐   │
-│  │   Auth    │  │  Upload Engine  │  │     API Client      │   │
-│  │ Firebase  │  │  stage → confirm│  │  whoami, create doc, │   │
-│  │ REST API  │  │  → process →    │  │  upload-url, verify  │   │
-│  │ keyring   │  │  resume/retry   │  │  Bearer token auth   │   │
-│  └──────────┘  └────────┬────────┘  └─────────────────────┘   │
-│                         │                                      │
-│  ┌──────────┐  ┌────────┴────────┐  ┌─────────────────────┐   │
-│  │ Storage   │  │    Database     │  │   Desensitize       │   │
-│  │ Backend   │  │  SQLite (sqlx)  │  │  ffmpeg metadata    │   │
-│  │ ┌──────┐  │  │  upload_queue   │  │  strip (video/img)  │   │
-│  │ │ GCS  │  │  │  file_hashes    │  └─────────────────────┘   │
-│  │ └──────┘  │  │  query! macros  │                            │
-│  │ ┌──────┐  │  └─────────────────┘  ┌─────────────────────┐   │
-│  │ │  S3  │  │                       │    Video Validate    │   │
-│  │ └──────┘  │  ┌─────────────────┐  │  ffprobe: fps,      │   │
-│  └──────────┘  │   File Watcher   │  │  bitrate, resolution│   │
-│                │  notify (8.x)    │  │  advisory warnings   │   │
-│                │  per-folder +    │  │  + camera guide link │   │
-│                │  MIME filter     │  └─────────────────────┘   │
-│                └─────────────────┘                             │
-│                                       ┌─────────────────────┐  │
-│  ┌──────────┐  ┌─────────────────┐   │      Dedup          │  │
-│  │  Config   │  │    Models       │   │  BLAKE3 hash →      │  │
-│  │  TOML     │  │  mirrors Scala  │   │  SQLite lookup      │  │
-│  │  env/     │  │  backend DTOs   │   └─────────────────────┘  │
-│  │  upload/  │  └─────────────────┘                            │
-│  │  camera/  │                                                 │
-│  │  desensi- │  ┌─────────────────┐                            │
-│  │  tization │  │    Errors       │                            │
-│  └──────────┘  │  ADT enums:     │                            │
-│                │  Auth, Upload,   │                            │
-│                │  Video, Db,     │                            │
-│                │  Config, App    │                            │
-│                └─────────────────┘                            │
-└────────────────────────────────────────────────────────────────┘
+
+## Upload Flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> Staged : Add Files / DnD
+    Staged --> Staged : Remove file
+    Staged --> Pending : Confirm Upload
+
+    Pending --> Validating : Start processing
+    Validating --> Desensitizing : ffprobe check (advisory)
+    Desensitizing --> Creating : ffmpeg strip metadata
+    Creating --> Uploading : POST create document
+
+    Uploading --> Uploading : Chunk uploaded (progress)
+    Uploading --> Paused : User pauses
+    Uploading --> Failed : Network error / timeout
+
+    Paused --> Uploading : User resumes
+    Paused --> [*] : User removes
+
+    Uploading --> Verifying : All chunks sent
+    Verifying --> Completed : gcsUri confirmed
+    Verifying --> Failed : Verification timeout
+
+    Failed --> Pending : User retries
+    Failed --> Pending : Auto-retry (network recovery)
+    Failed --> [*] : User removes
+
+    Completed --> [*] : User clears
+
+    note right of Uploading
+        32MB chunks
+        5 retries per chunk
+        Exponential backoff
+        4 concurrent files
+    end note
+
+    note right of Failed
+        Auto-retry every 30s
+        when network recovers
+        Max 10 attempts
+    end note
+```
+
+## Resume Logic
+
+```mermaid
+flowchart TD
+    Start([App Start / Retry]) --> CheckHash{Has hash?}
+    CheckHash -->|No| Hash[BLAKE3 hash file]
+    CheckHash -->|Yes| SkipHash[Skip dedup]
+    Hash --> DedupCheck{Duplicate?}
+    DedupCheck -->|Yes| Fail[FAILED: Duplicate]
+    DedupCheck -->|No| CheckDoc
+    SkipHash --> CheckDoc
+
+    CheckDoc{Has document_id?}
+    CheckDoc -->|No| CreateDoc[POST create document]
+    CheckDoc -->|Yes| SkipCreate["Skip create<br/>(reuse existing)"]
+    CreateDoc --> CheckSession
+    SkipCreate --> CheckSession
+
+    CheckSession{Has session_id?}
+    CheckSession -->|No| InitSession["Get signed URL<br/>Initiate resumable session"]
+    CheckSession -->|Yes| QueryProgress["Query GCS for<br/>bytes received"]
+
+    QueryProgress --> |Success| Resume["Resume from<br/>byte N"]
+    QueryProgress --> |"Session expired"| InitSession
+
+    InitSession --> Upload["Chunked upload<br/>(from byte 0 or N)"]
+    Resume --> Upload
+
+    Upload --> Verify["Poll until<br/>gcsUri set"]
+    Verify --> Done([COMPLETED])
+```
+
+## Module Structure
+
+```mermaid
+graph LR
+    subgraph "lw-app"
+        A1[app.rs]
+        A2[sidebar.rs]
+        A3[upload_queue.rs]
+        A4[login.rs]
+        A5[state.rs]
+        A6[styles.rs]
+        A7[tenant_select.rs]
+        A8[project_select.rs]
+    end
+
+    subgraph "lw-core"
+        C1[upload.rs]
+        C2[storage.rs]
+        C3[api_client.rs]
+        C4[auth.rs]
+        C5[db.rs]
+        C6[desensitize.rs]
+        C7[video.rs]
+        C8[dedup.rs]
+        C9[watcher.rs]
+        C10[config.rs]
+        C11[models.rs]
+        C12[error.rs]
+    end
+
+    A5 --> C1
+    A5 --> C3
+    A5 --> C4
+    A5 --> C5
+    A5 --> C2
+
+    C1 --> C2
+    C1 --> C3
+    C1 --> C5
+    C1 --> C6
+    C1 --> C7
+    C1 --> C8
+    C3 --> C4
+    C8 --> C5
+
+    style A1 fill:#dbeafe
+    style A2 fill:#dbeafe
+    style A3 fill:#dbeafe
+    style A4 fill:#dbeafe
+    style A5 fill:#bfdbfe
+    style A6 fill:#dbeafe
+    style C1 fill:#fef3c7
+    style C2 fill:#fef3c7
+    style C5 fill:#d1fae5
 ```
 
 ## Module Descriptions
@@ -86,8 +209,8 @@
 |--------|------|---------|
 | **Auth** | `auth.rs` | Firebase Auth REST API: email sign-in, token refresh (50min), OS keychain storage |
 | **API Client** | `api_client.rs` | Linewise backend client: whoami, list_projects, create_document, upload-url, verify |
-| **Upload Engine** | `upload.rs` | Orchestrates: stage → confirm → hash → validate → desensitize → create → upload → verify. Resumable — skips completed stages on retry |
-| **Storage** | `storage.rs` | Cloud-agnostic enum: `GcsBackend` (resumable POST) + `S3Backend` (multipart). Chunked upload with progress callback |
+| **Upload Engine** | `upload.rs` | Orchestrates: stage → confirm → hash → validate → desensitize → create → upload → verify. Resumable with auto-retry on network recovery |
+| **Storage** | `storage.rs` | Cloud-agnostic enum: `GcsBackend` (resumable POST) + `S3Backend` (multipart). Per-chunk retry with exponential backoff |
 | **Database** | `db.rs` | SQLite via sqlx with `query!` macros. Tables: `upload_queue`, `file_hashes`. Async pool |
 | **Desensitize** | `desensitize.rs` | ffmpeg metadata stripping: `-map_metadata -1 -c copy`. Video + image support |
 | **Video** | `video.rs` | ffprobe validation: fps 20-40, bitrate 10-35Mbps, resolution ≥720p. Advisory warnings + camera guide link |
@@ -97,62 +220,12 @@
 | **Models** | `models.rs` | Domain types mirroring Scala backend DTOs (source of truth: linewise-api) |
 | **Error** | `error.rs` | ADT error enums: `AuthError`, `UploadError`, `VideoValidationError`, `DbError`, `ConfigError`, `AppError` |
 
-## Data Flow
-
-### Upload Flow (two-step)
-
-```
-User selects files (button or DnD)
-  │
-  ▼
-Stage files → SQLite (state: STAGED)
-  │
-  ▼ user clicks "Upload N files"
-  │
-Confirm staged → state: PENDING
-  │
-  ├─► BLAKE3 hash → dedup check (SQLite file_hashes)
-  │
-  ├─► ffprobe validation (advisory warnings)
-  │
-  ├─► ffmpeg metadata strip (if enabled)
-  │
-  ├─► POST /api/.../documents → create document (if no document_id yet)
-  │
-  ├─► POST /api/.../upload-url?resumable=true → signed URL
-  │
-  ├─► POST signed URL + x-goog-resumable:start → session URI (if no session_id yet)
-  │
-  ├─► PUT chunks (8MB) to session URI → progress events → UI
-  │   (resumes from last confirmed byte on retry)
-  │
-  ├─► GET /api/.../documents/{id} → poll until gcsUri set
-  │
-  └─► state: COMPLETED, record hash, auto-clean
-```
-
-### Resume on Restart
-
-```
-App starts
-  │
-  ├─► reset_stale_uploads(): UPLOADING/CREATING/etc → FAILED
-  │
-  ├─► Load all uploads from SQLite → UI
-  │
-  └─► User clicks "Retry" on failed task
-        │
-        ├─► Has document_id? → skip create, reuse it
-        ├─► Has session_id? → query GCS for progress → resume from byte N
-        └─► Session expired? → get new URL, re-initiate, upload from 0
-```
-
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
 | UI Framework | Dioxus 0.7 (desktop webview) |
-| HTTP | reqwest 0.13 (rustls) |
+| HTTP | reqwest 0.13 (rustls, 300s timeout) |
 | Database | SQLite via sqlx 0.8 (`query!` macros) |
 | File Watching | notify 8.x + notify-debouncer-mini |
 | File Dialog | rfd 0.17 |
@@ -173,8 +246,8 @@ environment = "dev"  # dev | testing | production
 
 [upload]
 auto_clean = true
-chunk_size_mb = 8
-max_concurrent_uploads = 3
+chunk_size_mb = 32
+max_concurrent_uploads = 4
 
 [desensitization]
 strip_metadata = true
