@@ -100,6 +100,7 @@ const GLOBAL_CSS: &str = r#"
 
 /* ── Base ─────────────────────────────────────────────────────────── */
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
@@ -251,6 +252,15 @@ async fn fetch_user_info(api: &lw_core::api_client::ApiClient, app_state: &mut A
     match api.whoami().await {
         Ok(resp) => {
             if let Some(info) = lw_core::models::UserInfo::from_whoami(resp) {
+                // Set Sentry user context for error attribution
+                sentry::configure_scope(|scope| {
+                    scope.set_user(Some(sentry::User {
+                        id: Some(info.uid.clone()),
+                        email: Some(info.email.clone()),
+                        username: info.display_name.clone(),
+                        ..Default::default()
+                    }));
+                });
                 app_state.user_info.set(Some(info));
                 app_state.is_authenticated.set(true);
             } else {
@@ -325,7 +335,11 @@ fn MainView() -> Element {
         desktop.set_inner_size(dioxus::desktop::LogicalSize::new(new_w, current_h));
     });
 
-    let toggle_class = if is_open { "btn-primary" } else { "btn-outline" };
+    let toggle_class = if is_open {
+        "btn-primary"
+    } else {
+        "btn-outline"
+    };
     let toggle_style = if is_open {
         "width: 90px; padding: 4px 0; border-radius: 6px; font-size: 13px; \
          cursor: pointer; border: 1px solid var(--btn-primary); \

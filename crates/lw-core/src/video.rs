@@ -1,8 +1,6 @@
 use crate::error::VideoValidationError;
 use crate::models::{VideoInfo, VideoValidationResult};
-use serde::Deserialize;
 use std::path::Path;
-use std::process::Command;
 
 /// Expected video parameters with tolerance ranges (advisory, not blocking)
 const FPS_MIN: f64 = 20.0;
@@ -16,155 +14,110 @@ const BITRATE_TARGET_KBPS: u64 = 30_000;
 /// Link to guide users on how to change camera settings
 pub const CAMERA_SETTINGS_GUIDE: &str = "https://docs.linewise.io/camera-settings";
 
-#[derive(Debug, Deserialize)]
-struct FfprobeOutput {
-    streams: Vec<FfprobeStream>,
-    format: FfprobeFormat,
-}
-
-#[derive(Debug, Deserialize)]
-struct FfprobeStream {
-    codec_type: String,
-    codec_name: Option<String>,
-    width: Option<u32>,
-    height: Option<u32>,
-    r_frame_rate: Option<String>,
-    bit_rate: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FfprobeFormat {
-    format_name: String,
-    duration: Option<String>,
-    bit_rate: Option<String>,
-}
-
-/// Probe a video file using ffprobe and validate against target parameters
+/// Probe a video file using ffmpeg-next and validate against target parameters
 pub async fn validate_video(path: &Path) -> Result<VideoValidationResult, VideoValidationError> {
     let path = path.to_path_buf();
 
-    tokio::task::spawn_blocking(move || {
-        let output = Command::new("ffprobe")
-            .args([
-                "-v",
-                "quiet",
-                "-print_format",
-                "json",
-                "-show_streams",
-                "-show_format",
-            ])
-            .arg(&path)
-            .output()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    VideoValidationError::FfprobeNotFound
-                } else {
-                    VideoValidationError::ProbeFailed(e.to_string())
-                }
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(VideoValidationError::ProbeFailed(stderr.to_string()));
-        }
-
-        let probe: FfprobeOutput = serde_json::from_slice(&output.stdout)
-            .map_err(|e| VideoValidationError::ProbeFailed(e.to_string()))?;
-
-        let video_stream = probe
-            .streams
-            .iter()
-            .find(|s| s.codec_type == "video")
-            .ok_or_else(|| {
-                VideoValidationError::UnsupportedFormat("No video stream found".to_string())
-            })?;
-
-        let width = video_stream.width.unwrap_or(0);
-        let height = video_stream.height.unwrap_or(0);
-        let codec = video_stream
-            .codec_name
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-
-        // Parse frame rate from "30/1" or "30000/1001" format
-        let fps = video_stream
-            .r_frame_rate
-            .as_deref()
-            .and_then(parse_frame_rate)
-            .unwrap_or(0.0);
-
-        // Bitrate: prefer stream bitrate, fallback to format bitrate
-        let bitrate_str = video_stream
-            .bit_rate
-            .as_deref()
-            .or(probe.format.bit_rate.as_deref())
-            .unwrap_or("0");
-        let bitrate_kbps = bitrate_str.parse::<u64>().unwrap_or(0) / 1000;
-
-        let duration_secs = probe
-            .format
-            .duration
-            .as_deref()
-            .and_then(|d| d.parse::<f64>().ok())
-            .unwrap_or(0.0);
-
-        let info = VideoInfo {
-            width,
-            height,
-            fps,
-            bitrate_kbps,
-            codec,
-            duration_secs,
-            format: probe.format.format_name,
-        };
-
-        let mut warnings = Vec::new();
-
-        // FPS: acceptable range 20-40, target 30
-        if fps > 0.0 && !(FPS_MIN..=FPS_MAX).contains(&fps) {
-            warnings.push(format!(
-                "Frame rate {fps:.1}fps is outside recommended range ({FPS_MIN:.0}-{FPS_MAX:.0}fps, target {FPS_TARGET:.0}fps)"
-            ));
-        }
-
-        // Resolution: warn if below 720p
-        if height > 0 && height < RESOLUTION_MIN_HEIGHT {
-            warnings.push(format!(
-                "Resolution {width}x{height} is below minimum recommended ({RESOLUTION_MIN_HEIGHT}p)"
-            ));
-        }
-
-        // Bitrate: acceptable range 10M-35M
-        if bitrate_kbps > 0 && !(BITRATE_MIN_KBPS..=BITRATE_MAX_KBPS).contains(&bitrate_kbps) {
-            warnings.push(format!(
-                "Bitrate {bitrate_kbps}kbps is outside recommended range ({}-{}Mbps, target {}Mbps)",
-                BITRATE_MIN_KBPS / 1000,
-                BITRATE_MAX_KBPS / 1000,
-                BITRATE_TARGET_KBPS / 1000,
-            ));
-        }
-
-        if !warnings.is_empty() {
-            warnings.push(format!(
-                "See how to adjust your camera settings: {CAMERA_SETTINGS_GUIDE}"
-            ));
-        }
-
-        Ok(VideoValidationResult { info, warnings })
-    })
-    .await
-    .map_err(|e| VideoValidationError::ProbeFailed(e.to_string()))?
+    tokio::task::spawn_blocking(move || probe_and_validate(&path))
+        .await
+        .map_err(|e| VideoValidationError::ProbeFailed(e.to_string()))?
 }
 
-fn parse_frame_rate(s: &str) -> Option<f64> {
-    let parts: Vec<&str> = s.split('/').collect();
-    match parts.as_slice() {
-        [num, den] => {
-            let n: f64 = num.parse().ok()?;
-            let d: f64 = den.parse().ok()?;
-            if d == 0.0 { None } else { Some(n / d) }
-        }
-        [num] => num.parse().ok(),
-        _ => None,
+fn probe_and_validate(path: &Path) -> Result<VideoValidationResult, VideoValidationError> {
+    let ictx = ffmpeg_next::format::input(path)
+        .map_err(|e| VideoValidationError::ProbeFailed(format!("Failed to open: {e}")))?;
+
+    // Find video stream
+    let video_stream = ictx
+        .streams()
+        .best(ffmpeg_next::media::Type::Video)
+        .ok_or_else(|| {
+            VideoValidationError::UnsupportedFormat("No video stream found".to_string())
+        })?;
+
+    let video_params = video_stream.parameters();
+    let video_ctx = ffmpeg_next::codec::context::Context::from_parameters(video_params)
+        .map_err(|e| VideoValidationError::ProbeFailed(format!("Video codec context: {e}")))?;
+    let video_dec = video_ctx
+        .decoder()
+        .video()
+        .map_err(|e| VideoValidationError::ProbeFailed(format!("Video decoder: {e}")))?;
+
+    let width = video_dec.width();
+    let height = video_dec.height();
+    let codec = video_stream.parameters().id().name().to_string();
+
+    // Frame rate from stream
+    let rate = video_stream.rate();
+    let fps = if rate.1 > 0 {
+        rate.0 as f64 / rate.1 as f64
+    } else {
+        0.0
+    };
+
+    // Bitrate: prefer decoder bit_rate, fallback to format-level
+    let bitrate_bps = if video_dec.bit_rate() > 0 {
+        video_dec.bit_rate() as u64
+    } else {
+        ictx.bit_rate().max(0) as u64
+    };
+    let bitrate_kbps = bitrate_bps / 1000;
+
+    // Duration from format context (in seconds)
+    let duration_secs = ictx.duration() as f64 / f64::from(ffmpeg_next::ffi::AV_TIME_BASE);
+
+    // Format name
+    let format = ictx.format().name().to_string();
+
+    // Find audio stream codec
+    let audio_codec = ictx
+        .streams()
+        .best(ffmpeg_next::media::Type::Audio)
+        .map(|s| s.parameters().id().name().to_string())
+        .unwrap_or_default();
+
+    let info = VideoInfo {
+        width,
+        height,
+        fps,
+        bitrate_kbps,
+        codec,
+        audio_codec,
+        duration_secs,
+        format,
+    };
+
+    let mut warnings = Vec::new();
+
+    // FPS: acceptable range 20-40, target 30
+    if fps > 0.0 && !(FPS_MIN..=FPS_MAX).contains(&fps) {
+        warnings.push(format!(
+            "Frame rate {fps:.1}fps is outside recommended range ({FPS_MIN:.0}-{FPS_MAX:.0}fps, target {FPS_TARGET:.0}fps)"
+        ));
     }
+
+    // Resolution: warn if below 720p
+    if height > 0 && height < RESOLUTION_MIN_HEIGHT {
+        warnings.push(format!(
+            "Resolution {width}x{height} is below minimum recommended ({RESOLUTION_MIN_HEIGHT}p)"
+        ));
+    }
+
+    // Bitrate: acceptable range 10M-35M
+    if bitrate_kbps > 0 && !(BITRATE_MIN_KBPS..=BITRATE_MAX_KBPS).contains(&bitrate_kbps) {
+        warnings.push(format!(
+            "Bitrate {bitrate_kbps}kbps is outside recommended range ({}-{}Mbps, target {}Mbps)",
+            BITRATE_MIN_KBPS / 1000,
+            BITRATE_MAX_KBPS / 1000,
+            BITRATE_TARGET_KBPS / 1000,
+        ));
+    }
+
+    if !warnings.is_empty() {
+        warnings.push(format!(
+            "See how to adjust your camera settings: {CAMERA_SETTINGS_GUIDE}"
+        ));
+    }
+
+    Ok(VideoValidationResult { info, warnings })
 }

@@ -9,41 +9,6 @@ pub struct Database {
     pool: SqlitePool,
 }
 
-const INIT_SQL: &str = "
-CREATE TABLE IF NOT EXISTS file_hashes (
-    hash TEXT PRIMARY KEY,
-    filename TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    tenant_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    document_id TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS upload_queue (
-    id TEXT PRIMARY KEY,
-    local_path TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    mime_type TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    document_id TEXT,
-    session_id TEXT,
-    bytes_uploaded INTEGER NOT NULL DEFAULT 0,
-    state TEXT NOT NULL DEFAULT 'PENDING',
-    error_message TEXT,
-    hash TEXT,
-    validation_warnings TEXT,
-    desensitized_path TEXT,
-    retry_count INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_upload_queue_state ON upload_queue(state);
-";
-
 /// Row type matching SQLite nullability for sqlx::query_as!
 /// SQLite treats all columns as potentially nullable, so we use Option everywhere
 /// and convert in From impl.
@@ -64,6 +29,7 @@ struct UploadRow {
     hash: Option<String>,
     validation_warnings: Option<String>,
     retry_count: Option<i64>,
+    video_info: Option<String>,
 }
 
 impl From<UploadRow> for UploadTask {
@@ -87,6 +53,11 @@ impl From<UploadRow> for UploadTask {
             hash: r.hash,
             validation_warnings: warnings,
             retry_count: r.retry_count.unwrap_or(0) as u32,
+            transcode: false, // per-session UI choice, not persisted
+            video_info: r
+                .video_info
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok()),
         }
     }
 }
@@ -108,10 +79,12 @@ impl Database {
             .await
             .map_err(DbError::Sqlite)?;
 
-        sqlx::raw_sql(INIT_SQL)
-            .execute(&pool)
+        // Run migrations from crates/lw-core/migrations/
+        sqlx::migrate!("./migrations")
+            .run(&pool)
             .await
-            .map_err(DbError::Sqlite)?;
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        tracing::info!("Database migrations applied");
 
         Ok(Self { pool })
     }
@@ -120,11 +93,16 @@ impl Database {
 
     pub async fn insert_upload_task(&self, task: &UploadTask) -> Result<(), DbError> {
         let warnings_json = serde_json::to_string(&task.validation_warnings)?;
+        let video_info_json = task
+            .video_info
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let size = task.size as i64;
         let state = task.state.as_str();
         sqlx::query!(
-            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, validation_warnings)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, validation_warnings, video_info)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             task.id,
             task.local_path,
             task.filename,
@@ -135,6 +113,7 @@ impl Database {
             state,
             task.hash,
             warnings_json,
+            video_info_json,
         )
         .execute(&self.pool)
         .await?;
@@ -221,7 +200,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count
+                    hash, validation_warnings, retry_count, video_info
              FROM upload_queue
              WHERE state = 'FAILED'
                AND retry_count < 10
@@ -243,7 +222,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count
+                    hash, validation_warnings, retry_count, video_info
              FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -256,7 +235,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count
+                    hash, validation_warnings, retry_count, video_info
              FROM upload_queue
              WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING')
              ORDER BY created_at ASC",
@@ -271,7 +250,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count
+                    hash, validation_warnings, retry_count, video_info
              FROM upload_queue ORDER BY created_at DESC LIMIT 100",
         )
         .fetch_all(&self.pool)

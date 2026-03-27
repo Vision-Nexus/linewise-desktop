@@ -88,7 +88,9 @@ impl ChatClient {
             return Err(ChatError::Api { status, message });
         }
 
-        resp.json().await.map_err(|e| ChatError::Parse(e.to_string()))
+        resp.json()
+            .await
+            .map_err(|e| ChatError::Parse(e.to_string()))
     }
 
     /// GET /api/org/{tenant}/chat/sessions — list user's sessions
@@ -111,7 +113,9 @@ impl ChatClient {
             return Err(ChatError::Api { status, message });
         }
 
-        resp.json().await.map_err(|e| ChatError::Parse(e.to_string()))
+        resp.json()
+            .await
+            .map_err(|e| ChatError::Parse(e.to_string()))
     }
 
     /// GET /api/org/{tenant}/chat/sessions/{id}/messages — get session messages
@@ -137,7 +141,9 @@ impl ChatClient {
             return Err(ChatError::Api { status, message });
         }
 
-        resp.json().await.map_err(|e| ChatError::Parse(e.to_string()))
+        resp.json()
+            .await
+            .map_err(|e| ChatError::Parse(e.to_string()))
     }
 
     /// POST /api/org/{tenant}/chat/sessions/{id}/messages — save a message
@@ -165,7 +171,9 @@ impl ChatClient {
             return Err(ChatError::Api { status, message });
         }
 
-        resp.json().await.map_err(|e| ChatError::Parse(e.to_string()))
+        resp.json()
+            .await
+            .map_err(|e| ChatError::Parse(e.to_string()))
     }
 
     /// PATCH /api/org/{tenant}/chat/sessions/{id} — update session title

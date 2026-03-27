@@ -6,6 +6,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub upload: UploadConfig,
     pub desensitization: DesensitizationConfig,
+    #[serde(default)]
+    pub transcode: TranscodeConfig,
     pub camera: CameraConfig,
     pub app: GeneralConfig,
     #[serde(default)]
@@ -88,6 +90,68 @@ fn default_processing_mode() -> ProcessingMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscodeConfig {
+    /// Master toggle — false disables transcoding entirely
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Target video codec (hevc, h264)
+    #[serde(default = "default_codec")]
+    pub codec: String,
+    /// Constant Rate Factor (0–51, lower = better quality, larger file)
+    #[serde(default = "default_crf")]
+    pub crf: u8,
+    /// x265 encoding preset (ultrafast..veryslow). Slower = better compression.
+    #[serde(default = "default_preset")]
+    pub preset: String,
+    /// VBR ceiling in Mbps
+    #[serde(default = "default_max_bitrate")]
+    pub max_bitrate_mbps: u32,
+    /// Heights above this are downscaled (maintaining aspect ratio)
+    #[serde(default = "default_max_height")]
+    pub max_height: u32,
+    /// Audio bitrate in kbps
+    #[serde(default = "default_audio_bitrate")]
+    pub audio_bitrate_kbps: u32,
+    /// Target frame rate (0 = keep original)
+    #[serde(default)]
+    pub target_fps: u32,
+}
+
+fn default_codec() -> String {
+    "hevc".to_string()
+}
+fn default_crf() -> u8 {
+    23
+}
+fn default_preset() -> String {
+    "medium".to_string()
+}
+fn default_max_bitrate() -> u32 {
+    10
+}
+fn default_max_height() -> u32 {
+    1080
+}
+fn default_audio_bitrate() -> u32 {
+    128
+}
+
+impl Default for TranscodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            codec: default_codec(),
+            crf: default_crf(),
+            preset: default_preset(),
+            max_bitrate_mbps: default_max_bitrate(),
+            max_height: default_max_height(),
+            audio_bitrate_kbps: default_audio_bitrate(),
+            target_fps: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraConfig {
     #[serde(default = "default_true")]
     pub auto_detect: bool,
@@ -141,6 +205,7 @@ impl Default for AppConfig {
                 processing_mode: ProcessingMode::Local,
                 remote_api_url: String::new(),
             },
+            transcode: TranscodeConfig::default(),
             camera: CameraConfig {
                 auto_detect: true,
                 auto_import: false,

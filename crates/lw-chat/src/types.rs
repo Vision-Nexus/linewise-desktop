@@ -157,7 +157,10 @@ pub enum StreamingUpdate {
     /// Tool call arguments appended
     ToolDelta { id: String, args: String },
     /// Tool call result received
-    ToolResult { id: String, result: serde_json::Value },
+    ToolResult {
+        id: String,
+        result: serde_json::Value,
+    },
     /// Stream finished — final assistant text to persist
     AssistantDone(String),
     /// Stream error

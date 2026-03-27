@@ -132,7 +132,11 @@ fn TenantNode(
     };
 
     let is_open = *expanded.read();
-    let arrow_class = if is_open { "collapse-arrow open" } else { "collapse-arrow" };
+    let arrow_class = if is_open {
+        "collapse-arrow open"
+    } else {
+        "collapse-arrow"
+    };
 
     rsx! {
         div {

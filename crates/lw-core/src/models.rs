@@ -160,6 +160,7 @@ pub enum UploadState {
     Staged,
     Pending,
     Validating,
+    Transcoding,
     Desensitizing,
     Creating,
     Uploading,
@@ -175,6 +176,7 @@ impl UploadState {
             Self::Staged => "STAGED",
             Self::Pending => "PENDING",
             Self::Validating => "VALIDATING",
+            Self::Transcoding => "TRANSCODING",
             Self::Desensitizing => "DESENSITIZING",
             Self::Creating => "CREATING",
             Self::Uploading => "UPLOADING",
@@ -190,6 +192,7 @@ impl UploadState {
             "STAGED" => Self::Staged,
             "PENDING" => Self::Pending,
             "VALIDATING" => Self::Validating,
+            "TRANSCODING" => Self::Transcoding,
             "DESENSITIZING" => Self::Desensitizing,
             "CREATING" => Self::Creating,
             "UPLOADING" => Self::Uploading,
@@ -206,6 +209,7 @@ impl UploadState {
             self,
             Self::Pending
                 | Self::Validating
+                | Self::Transcoding
                 | Self::Desensitizing
                 | Self::Creating
                 | Self::Uploading
@@ -232,16 +236,21 @@ pub struct UploadTask {
     pub hash: Option<String>,
     pub validation_warnings: Vec<String>,
     pub retry_count: u32,
+    /// User opted in to transcode this file before upload
+    pub transcode: bool,
+    /// Video probe info (populated at staging time for video files)
+    pub video_info: Option<VideoInfo>,
 }
 
 /// Video probe result
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VideoInfo {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
     pub bitrate_kbps: u64,
     pub codec: String,
+    pub audio_codec: String,
     pub duration_secs: f64,
     pub format: String,
 }

@@ -47,6 +47,7 @@ impl CoreServices {
             event_tx,
             config.upload.auto_clean,
             config.desensitization.strip_metadata,
+            config.transcode.clone(),
             config.upload.chunk_size_mb,
             config.upload.max_concurrent_uploads,
         ));

@@ -1,11 +1,12 @@
 use crate::api_client::ApiClient;
+use crate::config::TranscodeConfig;
 use crate::db::Database;
 use crate::dedup;
 use crate::desensitize;
 use crate::error::{DbError, UploadError};
 use crate::models::{CreateDocumentMeta, CreateDocumentRequest, UploadState, UploadTask};
 use crate::storage::{self, StorageBackend};
-use crate::video;
+use crate::{transcode, video};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Semaphore, mpsc};
@@ -28,6 +29,10 @@ pub enum UploadEvent {
         task_id: String,
         warnings: Vec<String>,
     },
+    TranscodeProgress {
+        task_id: String,
+        percent: f32,
+    },
     DuplicateDetected {
         task_id: String,
         existing_document_id: String,
@@ -48,6 +53,7 @@ pub struct UploadEngine {
     event_tx: mpsc::UnboundedSender<UploadEvent>,
     auto_clean: bool,
     strip_metadata: bool,
+    transcode_config: TranscodeConfig,
     chunk_size: u64,
     upload_semaphore: Arc<Semaphore>,
 }
@@ -61,6 +67,7 @@ impl UploadEngine {
         event_tx: mpsc::UnboundedSender<UploadEvent>,
         auto_clean: bool,
         strip_metadata: bool,
+        transcode_config: TranscodeConfig,
         chunk_size_mb: u32,
         max_concurrent: u32,
     ) -> Self {
@@ -71,6 +78,7 @@ impl UploadEngine {
             event_tx,
             auto_clean,
             strip_metadata,
+            transcode_config,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
         }
@@ -98,6 +106,19 @@ impl UploadEngine {
             .first_or_octet_stream()
             .to_string();
 
+        // Probe video files at staging time so info is available in the UI
+        let (video_info, validation_warnings) = if mime_type.starts_with("video/") {
+            match video::validate_video(path).await {
+                Ok(result) => (Some(result.info), result.warnings),
+                Err(e) => {
+                    tracing::warn!("Video probe failed for {filename}: {e}");
+                    (None, Vec::new())
+                }
+            }
+        } else {
+            (None, Vec::new())
+        };
+
         let task = UploadTask {
             id: Uuid::new_v4().to_string(),
             local_path: path.to_string_lossy().to_string(),
@@ -112,8 +133,10 @@ impl UploadEngine {
             state: UploadState::Staged,
             error_message: None,
             hash: None,
-            validation_warnings: Vec::new(),
+            validation_warnings,
             retry_count: 0,
+            transcode: false,
+            video_info,
         };
 
         self.db.insert_upload_task(&task).await?;
@@ -126,11 +149,15 @@ impl UploadEngine {
 
     /// Confirm staged files for upload (step 2 of two-step upload).
     /// Moves all STAGED tasks to PENDING and starts processing.
-    pub async fn confirm_staged(self: &Arc<Self>) -> Result<Vec<String>, DbError> {
+    pub async fn confirm_staged(
+        self: &Arc<Self>,
+        transcode_task_ids: &[String],
+    ) -> Result<Vec<String>, DbError> {
         let staged = self.db.get_staged_uploads().await?;
         let mut confirmed_ids = Vec::new();
 
         for mut task in staged {
+            task.transcode = transcode_task_ids.contains(&task.id);
             self.db
                 .update_upload_state(&task.id, UploadState::Pending, None)
                 .await?;
@@ -194,27 +221,37 @@ impl UploadEngine {
         }
         let hash = task.hash.clone().unwrap_or_default();
 
-        // Stage 2: Video validation (skip if already validated)
-        if task.validation_warnings.is_empty() && task.mime_type.starts_with("video/") {
+        // Stage 2: Video validation (skip if already probed at staging time)
+        let video_info = if task.video_info.is_some() {
+            task.video_info.clone()
+        } else if task.mime_type.starts_with("video/") {
             self.update_state(task, UploadState::Validating).await;
             match video::validate_video(path).await {
-                Ok(result) if !result.warnings.is_empty() => {
-                    task.validation_warnings = result.warnings.clone();
-                    let _ = self.event_tx.send(UploadEvent::ValidationWarnings {
-                        task_id: task.id.clone(),
-                        warnings: result.warnings,
-                    });
+                Ok(result) => {
+                    if !result.warnings.is_empty() {
+                        task.validation_warnings = result.warnings.clone();
+                        let _ = self.event_tx.send(UploadEvent::ValidationWarnings {
+                            task_id: task.id.clone(),
+                            warnings: result.warnings,
+                        });
+                    }
+                    Some(result.info)
                 }
                 Err(e) => {
                     tracing::warn!("Video validation failed for {}: {e}", task.filename);
+                    None
                 }
-                _ => {}
             }
-        }
+        } else {
+            None
+        };
 
-        // Stage 3: Data desensitization
+        // Stage 2.5: Transcoding (user opt-in, video files only)
+        let transcoded_path = self.maybe_transcode(task, path, &video_info).await?;
+
+        // Stage 3: Data desensitization (skip if already transcoded — transcoding strips metadata)
         let mut desensitized_path: Option<PathBuf> = None;
-        if self.strip_metadata {
+        if self.strip_metadata && transcoded_path.is_none() {
             self.update_state(task, UploadState::Desensitizing).await;
             match desensitize::strip_metadata(path, &task.mime_type).await {
                 Some(Ok(result)) => {
@@ -232,7 +269,10 @@ impl UploadEngine {
             }
         }
 
-        let upload_path = desensitized_path.as_deref().unwrap_or(path);
+        let upload_path = transcoded_path
+            .as_deref()
+            .or(desensitized_path.as_deref())
+            .unwrap_or(path);
         let upload_size = tokio::fs::metadata(upload_path).await?.len();
 
         // Stage 4: Create document (skip if already has document_id)
@@ -302,6 +342,7 @@ impl UploadEngine {
                             upload_size,
                             &hash,
                             &desensitized_path,
+                            &transcoded_path,
                         )
                         .await;
                 }
@@ -331,10 +372,12 @@ impl UploadEngine {
             upload_size,
             &hash,
             &desensitized_path,
+            &transcoded_path,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn do_upload(
         &self,
         task: &mut UploadTask,
@@ -343,6 +386,7 @@ impl UploadEngine {
         _upload_size: u64,
         hash: &str,
         desensitized_path: &Option<PathBuf>,
+        transcoded_path: &Option<PathBuf>,
     ) -> Result<(), UploadError> {
         self.update_state(task, UploadState::Uploading).await;
 
@@ -396,9 +440,12 @@ impl UploadEngine {
             )
             .await;
 
-        // Clean up desensitized temp file
+        // Clean up temp files
         if let Some(dp) = desensitized_path {
             desensitize::cleanup_temp_file(dp);
+        }
+        if let Some(tp) = transcoded_path {
+            desensitize::cleanup_temp_file(tp);
         }
 
         // Auto-clean original file
@@ -526,6 +573,55 @@ impl UploadEngine {
                 });
             }
         }
+    }
+
+    /// Returns Ok(Some(path)) if transcoded, Ok(None) if not requested, Err if failed.
+    async fn maybe_transcode(
+        &self,
+        task: &mut UploadTask,
+        path: &Path,
+        video_info: &Option<crate::models::VideoInfo>,
+    ) -> Result<Option<PathBuf>, UploadError> {
+        if !task.transcode || !task.mime_type.starts_with("video/") {
+            return Ok(None);
+        }
+        let Some(info) = video_info else {
+            return Ok(None);
+        };
+
+        self.update_state(task, UploadState::Transcoding).await;
+        let input = path.to_path_buf();
+        let info_clone = info.clone();
+        let config = self.transcode_config.clone();
+        let event_tx = self.event_tx.clone();
+        let task_id = task.id.clone();
+
+        let progress_cb = move |done: u64, total: u64| {
+            let pct = if total > 0 {
+                done as f32 / total as f32 * 100.0
+            } else {
+                0.0
+            };
+            let _ = event_tx.send(UploadEvent::TranscodeProgress {
+                task_id: task_id.clone(),
+                percent: pct,
+            });
+        };
+
+        let result = tokio::task::spawn_blocking(move || {
+            transcode::transcode_video(&input, &info_clone, &config, &progress_cb)
+        })
+        .await
+        .map_err(|e| UploadError::Io(std::io::Error::other(format!("Transcode panicked: {e}"))))?
+        .map_err(|e| UploadError::Io(std::io::Error::other(format!("Transcode failed: {e}"))))?;
+
+        tracing::info!(
+            "Transcoded {}: {:.1}MB → {:.1}MB",
+            task.filename,
+            result.original_size as f64 / 1_048_576.0,
+            result.transcoded_size as f64 / 1_048_576.0,
+        );
+        Ok(Some(result.output_path))
     }
 
     async fn update_state(&self, task: &mut UploadTask, state: UploadState) {

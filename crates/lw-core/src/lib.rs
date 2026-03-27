@@ -7,6 +7,7 @@ pub mod desensitize;
 pub mod error;
 pub mod models;
 pub mod storage;
+pub mod transcode;
 pub mod upload;
 pub mod video;
 pub mod watcher;

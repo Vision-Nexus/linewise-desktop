@@ -59,6 +59,18 @@ pub enum VideoValidationError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum TranscodeError {
+    #[error("FFmpeg library not available")]
+    FfmpegNotAvailable,
+    #[error("Codec not found: {0} (is libx265 compiled into FFmpeg?)")]
+    CodecNotFound(String),
+    #[error("Encoding failed: {0}")]
+    EncodingFailed(String),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error("SQLite error: {0}")]
     Sqlite(#[from] sqlx::Error),
@@ -86,6 +98,8 @@ pub enum AppError {
     Upload(#[from] UploadError),
     #[error("Video error: {0}")]
     Video(#[from] VideoValidationError),
+    #[error("Transcode error: {0}")]
+    Transcode(#[from] TranscodeError),
     #[error("Database error: {0}")]
     Database(#[from] DbError),
     #[error("Config error: {0}")]

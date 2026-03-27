@@ -120,7 +120,9 @@ pub fn ChatPanel(config: ChatConfig) -> Element {
     // Auto-scroll to bottom when streaming text updates and user is following
     use_effect(move || {
         let _text = streaming_text.read();
-        if *at_bottom.read() && let Some(el) = messages_el.read().as_ref() {
+        if *at_bottom.read()
+            && let Some(el) = messages_el.read().as_ref()
+        {
             let el = el.clone();
             spawn(async move {
                 let _ = el.data().scroll_to(ScrollBehavior::Smooth).await;
