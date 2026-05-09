@@ -24,3 +24,8 @@ ffmpeg-next = { workspace = true }
 mime_guess = "2"
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
+
+# OAuth: PKCE loopback flow for Google/Microsoft sign-in
+oauth2 = { workspace = true }
+tiny_http = { workspace = true }
+webbrowser = { workspace = true }

@@ -20,6 +20,10 @@ pub enum AuthError {
     Firebase { code: String, message: String },
     #[error("Keyring error: {0}")]
     Keyring(String),
+    #[error("OAuth error ({provider}): {message}")]
+    OAuth { provider: String, message: String },
+    #[error("Sign-in cancelled")]
+    UserCancelled,
 }
 
 #[derive(Debug, thiserror::Error)]

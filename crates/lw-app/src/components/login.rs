@@ -1,52 +1,116 @@
 use crate::state::{AppState, CoreServices};
 use crate::styles;
 use dioxus::prelude::*;
+use lw_core::api_client::ApiClient;
+use lw_core::auth::AuthService;
+use lw_core::error::AuthError;
+use lw_core::models::AuthTokens;
+use std::future::Future;
+use std::sync::Arc;
+
+/// Run `sign_in_future`, then fetch `/whoami`, then flip `AppState` into the
+/// authenticated state. All three login paths (email, Google, Microsoft)
+/// share this tail — only the initial credential step differs.
+async fn complete_sign_in<F>(
+    api: Arc<ApiClient>,
+    mut app_state: AppState,
+    mut error: Signal<Option<String>>,
+    method: &'static str,
+    sign_in_future: F,
+) where
+    F: Future<Output = Result<AuthTokens, AuthError>>,
+{
+    match sign_in_future.await {
+        Ok(_tokens) => {
+            tracing::info!("{method} sign-in succeeded");
+            match api.whoami().await {
+                Ok(resp) => {
+                    if let Some(info) = lw_core::models::UserInfo::from_whoami(resp) {
+                        app_state.user_info.set(Some(info));
+                        app_state.is_authenticated.set(true);
+                    } else {
+                        error.set(Some("No user account found".to_string()));
+                    }
+                }
+                Err(e) => {
+                    error.set(Some(format!("Failed to fetch user info: {e}")));
+                }
+            }
+        }
+        Err(AuthError::UserCancelled) => {
+            tracing::info!("{method} sign-in cancelled by user");
+        }
+        Err(e) => {
+            tracing::warn!("{method} sign-in failed: {e}");
+            error.set(Some(e.to_string()));
+        }
+    }
+}
 
 #[component]
 pub fn LoginPage() -> Element {
     let mut email = use_signal(String::new);
     let mut password = use_signal(String::new);
-    let mut error = use_signal(|| Option::<String>::None);
+    let error = use_signal(|| Option::<String>::None);
     let mut loading = use_signal(|| false);
-    let mut app_state = use_context::<AppState>();
+    let app_state = use_context::<AppState>();
     let services = use_context::<CoreServices>();
 
-    let on_submit = move |evt: Event<FormData>| {
-        evt.prevent_default();
-        let email_val = email.read().clone();
-        let password_val = password.read().clone();
-        let auth = services.auth.clone();
+    let run_sign_in = {
         let api = services.api.clone();
+        let app_state = app_state.clone();
+        let mut error = error;
+        move |method: &'static str,
+              sign_in: Box<dyn Future<Output = Result<AuthTokens, AuthError>> + Send>| {
+            let api = api.clone();
+            let app_state = app_state.clone();
+            spawn(async move {
+                loading.set(true);
+                error.set(None);
+                let fut = Box::into_pin(sign_in);
+                complete_sign_in(api, app_state, error, method, fut).await;
+                loading.set(false);
+            });
+        }
+    };
 
-        spawn(async move {
-            loading.set(true);
-            error.set(None);
+    let on_submit = {
+        let auth = services.auth.clone();
+        let run_sign_in = run_sign_in.clone();
+        move |evt: Event<FormData>| {
+            evt.prevent_default();
+            let email_val = email.read().clone();
+            let password_val = password.read().clone();
+            let auth = auth.clone();
+            run_sign_in(
+                "email",
+                Box::new(async move { auth.sign_in_email(&email_val, &password_val).await }),
+            );
+        }
+    };
 
-            match auth.sign_in_email(&email_val, &password_val).await {
-                Ok(_tokens) => {
-                    tracing::info!("Login successful for: {email_val}");
-                    match api.whoami().await {
-                        Ok(resp) => {
-                            if let Some(info) = lw_core::models::UserInfo::from_whoami(resp) {
-                                app_state.user_info.set(Some(info));
-                                app_state.is_authenticated.set(true);
-                            } else {
-                                error.set(Some("No user account found".to_string()));
-                            }
-                        }
-                        Err(e) => {
-                            error.set(Some(format!("Failed to fetch user info: {e}")));
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Login failed: {e}");
-                    error.set(Some(e.to_string()));
-                }
-            }
+    let on_google = {
+        let auth = services.auth.clone();
+        let run_sign_in = run_sign_in.clone();
+        move |_| {
+            let auth: Arc<AuthService> = auth.clone();
+            run_sign_in(
+                "google",
+                Box::new(async move { auth.sign_in_google().await }),
+            );
+        }
+    };
 
-            loading.set(false);
-        });
+    let on_microsoft = {
+        let auth = services.auth.clone();
+        let run_sign_in = run_sign_in.clone();
+        move |_| {
+            let auth: Arc<AuthService> = auth.clone();
+            run_sign_in(
+                "microsoft",
+                Box::new(async move { auth.sign_in_microsoft().await }),
+            );
+        }
     };
 
     rsx! {
@@ -105,17 +169,15 @@ pub fn LoginPage() -> Element {
                 button {
                     class: "btn-outline",
                     style: "{styles::BTN_OUTLINE}",
-                    onclick: move |_| {
-                        tracing::info!("Google OAuth sign-in (not yet implemented)");
-                    },
+                    disabled: *loading.read(),
+                    onclick: on_google,
                     "Google"
                 }
                 button {
                     class: "btn-outline",
                     style: "{styles::BTN_OUTLINE}",
-                    onclick: move |_| {
-                        tracing::info!("Microsoft OAuth sign-in (not yet implemented)");
-                    },
+                    disabled: *loading.read(),
+                    onclick: on_microsoft,
                     "Microsoft"
                 }
             }

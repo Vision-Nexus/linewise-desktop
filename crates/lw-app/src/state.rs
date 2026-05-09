@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use lw_core::api_client::ApiClient;
-use lw_core::auth::AuthService;
+use lw_core::auth::{AuthClientConfig, AuthService};
 use lw_core::config::AppConfig;
 use lw_core::db::Database;
 use lw_core::models::{Project, Tenant, UploadTask, UserInfo};
@@ -10,6 +10,19 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const FIREBASE_API_KEY: &str = "AIzaSyDqUP3c44v-S22hyPJdjSTCNAFai_-3914";
+// OAuth client IDs for Google and Microsoft. These are "installed app" /
+// "public client" IDs — not secrets; PKCE proves possession. Register one
+// OAuth client of type "Desktop app" per provider in the `linewise-455019`
+// GCP project and in the Azure AD app registration, then paste the IDs here.
+// Keeping them next to FIREBASE_API_KEY mirrors current practice; if/when
+// env-specific config is needed, both blocks move into AppConfig together.
+const GOOGLE_OAUTH_CLIENT_ID: &str =
+    "3295823160-3im6h5df26g00nh8cnb623kn3i59onkc.apps.googleusercontent.com";
+// Google's token endpoint requires the Desktop-app client_secret even with
+// PKCE. Per Google's own docs this value is not confidential — it ships in
+// the binary — so treat it as public identifying material, not as a secret.
+const GOOGLE_OAUTH_CLIENT_SECRET: &str = "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";
+const MICROSOFT_OAUTH_CLIENT_ID: &str = "e83e590c-33fd-4361-8063-b93e95206a14";
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -30,7 +43,12 @@ impl CoreServices {
             .map_err(|e| format!("Database error: {e}"))?;
         let db = Arc::new(db);
 
-        let auth = Arc::new(AuthService::new(FIREBASE_API_KEY.to_string()));
+        let auth = Arc::new(AuthService::new(AuthClientConfig {
+            firebase_api_key: FIREBASE_API_KEY.to_string(),
+            google_oauth_client_id: GOOGLE_OAUTH_CLIENT_ID.to_string(),
+            google_oauth_client_secret: GOOGLE_OAUTH_CLIENT_SECRET.to_string(),
+            microsoft_oauth_client_id: MICROSOFT_OAUTH_CLIENT_ID.to_string(),
+        }));
         let api = Arc::new(ApiClient::new(config.server.environment, Arc::clone(&auth)));
 
         // Select storage backend based on config

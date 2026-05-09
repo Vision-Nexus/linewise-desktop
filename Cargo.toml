@@ -59,3 +59,8 @@ pulldown-cmark = "0.12"
 # UI
 dioxus = { version = "0.7", features = ["desktop"] }
 rfd = "0.17"
+
+# OAuth (PKCE loopback flow for Google/Microsoft sign-in)
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+tiny_http = "0.12"
+webbrowser = "1"

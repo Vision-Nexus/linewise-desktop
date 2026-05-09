@@ -126,7 +126,8 @@ pub struct FirebaseUserInfo {
 pub struct WhoAmIUser {
     pub id: String,
     pub email: String,
-    pub tenant: String,
+    #[serde(default)]
+    pub tenant: Option<String>,
     #[serde(default)]
     pub tenants: Vec<String>,
     pub tenant_infos: Option<Vec<Tenant>>,
