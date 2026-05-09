@@ -209,6 +209,154 @@ fn build_scaler(
     .map_err(|e| enc_err(format!("Scaler: {e}")))
 }
 
+/// Which encoder family we resolved to. Each family takes a different
+/// option set on `open_with`: software x264/x265 need `preset`+`crf`;
+/// hardware encoders ignore those and rely on the bitrate fields on the
+/// codec context, plus a small family-specific quality tweak.
+///
+/// VAAPI is deliberately omitted — it needs an `AVHWFramesContext` upload
+/// step before `send_frame`, which this pipeline doesn't set up yet.
+#[derive(Debug, Clone, Copy)]
+enum EncoderKind {
+    Software,
+    VideoToolbox,
+    Nvenc,
+    Qsv,
+    Amf,
+}
+
+impl EncoderKind {
+    /// Ordered list of HW encoder candidates for each (codec, platform).
+    /// Order reflects typical availability: on macOS VideoToolbox ships with
+    /// system ffmpeg; on Windows NVENC/QSV/AMF are each tied to a GPU vendor
+    /// so we probe all three and keep the first the ffmpeg build knows.
+    fn hw_candidates(codec: &str) -> &'static [(&'static str, EncoderKind)] {
+        match codec {
+            "hevc" | "h265" => &[
+                ("hevc_videotoolbox", EncoderKind::VideoToolbox),
+                ("hevc_nvenc", EncoderKind::Nvenc),
+                ("hevc_qsv", EncoderKind::Qsv),
+                ("hevc_amf", EncoderKind::Amf),
+            ],
+            "h264" => &[
+                ("h264_videotoolbox", EncoderKind::VideoToolbox),
+                ("h264_nvenc", EncoderKind::Nvenc),
+                ("h264_qsv", EncoderKind::Qsv),
+                ("h264_amf", EncoderKind::Amf),
+            ],
+            _ => &[],
+        }
+    }
+}
+
+fn software_name(codec: &str) -> Result<&'static str, TranscodeError> {
+    match codec {
+        "hevc" | "h265" => Ok("libx265"),
+        "h264" => Ok("libx264"),
+        other => Err(TranscodeError::CodecNotFound(other.to_string())),
+    }
+}
+
+fn find_first_available(
+    candidates: &'static [(&'static str, EncoderKind)],
+) -> Option<(&'static str, EncoderKind)> {
+    candidates
+        .iter()
+        .find(|(name, _)| codec::encoder::find_by_name(name).is_some())
+        .copied()
+}
+
+/// Pick an ffmpeg encoder based on the target codec and the requested HW mode.
+///
+/// `hw_accel` values: `"auto"` probes all HW families and falls back to
+/// software if none are built in; `"none"` forces software; `"videotoolbox"`,
+/// `"nvenc"`, `"qsv"`, `"amf"` force that specific family and error if the
+/// ffmpeg build doesn't include it.
+fn resolve_encoder(
+    config: &TranscodeConfig,
+) -> Result<(&'static str, EncoderKind), TranscodeError> {
+    let sw = || software_name(&config.codec).map(|n| (n, EncoderKind::Software));
+    let hw = EncoderKind::hw_candidates(&config.codec);
+
+    let pick_by_kind = |wanted: EncoderKind| -> Option<(&'static str, EncoderKind)> {
+        hw.iter()
+            .find(|(name, kind)| {
+                matches!(
+                    (wanted, kind),
+                    (EncoderKind::VideoToolbox, EncoderKind::VideoToolbox)
+                        | (EncoderKind::Nvenc, EncoderKind::Nvenc)
+                        | (EncoderKind::Qsv, EncoderKind::Qsv)
+                        | (EncoderKind::Amf, EncoderKind::Amf)
+                ) && codec::encoder::find_by_name(name).is_some()
+            })
+            .copied()
+    };
+
+    match config.hw_accel.as_str() {
+        "none" => sw(),
+        "videotoolbox" => pick_by_kind(EncoderKind::VideoToolbox)
+            .ok_or_else(|| TranscodeError::CodecNotFound("videotoolbox".into())),
+        "nvenc" => pick_by_kind(EncoderKind::Nvenc)
+            .ok_or_else(|| TranscodeError::CodecNotFound("nvenc".into())),
+        "qsv" => pick_by_kind(EncoderKind::Qsv)
+            .ok_or_else(|| TranscodeError::CodecNotFound("qsv".into())),
+        "amf" => pick_by_kind(EncoderKind::Amf)
+            .ok_or_else(|| TranscodeError::CodecNotFound("amf".into())),
+        // "auto" and any other value: prefer any available HW encoder, then SW.
+        _ => match find_first_available(hw) {
+            Some(hit) => Ok(hit),
+            None => sw(),
+        },
+    }
+}
+
+/// Per-family encoder option dictionary. Hardware encoders ignore x264/x265
+/// presets and CRF; they rely on the bitrate fields on the codec context
+/// plus a family-specific quality knob. Values are chosen to favor quality
+/// over latency — this is a batch transcode path, not realtime streaming.
+fn encoder_options(kind: EncoderKind, config: &TranscodeConfig) -> Dictionary<'static> {
+    let mut o = Dictionary::new();
+    match kind {
+        EncoderKind::Software => {
+            o.set("preset", &config.preset);
+            o.set("crf", &config.crf.to_string());
+            // x265-params is only meaningful for libx265; harmless but ignored
+            // by libx264, so keeping it matches historical behavior.
+            o.set(
+                "x265-params",
+                &format!(
+                    "vbv-maxrate={}:vbv-bufsize={}",
+                    config.max_bitrate_mbps * 1000,
+                    config.max_bitrate_mbps * 2000,
+                ),
+            );
+        }
+        EncoderKind::VideoToolbox => {
+            // `realtime=0` favors quality over encoding latency.
+            o.set("realtime", "0");
+        }
+        EncoderKind::Nvenc => {
+            // NVENC presets p1..p7 run fastest→slowest/highest-quality in the
+            // modern preset scheme. p5 is a good default; `rc=vbr` + the
+            // codec-context bitrate fields drive output bitrate.
+            o.set("preset", "p5");
+            o.set("rc", "vbr");
+        }
+        EncoderKind::Qsv => {
+            // Intel QuickSync takes libx264-style preset names. `slow` is the
+            // quality-leaning default Intel recommends for non-realtime use.
+            o.set("preset", "slow");
+        }
+        EncoderKind::Amf => {
+            // AMD AMF uses `quality` as its quality-vs-speed knob; values are
+            // `speed` | `balanced` | `quality`.
+            o.set("quality", "quality");
+            o.set("rc", "vbr_peak");
+        }
+    }
+    o
+}
+
 fn setup_video_encoder(
     octx: &mut format::context::Output,
     config: &TranscodeConfig,
@@ -216,11 +364,8 @@ fn setup_video_encoder(
     tw: u32,
     th: u32,
 ) -> Result<(ffmpeg_next::encoder::Video, usize), TranscodeError> {
-    let name = match config.codec.as_str() {
-        "hevc" | "h265" => "libx265",
-        "h264" => "libx264",
-        other => return Err(TranscodeError::CodecNotFound(other.to_string())),
-    };
+    let (name, kind) = resolve_encoder(config)?;
+    tracing::info!("Using video encoder: {name} ({kind:?})");
     let video_codec = codec::encoder::find_by_name(name)
         .ok_or_else(|| TranscodeError::CodecNotFound(name.to_string()))?;
 
@@ -249,17 +394,7 @@ fn setup_video_encoder(
     enc.set_bit_rate(config.max_bitrate_mbps as usize * 1_000_000);
     enc.set_max_bit_rate(config.max_bitrate_mbps as usize * 1_000_000);
 
-    let mut opts = Dictionary::new();
-    opts.set("preset", &config.preset);
-    opts.set("crf", &config.crf.to_string());
-    opts.set(
-        "x265-params",
-        &format!(
-            "vbv-maxrate={}:vbv-bufsize={}",
-            config.max_bitrate_mbps * 1000,
-            config.max_bitrate_mbps * 2000,
-        ),
-    );
+    let opts = encoder_options(kind, config);
 
     let opened = enc
         .open_with(opts)

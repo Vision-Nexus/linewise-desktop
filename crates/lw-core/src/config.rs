@@ -115,6 +115,11 @@ pub struct TranscodeConfig {
     /// Target frame rate (0 = keep original)
     #[serde(default)]
     pub target_fps: u32,
+    /// Hardware acceleration: "auto" | "videotoolbox" | "none".
+    /// "auto" prefers a platform HW encoder when the installed ffmpeg has one,
+    /// and falls back to the software encoder silently otherwise.
+    #[serde(default = "default_hw_accel")]
+    pub hw_accel: String,
 }
 
 fn default_codec() -> String {
@@ -135,6 +140,9 @@ fn default_max_height() -> u32 {
 fn default_audio_bitrate() -> u32 {
     128
 }
+fn default_hw_accel() -> String {
+    "auto".to_string()
+}
 
 impl Default for TranscodeConfig {
     fn default() -> Self {
@@ -147,6 +155,7 @@ impl Default for TranscodeConfig {
             max_height: default_max_height(),
             audio_bitrate_kbps: default_audio_bitrate(),
             target_fps: 0,
+            hw_accel: default_hw_accel(),
         }
     }
 }
