@@ -103,7 +103,13 @@ pub struct TranscodeConfig {
     /// x265 encoding preset (ultrafast..veryslow). Slower = better compression.
     #[serde(default = "default_preset")]
     pub preset: String,
-    /// VBR ceiling in Mbps
+    /// Target average bitrate in Mbps (VBR target). Typical 10.
+    #[serde(default = "default_target_bitrate")]
+    pub target_bitrate_mbps: u32,
+    /// VBR peak ceiling in Mbps. When target < max, VideoToolbox allows
+    /// bursts up to the cap; when they're set equal the encoder treats it as
+    /// a tight ceiling and tends to undershoot the target.
+    /// Typical 20 (i.e. 2× the target).
     #[serde(default = "default_max_bitrate")]
     pub max_bitrate_mbps: u32,
     /// Heights above this are downscaled (maintaining aspect ratio)
@@ -131,8 +137,11 @@ fn default_crf() -> u8 {
 fn default_preset() -> String {
     "medium".to_string()
 }
-fn default_max_bitrate() -> u32 {
+fn default_target_bitrate() -> u32 {
     10
+}
+fn default_max_bitrate() -> u32 {
+    20
 }
 fn default_max_height() -> u32 {
     1080
@@ -151,6 +160,7 @@ impl Default for TranscodeConfig {
             codec: default_codec(),
             crf: default_crf(),
             preset: default_preset(),
+            target_bitrate_mbps: default_target_bitrate(),
             max_bitrate_mbps: default_max_bitrate(),
             max_height: default_max_height(),
             audio_bitrate_kbps: default_audio_bitrate(),

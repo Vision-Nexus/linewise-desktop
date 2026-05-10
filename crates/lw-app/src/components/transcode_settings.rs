@@ -122,9 +122,28 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
                 }
             }
 
-            // Max bitrate
+            // Target average bitrate (the VBR target).
             SettingRow {
-                label: "Max Bitrate (Mbps)",
+                label: "Target Bitrate (Mbps)",
+                input {
+                    r#type: "number",
+                    min: "1",
+                    max: "100",
+                    value: "{config.read().target_bitrate_mbps}",
+                    disabled: !master_enabled,
+                    onchange: move |evt: Event<FormData>| {
+                        if let Ok(v) = evt.value().parse::<u32>() {
+                            config.write().target_bitrate_mbps = v;
+                        }
+                    },
+                    style: "{input_style()} width: 80px;",
+                }
+            }
+
+            // Peak cap. Typical 2× target; at equal values VideoToolbox
+            // systematically undershoots the target.
+            SettingRow {
+                label: "Peak Bitrate Cap (Mbps)",
                 input {
                     r#type: "number",
                     min: "1",

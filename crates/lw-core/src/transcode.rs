@@ -89,7 +89,10 @@ impl HwKind {
 /// Rough estimate of transcoded file size for the staging UI.
 pub fn estimate_transcoded_size(info: &VideoInfo, config: &TranscodeConfig) -> u64 {
     let duration_secs = info.duration_secs.max(1.0);
-    let effective_bitrate_kbps = (config.max_bitrate_mbps as f64 * 1000.0 * 0.5) as u64;
+    // VBR targets the average, not the peak. Use the target directly;
+    // the old 0.5-factor on max was a hack back when bit_rate == max_bit_rate
+    // caused systematic undershoot.
+    let effective_bitrate_kbps = (config.target_bitrate_mbps as u64) * 1000;
     let video_bytes = effective_bitrate_kbps * (duration_secs as u64) * 1000 / 8;
     let audio_bytes = (config.audio_bitrate_kbps as u64) * (duration_secs as u64) * 1000 / 8;
     video_bytes + audio_bytes
@@ -302,7 +305,13 @@ fn encode_to_hls(
         Rational::new(1, 30)
     };
     v_enc_ctx.set_time_base(enc_time_base);
-    v_enc_ctx.set_bit_rate(config.max_bitrate_mbps as usize * 1_000_000);
+    // Split target from peak. When bit_rate == max_bit_rate, VideoToolbox
+    // treats the stream as a tight ceiling and systematically undershoots
+    // the target (PoC on 4K60p input: 7 Mbps actual against a 10 Mbps tight
+    // cap, SSIM 0.943). With peak set to 2× target we land close to the
+    // target with a quality bump (10 Mbps actual, SSIM 0.956) while still
+    // staying under the user's 20 Mbps hard ceiling.
+    v_enc_ctx.set_bit_rate(config.target_bitrate_mbps as usize * 1_000_000);
     v_enc_ctx.set_max_bit_rate(config.max_bitrate_mbps as usize * 1_000_000);
     let fps = if v_rate.1 > 0 {
         v_rate.0 as f64 / v_rate.1 as f64
@@ -898,6 +907,10 @@ fn encoder_options(kind: EncoderKind, config: &TranscodeConfig) -> Dictionary<'s
         EncoderKind::VideoToolbox => {
             o.set("realtime", "0");
             o.set("allow_sw", "1");
+            // Explicit VBR (not CBR). Pairs with the codec-context
+            // bit_rate (target) / max_bit_rate (peak) pair — see PoC at
+            // .claude/worktrees/agent-ae5b2cb8949f44e98/vt-bitrate/.
+            o.set("constant_bit_rate", "0");
         }
         EncoderKind::Nvenc => {
             o.set("preset", "p5");
