@@ -28,7 +28,8 @@ cp "$FFMPEG_PREFIX/bin/ffmpeg" "$RESOURCES/ffmpeg"
 chmod +x "$RESOURCES/ffmpeg"
 echo "  Copied ffmpeg binary → Resources/"
 
-# Copy required dylibs
+# Copy required dylibs. libavdevice is pulled in by ffmpeg-sys-next 8.1+
+# even when we don't use it directly.
 DYLIBS=(
     libavcodec
     libavformat
@@ -36,6 +37,7 @@ DYLIBS=(
     libswscale
     libswresample
     libavfilter
+    libavdevice
 )
 
 for lib in "${DYLIBS[@]}"; do

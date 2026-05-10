@@ -96,11 +96,13 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p lw-app
 
       - name: Install cargo-bundle
+        if: runner.os != 'Windows'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-bundle
 
       - name: Bundle application
+        if: runner.os != 'Windows'
         working-directory: crates/lw-app
         run: cargo bundle --release --target ${{ matrix.target }}
 
@@ -161,6 +163,24 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File scripts/bundle-ffmpeg-windows.ps1
 
+      # cargo-bundle's MSI path is broken for our setup (hyphenated bin name
+      # + missing `--format msi` detection), so we ship the unpacked release
+      # directory as a zip. linewise-desktop.exe + bundled FFmpeg DLLs are
+      # all the user needs.
+      - name: Zip Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ReleaseDir = "target\${{ matrix.target }}\release"
+          $ZipPath = "target\linewise-desktop-windows-x86_64.zip"
+          $Staging = "$env:RUNNER_TEMP\linewise-desktop"
+          New-Item -ItemType Directory -Force -Path $Staging | Out-Null
+          Copy-Item "$ReleaseDir\linewise-desktop.exe" $Staging
+          Copy-Item "$ReleaseDir\*.dll" $Staging -ErrorAction SilentlyContinue
+          Copy-Item "$ReleaseDir\ffmpeg.exe" $Staging -ErrorAction SilentlyContinue
+          Compress-Archive -Path "$Staging\*" -DestinationPath $ZipPath -Force
+          Write-Host "Created $ZipPath"
+
       # --- Upload artifacts ---
 
       - name: Upload macOS DMG
@@ -177,12 +197,12 @@ jobs:
           name: ${{ matrix.artifact }}
           path: target/${{ matrix.target }}/release/bundle/deb/*.deb
 
-      - name: Upload Windows .msi
+      - name: Upload Windows zip
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: target/${{ matrix.target }}/release/bundle/msi/*.msi
+          path: target/linewise-desktop-windows-x86_64.zip
 
   release:
     needs: build
