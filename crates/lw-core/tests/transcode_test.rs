@@ -5,9 +5,15 @@ use std::path::Path;
 
 #[tokio::test]
 async fn test_transcode_real_file() {
-    let path = Path::new("/Users/famer.me/Downloads/ae909add-19fd-4401-b2af-5384e24eedfb.mp4");
+    // Manual test fixture — point LINEWISE_TEST_VIDEO at a local mp4 to run.
+    // Otherwise this test silently skips, so CI (which has no fixture) stays green.
+    let Some(path_str) = std::env::var("LINEWISE_TEST_VIDEO").ok() else {
+        eprintln!("LINEWISE_TEST_VIDEO not set, skipping transcode integration test");
+        return;
+    };
+    let path = Path::new(&path_str);
     if !path.exists() {
-        eprintln!("Test file not found, skipping");
+        eprintln!("LINEWISE_TEST_VIDEO={path_str} does not exist, skipping");
         return;
     }
 

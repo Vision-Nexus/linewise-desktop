@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 use lw_core::config::{AppConfig, TranscodeConfig};
+use lw_core::transcode::probe_availability;
 
 const PRESETS: &[&str] = &["fast", "medium", "slow"];
 const RESOLUTIONS: &[(u32, &str)] = &[(720, "720p"), (1080, "1080p")];
@@ -11,6 +12,16 @@ const AUDIO_BITRATES: &[u32] = &[128, 192];
 pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
     let mut config = use_signal(|| AppConfig::load().map(|c| c.transcode).unwrap_or_default());
     let mut saved = use_signal(|| false);
+    // Probe ffmpeg + HW encoders once on mount. Safe to re-probe since
+    // `ffmpeg_next::init()` is idempotent — but caching keeps the UI snappy.
+    let availability = use_signal(|| probe_availability(&config.read()));
+    let ffmpeg_ok = availability.read().ffmpeg;
+    // If ffmpeg is missing, force-disable the master toggle regardless of what
+    // the on-disk config says. The user can't enable transcoding without it.
+    if !ffmpeg_ok && config.read().enabled {
+        config.write().enabled = false;
+    }
+    let master_enabled = ffmpeg_ok && config.read().enabled;
 
     let save = move |_| {
         let tc = config.read().clone();
@@ -50,7 +61,7 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
                 }
             }
 
-            // Enable toggle
+            // Enable toggle — disabled when ffmpeg is absent from the system.
             SettingRow {
                 label: "Enable Transcoding",
                 div {
@@ -58,11 +69,41 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
                     input {
                         r#type: "checkbox",
                         checked: config.read().enabled,
+                        disabled: !ffmpeg_ok,
                         onchange: move |_| {
+                            if !ffmpeg_ok { return; }
                             let current = config.read().enabled;
                             config.write().enabled = !current;
                         },
                         style: "cursor: pointer; accent-color: var(--btn-primary); width: 16px; height: 16px;",
+                    }
+                }
+            }
+
+            if !ffmpeg_ok {
+                div {
+                    style: "margin: -4px 0 12px 0; padding: 8px 10px; border-radius: 4px; background: var(--warning-bg); border: 1px solid var(--warning); font-size: 12px; color: var(--warning);",
+                    "ffmpeg not detected on this system — install it via your package manager (Homebrew, apt, winget) to enable transcoding."
+                }
+            }
+
+            // Hardware acceleration — sub-setting of the master toggle. Filtered
+            // to Auto + None + whatever HW encoders the current ffmpeg build has.
+            SettingRow {
+                label: "Hardware Acceleration",
+                select {
+                    style: select_style(),
+                    value: "{config.read().hw_accel}",
+                    disabled: !master_enabled,
+                    onchange: move |evt: Event<FormData>| config.write().hw_accel = evt.value(),
+                    option { value: "auto", selected: config.read().hw_accel == "auto", "Auto (prefer HW if available)" }
+                    option { value: "none", selected: config.read().hw_accel == "none", "None (software)" }
+                    for hw in availability.read().available_hw.iter() {
+                        option {
+                            value: "{hw.as_config_str()}",
+                            selected: config.read().hw_accel == hw.as_config_str(),
+                            "{hw.display_label()}"
+                        }
                     }
                 }
             }
@@ -73,6 +114,7 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
                 select {
                     style: select_style(),
                     value: "{config.read().preset}",
+                    disabled: !master_enabled,
                     onchange: move |evt: Event<FormData>| config.write().preset = evt.value(),
                     for preset in PRESETS {
                         option { value: *preset, selected: config.read().preset == *preset, "{preset}" }
@@ -88,6 +130,7 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
                     min: "1",
                     max: "100",
                     value: "{config.read().max_bitrate_mbps}",
+                    disabled: !master_enabled,
                     onchange: move |evt: Event<FormData>| {
                         if let Ok(v) = evt.value().parse::<u32>() {
                             config.write().max_bitrate_mbps = v;
@@ -103,6 +146,7 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
                 select {
                     style: select_style(),
                     value: "{config.read().max_height}",
+                    disabled: !master_enabled,
                     onchange: move |evt: Event<FormData>| {
                         if let Ok(v) = evt.value().parse::<u32>() {
                             config.write().max_height = v;
@@ -120,6 +164,7 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
                 select {
                     style: select_style(),
                     value: "{config.read().audio_bitrate_kbps}",
+                    disabled: !master_enabled,
                     onchange: move |evt: Event<FormData>| {
                         if let Ok(v) = evt.value().parse::<u32>() {
                             config.write().audio_bitrate_kbps = v;

@@ -1,3 +1,4 @@
+use crate::config::TranscodeConfig;
 use crate::error::VideoValidationError;
 use crate::models::{VideoInfo, VideoValidationResult};
 use std::path::Path;
@@ -120,4 +121,77 @@ fn probe_and_validate(path: &Path) -> Result<VideoValidationResult, VideoValidat
     }
 
     Ok(VideoValidationResult { info, warnings })
+}
+
+/// Would transcoding actually shrink this clip? Returns false when the source
+/// is at or below the target on resolution, fps, and bitrate — in that case
+/// a transcode only costs CPU/storage without adding value. The UI uses this
+/// to hide the per-clip transcode toggle; `upload::maybe_transcode` also
+/// short-circuits on `false` as defense-in-depth.
+pub fn transcode_would_help(info: &VideoInfo, cfg: &TranscodeConfig) -> bool {
+    let resolution_exceeds = info.height > cfg.max_height;
+    let fps_exceeds = cfg.target_fps > 0 && info.fps > cfg.target_fps as f64;
+    let bitrate_exceeds = info.bitrate_kbps > (cfg.max_bitrate_mbps as u64) * 1000;
+    resolution_exceeds || fps_exceeds || bitrate_exceeds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(height: u32, fps: f64, bitrate_kbps: u64) -> VideoInfo {
+        VideoInfo {
+            width: 1920,
+            height,
+            fps,
+            bitrate_kbps,
+            codec: "h264".into(),
+            audio_codec: "aac".into(),
+            duration_secs: 60.0,
+            format: "mov".into(),
+        }
+    }
+
+    fn cfg() -> TranscodeConfig {
+        TranscodeConfig {
+            enabled: true,
+            codec: "hevc".into(),
+            crf: 23,
+            preset: "medium".into(),
+            max_bitrate_mbps: 10,
+            max_height: 1080,
+            audio_bitrate_kbps: 128,
+            target_fps: 30,
+            hw_accel: "auto".into(),
+        }
+    }
+
+    #[test]
+    fn guard_exceeds_resolution() {
+        assert!(transcode_would_help(&info(1440, 30.0, 8_000), &cfg()));
+    }
+
+    #[test]
+    fn guard_exceeds_fps() {
+        assert!(transcode_would_help(&info(1080, 60.0, 8_000), &cfg()));
+    }
+
+    #[test]
+    fn guard_exceeds_bitrate() {
+        assert!(transcode_would_help(&info(1080, 30.0, 25_000), &cfg()));
+    }
+
+    #[test]
+    fn guard_source_below_all() {
+        // 720p 30fps 4Mbps — transcoding is pure waste.
+        assert!(!transcode_would_help(&info(720, 30.0, 4_000), &cfg()));
+    }
+
+    #[test]
+    fn guard_fps_ignored_when_target_zero() {
+        let mut c = cfg();
+        c.target_fps = 0;
+        // 60fps at 720p 4Mbps with no target_fps → no axis exceeds.
+        assert!(!transcode_would_help(&info(720, 60.0, 4_000), &c));
+    }
 }

@@ -2,8 +2,10 @@ use crate::state::{AppState, CoreServices};
 use crate::styles;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
+use lw_core::config::TranscodeConfig;
 use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload::UploadEvent;
+use lw_core::video;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -384,6 +386,7 @@ pub fn UploadQueue() -> Element {
                             StagedRow {
                                 key: "{task.id}",
                                 task: task.clone(),
+                                transcode_config: services.config.transcode.clone(),
                                 on_remove: on_remove.clone(),
                                 on_transcode_click,
                             }
@@ -501,6 +504,7 @@ fn SectionHeader(title: String, count: usize) -> Element {
 #[component]
 fn StagedRow(
     task: UploadTask,
+    transcode_config: TranscodeConfig,
     on_remove: EventHandler<String>,
     on_transcode_click: EventHandler<String>,
 ) -> Element {
@@ -508,6 +512,17 @@ fn StagedRow(
     let transcode_id = task.id.clone();
     let is_video = task.mime_type.starts_with("video/");
     let transcode_on = task.transcode;
+    // Upscale guard: only show the transcode toggle when transcoding would
+    // actually shrink this clip. Non-video files never get the toggle; for
+    // videos without a probe yet, fall back to showing the toggle (user can
+    // still opt out manually).
+    let transcode_useful = task
+        .video_info
+        .as_ref()
+        .map(|info| video::transcode_would_help(info, &transcode_config))
+        .unwrap_or(true);
+    let show_transcode_toggle = is_video && transcode_useful;
+    let show_already_ok_badge = is_video && !transcode_useful;
 
     // Build video info summary line
     let video_summary = task.video_info.as_ref().map(|info| {
@@ -569,8 +584,15 @@ fn StagedRow(
 
             // Action buttons
             div {
-                style: "display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px;",
-                if is_video {
+                style: "display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 8px;",
+                if show_already_ok_badge {
+                    span {
+                        style: "font-size: 11px; color: var(--text-secondary); padding: 2px 6px; border-radius: 3px; background: var(--bg-secondary); border: 1px solid var(--border);",
+                        title: "Source already at or below transcode targets — no benefit to re-encoding.",
+                        "Already matches targets"
+                    }
+                }
+                if show_transcode_toggle {
                     button {
                         style: "{transcode_btn_style}",
                         onclick: move |_| on_transcode_click.call(transcode_id.clone()),

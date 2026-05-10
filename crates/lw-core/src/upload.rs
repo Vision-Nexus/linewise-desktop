@@ -589,6 +589,18 @@ impl UploadEngine {
             return Ok(None);
         };
 
+        // Upscale guard: if the source is already at or below target on all
+        // axes, transcoding only costs CPU/storage. The UI hides the toggle
+        // in this case, but we short-circuit here too so mid-session config
+        // changes can't re-open the gap.
+        if !video::transcode_would_help(info, &self.transcode_config) {
+            tracing::info!(
+                "Skipping transcode for {}: source already at/below targets",
+                task.filename,
+            );
+            return Ok(None);
+        }
+
         self.update_state(task, UploadState::Transcoding).await;
         let input = path.to_path_buf();
         let info_clone = info.clone();

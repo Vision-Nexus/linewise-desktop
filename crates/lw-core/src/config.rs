@@ -89,7 +89,7 @@ fn default_processing_mode() -> ProcessingMode {
     ProcessingMode::Local
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscodeConfig {
     /// Master toggle — false disables transcoding entirely
     #[serde(default = "default_true")]

@@ -237,7 +237,7 @@ impl Database {
                     document_id, session_id, bytes_uploaded, state, error_message,
                     hash, validation_warnings, retry_count, video_info
              FROM upload_queue
-             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING')
+             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
              ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
