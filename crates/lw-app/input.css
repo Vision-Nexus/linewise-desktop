@@ -1,0 +1,49 @@
+@import 'tailwindcss';
+
+@source "./src/**/*.rs";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(0.625rem - 4px);
+  --radius-md: calc(0.625rem - 2px);
+  --radius-lg: 0.625rem;
+  --radius-xl: calc(0.625rem + 4px);
+
+  --color-background: oklch(1 0 0);
+  --color-foreground: #333333;
+
+  --color-primary: #6713db;
+  --color-primary-hovered: #5108b6;
+  --color-primary-foreground: oklch(0.985 0 0);
+
+  --color-secondary: #f4f4f5;
+  --color-secondary-hovered: #e4e4e7;
+  --color-secondary-foreground: oklch(0.21 0.006 285.885);
+
+  --color-muted: oklch(0.967 0.001 286.375);
+  --color-muted-foreground: oklch(0.552 0.016 285.938);
+
+  --color-accent: #f4f4f5;
+  --color-accent-foreground: oklch(0.21 0.006 285.885);
+
+  --color-destructive: #ef4444;
+  --color-destructive-light: #ffeeee;
+
+  --color-border: #eeeeee;
+  --color-input: oklch(0.92 0.004 286.32);
+  --color-ring: var(--color-primary-hovered);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  button:not([disabled]),
+  [role='button']:not([disabled]) {
+    cursor: pointer;
+  }
+}

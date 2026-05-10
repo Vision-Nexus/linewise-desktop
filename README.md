@@ -1,11 +1,12 @@
-# Linewise Desktop
+# Linewise Upload
 
 Cross-platform desktop client for [Linewise](https://app.linewise.io) — data desensitization, resumable uploads, video validation, and action camera integration.
 
-Built with **Rust** + **Dioxus**.
+Built with **Rust** + **Dioxus** + **Tailwind CSS v4**.
 
 ![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)
 ![Dioxus](https://img.shields.io/badge/Dioxus-0.7-blue)
+![Tailwind](https://img.shields.io/badge/Tailwind_CSS-v4-38bdf8?logo=tailwindcss)
 ![SQLite](https://img.shields.io/badge/SQLite-sqlx-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
@@ -51,19 +52,27 @@ Built with **Rust** + **Dioxus**.
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) (2024 edition)
+- [Node.js](https://nodejs.org/) (v20+) — for Tailwind CSS build
 - [ffmpeg](https://ffmpeg.org/) + ffprobe in PATH (for video validation & metadata stripping)
 
-### Build & Run
+### Setup
 
 ```bash
 cd linewise-desktop
 
-# Dev
+# Install Tailwind CSS and dependencies
+npm install
+```
+
+### Build & Run
+
+```bash
+# Dev (Tailwind CSS is generated automatically during cargo build)
 cargo run
 
 # Release
 cargo build --release
-./target/release/lw-app
+./target/release/linewise-desktop
 ```
 
 ### Configuration
@@ -97,30 +106,40 @@ linewise-desktop/
 ├── crates/
 │   ├── lw-core/    # Business logic (auth, upload, storage, DB, video)
 │   └── lw-app/     # Dioxus desktop UI (sidebar, upload queue, login)
+├── package.json     # Tailwind CSS dev dependency
 ├── ARCHITECTURE.md  # Module diagrams
 ├── CLAUDE.md        # AI coding guidelines
 └── Cargo.toml       # Workspace root
 ```
+
+### Tailwind CSS Integration
+
+The login page uses Tailwind CSS v4 with theme tokens matching the web frontend. The build pipeline:
+
+1. `crates/lw-app/input.css` — Tailwind entry point with theme variables
+2. `build.rs` runs `npx @tailwindcss/cli` at compile time, scanning `.rs` files for class names
+3. Generated CSS is included via `include_str!` into the Dioxus webview
 
 ### Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
 | **Rust + Dioxus** | Native performance, single binary, cross-platform |
+| **Tailwind CSS v4** | Consistent styling with web frontend, utility-first |
 | **sqlx with query! macros** | Compile-time SQL checking, async |
 | **Enum storage backend** | GCS + S3 without dyn trait overhead |
 | **Two-step upload** | Prevent accidental uploads of wrong files |
 | **32MB chunks** | Balance between request overhead and resume granularity |
-| **CSS variables for theming** | System dark/light mode via `prefers-color-scheme` |
 | **Scala API as source of truth** | DTOs mirror backend case classes, not frontend TS |
 
 ## Development
 
 ```bash
-cargo check           # Type-check
-cargo clippy          # Lint (must pass clean)
-cargo fmt -- --check  # Format check
-cargo test            # Run tests
+npm install             # Install Tailwind CSS (first time only)
+cargo check            # Type-check
+cargo clippy           # Lint (must pass clean)
+cargo fmt -- --check   # Format check
+cargo test             # Run tests
 ```
 
 ### Environment

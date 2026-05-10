@@ -5,6 +5,8 @@ use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
 use dioxus::prelude::*;
 use lw_chat::{ChatConfig, ChatPanel};
 
+const TAILWIND_CSS: &str = include_str!("../tailwind.generated.css");
+
 /// Global CSS for hover/active states (can't do :hover in inline styles)
 const GLOBAL_CSS: &str = r#"
 /* ── CSS Variables: Light theme (default) ─────────────────────────── */
@@ -115,6 +117,9 @@ body {
 .btn-success:active { background: var(--btn-success-active) !important; transform: scale(0.97); }
 .btn-outline:hover { background: var(--btn-outline-hover) !important; border-color: var(--border-hover) !important; }
 .btn-outline:active { background: var(--btn-outline-active) !important; transform: scale(0.97); }
+/* Login separator */
+.login-separator { display: flex; align-items: center; gap: 12px; width: 100%; }
+.login-separator::before, .login-separator::after { content: ''; flex: 1; height: 1px; background: var(--color-border); }
 .btn-danger-sm:hover { background: var(--btn-danger-hover) !important; border-color: var(--error) !important; }
 .btn-danger-sm:active { background: var(--btn-danger-active) !important; transform: scale(0.97); }
 
@@ -233,6 +238,7 @@ pub fn App() -> Element {
     let is_restoring = *restoring.read();
 
     rsx! {
+        style { "{TAILWIND_CSS}" }
         style { "{GLOBAL_CSS}" }
         style { "{lw_chat::styles::CHAT_CSS}" }
         if is_restoring {
