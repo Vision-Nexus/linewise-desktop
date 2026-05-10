@@ -41,11 +41,19 @@ DYLIBS=(
 )
 
 for lib in "${DYLIBS[@]}"; do
-    dylib=$(find "$FFMPEG_PREFIX/lib" -name "${lib}*.dylib" -not -name "*.*.*.dylib" | head -1)
-    if [ -n "$dylib" ]; then
-        cp "$dylib" "$FRAMEWORKS/"
-        echo "  Copied $(basename "$dylib") → Frameworks/"
+    # Pick the major-versioned file (e.g. libavdevice.62.dylib), not the
+    # bare symlink (libavdevice.dylib) or the fully-versioned file
+    # (libavdevice.62.0.100.dylib). The linker stamps the major-versioned
+    # SONAME into LC_LOAD_DYLIB, so that's the exact filename we must
+    # produce in Contents/Frameworks.
+    dylib=$(find "$FFMPEG_PREFIX/lib" -name "${lib}.*.dylib" -not -name "*.*.*.dylib" | head -1)
+    if [ -z "$dylib" ]; then
+        echo "Error: could not find major-versioned ${lib}.*.dylib under $FFMPEG_PREFIX/lib"
+        ls "$FFMPEG_PREFIX/lib" | grep "^${lib}" || true
+        exit 1
     fi
+    cp "$dylib" "$FRAMEWORKS/"
+    echo "  Copied $(basename "$dylib") → Frameworks/"
 done
 
 # Fix dylib references to use @rpath
