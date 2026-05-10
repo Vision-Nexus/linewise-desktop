@@ -76,6 +76,15 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$RESOURCES/ffmpeg
 
 echo "Done bundling FFmpeg into $APP_BUNDLE"
 
+# Ad-hoc codesign the whole bundle. Must happen AFTER install_name_tool
+# rewrites — any change to a Mach-O invalidates its signature.
+# Ad-hoc ("-") does not satisfy Gatekeeper for downloaded copies, but it
+# produces a well-formed signature so the app launches on dev machines
+# (and once quarantine is stripped on end-user machines).
+echo "Ad-hoc codesigning $APP_BUNDLE"
+codesign --force --deep --sign - "$APP_BUNDLE"
+codesign --verify --deep --strict "$APP_BUNDLE"
+
 # Optionally create DMG
 if [ "${CREATE_DMG:-0}" = "1" ]; then
     DMG_PATH="$ROOT/target/linewise-desktop-macos-${TARGET}.dmg"
