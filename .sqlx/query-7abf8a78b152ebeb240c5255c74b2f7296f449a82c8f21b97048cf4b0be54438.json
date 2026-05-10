@@ -1,0 +1,116 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, validation_warnings, retry_count, video_info, transcode\n             FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "local_path",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "filename",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "size",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "mime_type",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "tenant_id",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "project_id",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "document_id",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "bytes_uploaded",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "state",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "hash",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "validation_warnings",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "retry_count",
+        "ordinal": 14,
+        "type_info": "Integer"
+      },
+      {
+        "name": "video_info",
+        "ordinal": 15,
+        "type_info": "Text"
+      },
+      {
+        "name": "transcode",
+        "ordinal": 16,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "7abf8a78b152ebeb240c5255c74b2f7296f449a82c8f21b97048cf4b0be54438"
+}

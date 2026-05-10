@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR REPLACE INTO file_hashes (hash, filename, size, tenant_id, project_id, document_id)\n             VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "581c9ca183315e3e67a57fef9f611ac924bb9cbdec619e9414e976955aeefb66"
+}

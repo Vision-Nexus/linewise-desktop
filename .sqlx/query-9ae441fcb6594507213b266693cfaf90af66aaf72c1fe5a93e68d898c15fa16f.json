@@ -1,0 +1,116 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, validation_warnings, retry_count, video_info, transcode\n             FROM upload_queue\n             WHERE state = 'FAILED'\n               AND retry_count < 10\n               AND (error_message LIKE '%Network%'\n                    OR error_message LIKE '%timeout%'\n                    OR error_message LIKE '%no healthy upstream%'\n                    OR error_message LIKE '%Interrupted%'\n                    OR error_message LIKE '%error sending request%')\n             ORDER BY created_at ASC\n             LIMIT 20",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "local_path",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "filename",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "size",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "mime_type",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "tenant_id",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "project_id",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "document_id",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_id",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "bytes_uploaded",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "state",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "hash",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "validation_warnings",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "retry_count",
+        "ordinal": 14,
+        "type_info": "Integer"
+      },
+      {
+        "name": "video_info",
+        "ordinal": 15,
+        "type_info": "Text"
+      },
+      {
+        "name": "transcode",
+        "ordinal": 16,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "9ae441fcb6594507213b266693cfaf90af66aaf72c1fe5a93e68d898c15fa16f"
+}
