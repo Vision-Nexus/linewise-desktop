@@ -25,7 +25,7 @@ rfd = { workspace = true }
 winresource = "0.1"
 
 [package.metadata.bundle]
-name = "Linewise Upload"
+name = "Linewise Desktop"
 identifier = "io.linewise.desktop"
 icon = ["../../assets/icons/icon.icns", "../../assets/icons/icon.ico", "../../assets/icons/icon.png"]
 copyright = "Copyright (c) 2024 Linewise. All rights reserved."
