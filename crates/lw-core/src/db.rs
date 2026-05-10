@@ -30,6 +30,7 @@ struct UploadRow {
     validation_warnings: Option<String>,
     retry_count: Option<i64>,
     video_info: Option<String>,
+    transcode: i64,
 }
 
 impl From<UploadRow> for UploadTask {
@@ -53,7 +54,7 @@ impl From<UploadRow> for UploadTask {
             hash: r.hash,
             validation_warnings: warnings,
             retry_count: r.retry_count.unwrap_or(0) as u32,
-            transcode: false, // per-session UI choice, not persisted
+            transcode: r.transcode != 0,
             video_info: r
                 .video_info
                 .as_deref()
@@ -100,9 +101,10 @@ impl Database {
             .transpose()?;
         let size = task.size as i64;
         let state = task.state.as_str();
+        let transcode = i64::from(task.transcode);
         sqlx::query!(
-            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, validation_warnings, video_info)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, validation_warnings, video_info, transcode)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             task.id,
             task.local_path,
             task.filename,
@@ -114,6 +116,22 @@ impl Database {
             task.hash,
             warnings_json,
             video_info_json,
+            transcode,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Update the `transcode` opt-in on an existing upload row. Called when
+    /// `confirm_staged` promotes a STAGED task to PENDING with its transcode
+    /// choice captured.
+    pub async fn update_upload_transcode(&self, id: &str, transcode: bool) -> Result<(), DbError> {
+        let transcode = i64::from(transcode);
+        sqlx::query!(
+            "UPDATE upload_queue SET transcode = ?, updated_at = datetime('now') WHERE id = ?",
+            transcode,
+            id,
         )
         .execute(&self.pool)
         .await?;
@@ -200,7 +218,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info
+                    hash, validation_warnings, retry_count, video_info, transcode
              FROM upload_queue
              WHERE state = 'FAILED'
                AND retry_count < 10
@@ -222,7 +240,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info
+                    hash, validation_warnings, retry_count, video_info, transcode
              FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -235,7 +253,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info
+                    hash, validation_warnings, retry_count, video_info, transcode
              FROM upload_queue
              WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
              ORDER BY created_at ASC",
@@ -250,7 +268,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info
+                    hash, validation_warnings, retry_count, video_info, transcode
              FROM upload_queue ORDER BY created_at DESC LIMIT 100",
         )
         .fetch_all(&self.pool)

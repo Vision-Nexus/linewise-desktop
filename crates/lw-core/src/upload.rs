@@ -158,6 +158,12 @@ impl UploadEngine {
 
         for mut task in staged {
             task.transcode = transcode_task_ids.contains(&task.id);
+            // Persist the transcode choice so resume-after-crash keeps it.
+            // Without this, a killed mid-transcode task silently falls through
+            // to uploading the original file on next launch.
+            self.db
+                .update_upload_transcode(&task.id, task.transcode)
+                .await?;
             self.db
                 .update_upload_state(&task.id, UploadState::Pending, None)
                 .await?;
