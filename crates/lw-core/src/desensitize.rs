@@ -1,5 +1,6 @@
 //! Data desensitization — strip metadata from files before cross-border upload.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +107,52 @@ fn strip_video_metadata_blocking(input: &Path) -> Result<DesensitizeResult, Dese
     })
 }
 
+/// Resolve the ffmpeg CLI binary, preferring the bundled copy over system PATH.
+fn resolve_ffmpeg_binary() -> OsString {
+    let Ok(exe) = std::env::current_exe() else {
+        return OsString::from("ffmpeg");
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        // .app/Contents/MacOS/binary → .app/Contents/Resources/ffmpeg
+        if let Some(resources) = exe.parent().and_then(|p| p.parent()) {
+            let candidate = resources.join("Resources").join("ffmpeg");
+            if candidate.exists() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("ffmpeg.exe");
+            if candidate.exists() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(dir) = exe.parent() {
+            // Same directory (AppImage / portable)
+            let candidate = dir.join("ffmpeg");
+            if candidate.exists() {
+                return candidate.into_os_string();
+            }
+            // Installed .deb layout: /usr/bin/../lib/linewise-desktop/ffmpeg
+            let candidate = dir.join("../lib/linewise-desktop/ffmpeg");
+            if candidate.exists() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+
+    OsString::from("ffmpeg")
+}
+
 /// Strip EXIF/metadata from an image file.
 /// Still uses ffmpeg CLI for images (ffmpeg-next's image handling is less ergonomic).
 pub async fn strip_image_metadata(input: &Path) -> Result<DesensitizeResult, DesensitizeError> {
@@ -121,7 +168,7 @@ pub async fn strip_image_metadata(input: &Path) -> Result<DesensitizeResult, Des
             .to_string_lossy();
         let output = temp_dir.join(format!("clean_{filename}"));
 
-        let result = std::process::Command::new("ffmpeg")
+        let result = std::process::Command::new(resolve_ffmpeg_binary())
             .args(["-y", "-i"])
             .arg(&input)
             .args(["-map_metadata", "-1"])

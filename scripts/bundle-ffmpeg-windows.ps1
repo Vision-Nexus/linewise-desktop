@@ -1,0 +1,56 @@
+# Bundle FFmpeg DLLs and CLI binary alongside the Windows .exe
+# Expects FFMPEG_DIR environment variable pointing to extracted FFmpeg shared build
+
+$ErrorActionPreference = "Stop"
+
+$Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not $Root) { $Root = Join-Path $PSScriptRoot ".." }
+$Root = Resolve-Path $Root
+
+$ReleaseDir = Join-Path $Root "target\x86_64-pc-windows-msvc\release"
+$BundleDir = Join-Path $Root "target\x86_64-pc-windows-msvc\release\bundle\msi"
+
+# Find the binary location (either in release dir or msi staging)
+$ExeDir = $ReleaseDir
+if (-not (Test-Path (Join-Path $ExeDir "linewise-desktop.exe"))) {
+    Write-Error "linewise-desktop.exe not found in $ExeDir"
+    exit 1
+}
+
+$FfmpegDir = $env:FFMPEG_DIR
+if (-not $FfmpegDir) {
+    Write-Error "FFMPEG_DIR environment variable not set"
+    exit 1
+}
+
+Write-Host "Bundling FFmpeg from: $FfmpegDir"
+
+# Copy ffmpeg.exe
+$FfmpegBin = Join-Path $FfmpegDir "bin\ffmpeg.exe"
+if (Test-Path $FfmpegBin) {
+    Copy-Item $FfmpegBin -Destination $ExeDir
+    Write-Host "  Copied ffmpeg.exe"
+} else {
+    Write-Warning "ffmpeg.exe not found at $FfmpegBin"
+}
+
+# Copy DLLs
+$Dlls = @(
+    "avcodec-*.dll",
+    "avformat-*.dll",
+    "avutil-*.dll",
+    "swscale-*.dll",
+    "swresample-*.dll",
+    "avfilter-*.dll"
+)
+
+$BinDir = Join-Path $FfmpegDir "bin"
+foreach ($pattern in $Dlls) {
+    $files = Get-ChildItem -Path $BinDir -Filter $pattern -ErrorAction SilentlyContinue
+    foreach ($file in $files) {
+        Copy-Item $file.FullName -Destination $ExeDir
+        Write-Host "  Copied $($file.Name)"
+    }
+}
+
+Write-Host "Done bundling FFmpeg into $ExeDir"
