@@ -96,7 +96,9 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p lw-app
 
       - name: Install cargo-bundle
-        run: cargo install cargo-bundle
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-bundle
 
       - name: Bundle application
         working-directory: crates/lw-app
