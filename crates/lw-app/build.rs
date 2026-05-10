@@ -4,7 +4,16 @@ fn main() {
     println!("cargo:rerun-if-changed=input.css");
     println!("cargo:rerun-if-changed=src/");
 
-    let status = Command::new("npx")
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "npx"]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = Command::new("npx");
+
+    let status = cmd
         .args([
             "@tailwindcss/cli",
             "-i",
@@ -15,14 +24,14 @@ fn main() {
         ])
         .status();
 
+    let tailwind_out = std::path::Path::new("tailwind.generated.css");
     match status {
         Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("cargo:warning=tailwindcss exited with {s}, using stale CSS if available");
+        Ok(s) => panic!("tailwindcss exited with {s}"),
+        Err(e) if tailwind_out.exists() => {
+            eprintln!("cargo:warning=tailwindcss not found ({e}), using stale CSS");
         }
-        Err(e) => {
-            eprintln!("cargo:warning=tailwindcss not found ({e}), using stale CSS if available");
-        }
+        Err(e) => panic!("tailwindcss not found ({e}) and no cached tailwind.generated.css"),
     }
 
     #[cfg(target_os = "linux")]
