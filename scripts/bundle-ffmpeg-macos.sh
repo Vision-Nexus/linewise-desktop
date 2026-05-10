@@ -82,7 +82,13 @@ echo "Done bundling FFmpeg into $APP_BUNDLE"
 # MACOS_SIGNING_IDENTITY; locally we fall back to ad-hoc ("-").
 SIGN_IDENTITY="${MACOS_SIGNING_IDENTITY:--}"
 echo "Codesigning $APP_BUNDLE as: $SIGN_IDENTITY"
-codesign --force --deep --timestamp=none --options runtime \
+# Do NOT pass --options runtime. The hardened runtime enforces library
+# validation — every loaded dylib must share the main binary's Team ID
+# (or be Apple-signed). Self-signed certs have no Team ID, so the
+# bundled FFmpeg dylibs in Contents/Frameworks/ are rejected and the
+# app aborts on launch. Hardened runtime is only required for Apple
+# notarization, which we're not doing.
+codesign --force --deep --timestamp=none \
     --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 codesign --verify --deep --strict "$APP_BUNDLE"
 
