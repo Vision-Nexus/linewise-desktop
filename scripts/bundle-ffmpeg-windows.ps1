@@ -3,8 +3,10 @@
 
 $ErrorActionPreference = "Stop"
 
-$Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (-not $Root) { $Root = Join-Path $PSScriptRoot ".." }
+# $PSScriptRoot is <repo>/scripts, so one Split-Path -Parent gets us to
+# <repo>. The previous double-parent popped one level too many on GitHub
+# Actions runners, where the repo lives at D:\a\<repo>\<repo>.
+$Root = Split-Path -Parent $PSScriptRoot
 $Root = Resolve-Path $Root
 
 $ReleaseDir = Join-Path $Root "target\x86_64-pc-windows-msvc\release"
