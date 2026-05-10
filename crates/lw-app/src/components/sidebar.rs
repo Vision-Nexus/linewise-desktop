@@ -13,6 +13,27 @@ pub fn Sidebar() -> Element {
         .map(|u| u.email.clone())
         .unwrap_or_default();
 
+    let user_display_name = app_state
+        .user_info
+        .read()
+        .as_ref()
+        .and_then(|u| u.display_name.clone());
+
+    let user_photo_url = app_state
+        .user_info
+        .read()
+        .as_ref()
+        .and_then(|u| u.photo_url.clone());
+
+    let avatar_initial = user_display_name
+        .as_deref()
+        .or(Some(user_email.as_str()))
+        .and_then(|s| s.chars().next())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_default();
+
+    let mut show_user_menu = use_signal(|| false);
+
     let tenants = app_state
         .user_info
         .read()
@@ -71,7 +92,7 @@ pub fn Sidebar() -> Element {
 
             // Left column — Logo + Tenants + User
             aside {
-                class: "w-[160px] h-screen flex flex-col border-r border-border bg-background shrink-0",
+                class: "w-[200px] h-screen flex flex-col border-r border-border bg-background shrink-0",
 
                 // Logo
                 div {
@@ -112,14 +133,58 @@ pub fn Sidebar() -> Element {
                     }
                 }
 
-                // User & sign out
+                // User button & popover
                 div {
-                    class: "px-3 py-3 border-t border-border shrink-0",
-                    div {
-                        class: "text-sm text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap mb-2",
-                        "{user_email}"
+                    class: "border-t border-border shrink-0 relative",
+
+                    button {
+                        class: "w-full flex items-center gap-2 p-1.5 rounded hover:bg-accent transition cursor-pointer text-left appearance-none border-none bg-transparent",
+                        onclick: move |_| {
+                            let current = *show_user_menu.read();
+                            show_user_menu.set(!current);
+                        },
+
+                        if let Some(url) = &user_photo_url {
+                            img {
+                                src: "{url}",
+                                alt: "User avatar",
+                                class: "w-10 h-10 min-w-10 shrink-0 rounded-full object-cover",
+                                referrerpolicy: "no-referrer",
+                            }
+                        } else {
+                            div {
+                                class: "w-10 h-10 min-w-10 shrink-0 rounded-full flex items-center justify-center bg-primary/10 text-primary text-base font-semibold",
+                                "{avatar_initial}"
+                            }
+                        }
+
+                        div {
+                            class: "flex flex-col items-start min-w-0 overflow-hidden",
+                            if let Some(name) = &user_display_name {
+                                div {
+                                    class: "text-[12px] text-foreground font-medium truncate",
+                                    "{name}"
+                                }
+                            }
+                            div {
+                                class: "text-[11px] text-muted-foreground truncate",
+                                "{user_email}"
+                            }
+                        }
                     }
-                    SignOutButton {}
+
+                    if *show_user_menu.read() {
+                        div {
+                            class: "fixed inset-0 z-40",
+                            onclick: move |_| show_user_menu.set(false),
+                        }
+                        div {
+                            class: "absolute bottom-full left-0 right-0 mb-1 z-50 p-1 bg-background border border-border rounded-lg shadow-md",
+                            onclick: move |e| e.stop_propagation(),
+
+                            SignOutButton {}
+                        }
+                    }
                 }
             }
 
@@ -204,13 +269,15 @@ fn SignOutButton() -> Element {
 
     rsx! {
         button {
-            class: "w-full h-9 px-3 text-sm border border-border rounded bg-background text-foreground transition ease-out hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed",
+            class: "w-full h-9 px-3 text-sm rounded text-destructive bg-transparent transition ease-out hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed flex items-center",
+            style: "gap: 8px;",
             onclick: on_sign_out,
             disabled: is_busy,
             if is_busy {
                 span { class: "spinner spinner-sm mr-1" }
                 "..."
             } else {
+                crate::icons::LogoutIcon {}
                 "Sign Out"
             }
         }

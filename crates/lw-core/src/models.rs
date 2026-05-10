@@ -116,6 +116,7 @@ pub struct FirebaseUserInfo {
     pub uid: String,
     pub email: Option<String>,
     pub name: Option<String>,
+    pub picture: Option<String>,
     #[serde(default)]
     pub is_email_verified: bool,
 }
@@ -139,6 +140,7 @@ pub struct UserInfo {
     pub uid: String,
     pub email: String,
     pub display_name: Option<String>,
+    pub photo_url: Option<String>,
     pub tenants: Vec<Tenant>,
 }
 
@@ -150,6 +152,7 @@ impl UserInfo {
             uid: resp.firebase.uid,
             email: user.email,
             display_name: resp.firebase.name,
+            photo_url: resp.firebase.picture,
             tenants,
         })
     }

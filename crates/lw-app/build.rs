@@ -2,7 +2,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=input.css");
-    println!("cargo:rerun-if-changed=src/components/login.rs");
+    println!("cargo:rerun-if-changed=src/");
 
     let status = Command::new("npx")
         .args([
