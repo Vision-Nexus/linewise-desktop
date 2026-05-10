@@ -61,7 +61,17 @@ for dylib in "$FRAMEWORKS"/*.dylib; do
     done
 done
 
-# Add rpath to main binary
+# Rewrite the main binary's load commands from absolute Homebrew paths
+# (/opt/homebrew/opt/ffmpeg/lib/...) to @rpath/..., then add the rpath
+# pointing at Contents/Frameworks/. Without this, dyld tries to load
+# dylibs from /opt/homebrew on the end user's machine and aborts.
+for dep in "${DYLIBS[@]}"; do
+    old_path=$(otool -L "$MACOS_BIN" | grep "$dep" | awk '{print $1}' | grep -v "@rpath" || true)
+    if [ -n "$old_path" ]; then
+        dep_basename=$(basename "$old_path")
+        install_name_tool -change "$old_path" "@rpath/$dep_basename" "$MACOS_BIN"
+    fi
+done
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_BIN" 2>/dev/null || true
 
 # Fix ffmpeg binary references too
@@ -69,7 +79,7 @@ for dep in "${DYLIBS[@]}"; do
     old_path=$(otool -L "$RESOURCES/ffmpeg" | grep "$dep" | awk '{print $1}' | grep -v "@rpath" || true)
     if [ -n "$old_path" ]; then
         dep_basename=$(basename "$old_path")
-        install_name_tool -change "$old_path" "@rpath/$dep_basename" "$RESOURCES/ffmpeg" 2>/dev/null || true
+        install_name_tool -change "$old_path" "@rpath/$dep_basename" "$RESOURCES/ffmpeg"
     fi
 done
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$RESOURCES/ffmpeg" 2>/dev/null || true
