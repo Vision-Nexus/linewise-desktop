@@ -130,10 +130,14 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
           rm -f "$CERT_PATH"
 
-          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '"' '/Linewise Desktop/ {print $2; exit}')
+          # `-v` filters on trust chain validity, which a self-signed cert
+          # never satisfies. codesign itself only needs the codeSigning EKU
+          # plus an accessible private key, so we list all identities and
+          # match by CN substring.
+          IDENTITY=$(security find-identity "$KEYCHAIN_PATH" | awk -F '"' '/Linewise Desktop/ {print $2; exit}')
           if [ -z "$IDENTITY" ]; then
             echo "::error::No code-signing identity imported"
-            security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+            security find-identity "$KEYCHAIN_PATH" || true
             exit 1
           fi
           echo "MACOS_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
