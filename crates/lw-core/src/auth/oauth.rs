@@ -21,6 +21,7 @@ use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope, TokenUrl};
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::process::Command;
 use std::time::Duration;
 use url::Url;
 
@@ -138,9 +139,9 @@ pub(super) async fn run_pkce_flow(
     }
     let (authorize_url, csrf_state) = authorize_req.url();
 
-    webbrowser::open(authorize_url.as_str()).map_err(|e| AuthError::OAuth {
+    open_url_in_browser(authorize_url.as_str()).map_err(|message| AuthError::OAuth {
         provider: provider.display().to_string(),
-        message: format!("Failed to open browser: {e}"),
+        message,
     })?;
 
     // Block the async task on the synchronous loopback listener. Doing this
@@ -303,6 +304,43 @@ fn wait_for_code(
         respond_html(request, &html);
         return Ok(LoopbackCode { code });
     }
+}
+
+fn is_wsl2() -> bool {
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/version")
+            .map(|v| v.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+    }
+}
+
+fn open_url_in_browser(url: &str) -> Result<(), String> {
+    let browser_result = webbrowser::open(url);
+    if browser_result.is_ok() {
+        return Ok(());
+    }
+    let browser_err = browser_result.expect_err("checked is_ok above");
+
+    if !is_wsl2() {
+        return Err(format!("Failed to open browser: {browser_err}"));
+    }
+
+    tracing::debug!("webbrowser crate failed on WSL2, trying cmd.exe fallback");
+
+    let escaped = url.replace('^', "^^").replace('&', "^&");
+    Command::new("cmd.exe")
+        .args(["/C", "start", "", &escaped])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("WSL2 cmd.exe fallback failed: {e}"))?;
+
+    Ok(())
 }
 
 fn respond_html(request: tiny_http::Request, html: &str) {
