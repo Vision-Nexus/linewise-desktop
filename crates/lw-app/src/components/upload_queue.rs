@@ -14,18 +14,27 @@ pub fn UploadQueue() -> Element {
     let app_state = use_context::<AppState>();
     let services = use_context::<CoreServices>();
 
-    // Load history from SQLite on mount
+    // Load history from SQLite on mount, then resume in-flight work.
     let app_state_load = app_state.clone();
     let db_for_load = services.db.clone();
+    let engine_for_load = services.upload_engine.clone();
     use_future(move || {
         let db = db_for_load.clone();
+        let engine = engine_for_load.clone();
         let mut app_state = app_state_load.clone();
         async move {
-            // Reset stale in-progress uploads to FAILED
+            // Reset stale in-progress uploads to FAILED. Does NOT touch
+            // TRANSCODING — that state is resumable via the scratch dir.
             match db.reset_stale_uploads().await {
                 Ok(n) if n > 0 => tracing::info!("Reset {n} stale uploads to FAILED"),
                 Err(e) => tracing::warn!("Failed to reset stale uploads: {e}"),
                 _ => {}
+            }
+            // Resume any task left in a resumable state (PENDING, TRANSCODING,
+            // UPLOADING, etc). Without this, killed-mid-transcode tasks sit
+            // in the queue at 0% forever because nothing drives them forward.
+            if let Err(e) = engine.resume_pending().await {
+                tracing::warn!("Failed to resume pending uploads: {e}");
             }
             // Load history
             match db.get_all_uploads().await {
