@@ -1,6 +1,7 @@
 mod app;
 mod components;
 mod hooks;
+pub mod icons;
 mod state;
 pub mod styles;
 
@@ -52,6 +53,7 @@ fn main() {
 
     let cfg = Config::new()
         .with_close_behaviour(WindowCloseBehaviour::WindowHides)
+        .with_menu(None)
         .with_custom_protocol("localasset", |_webview_id, request| {
             let uri = request.uri().to_string();
             let path = request.uri().path();

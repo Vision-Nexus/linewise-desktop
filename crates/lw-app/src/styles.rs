@@ -5,7 +5,7 @@
 // ── Layout constants ───────────────────────────────────────────────────
 
 pub const TOPBAR_HEIGHT: u32 = 52;
-pub const SIDEBAR_WIDTH: u32 = 220;
+pub const SIDEBAR_WIDTH: u32 = 240;
 
 // ── Button styles (using CSS vars for theme) ───────────────────────────
 

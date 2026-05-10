@@ -101,8 +101,10 @@ const GLOBAL_CSS: &str = r#"
 }
 
 /* ── Base ─────────────────────────────────────────────────────────── */
-* { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; overflow: hidden; }
+@layer base {
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+}
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
@@ -238,8 +240,8 @@ pub fn App() -> Element {
     let is_restoring = *restoring.read();
 
     rsx! {
-        style { "{TAILWIND_CSS}" }
         style { "{GLOBAL_CSS}" }
+        style { "{TAILWIND_CSS}" }
         style { "{lw_chat::styles::CHAT_CSS}" }
         if is_restoring {
             div { class: "loading-screen",
