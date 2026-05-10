@@ -76,13 +76,14 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$RESOURCES/ffmpeg
 
 echo "Done bundling FFmpeg into $APP_BUNDLE"
 
-# Ad-hoc codesign the whole bundle. Must happen AFTER install_name_tool
-# rewrites — any change to a Mach-O invalidates its signature.
-# Ad-hoc ("-") does not satisfy Gatekeeper for downloaded copies, but it
-# produces a well-formed signature so the app launches on dev machines
-# (and once quarantine is stripped on end-user machines).
-echo "Ad-hoc codesigning $APP_BUNDLE"
-codesign --force --deep --sign - "$APP_BUNDLE"
+# Codesign the whole bundle. Must happen AFTER install_name_tool rewrites —
+# any change to a Mach-O invalidates its signature.
+# In CI the workflow imports a self-signed identity and exports
+# MACOS_SIGNING_IDENTITY; locally we fall back to ad-hoc ("-").
+SIGN_IDENTITY="${MACOS_SIGNING_IDENTITY:--}"
+echo "Codesigning $APP_BUNDLE as: $SIGN_IDENTITY"
+codesign --force --deep --timestamp=none --options runtime \
+    --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 codesign --verify --deep --strict "$APP_BUNDLE"
 
 # Optionally create DMG
