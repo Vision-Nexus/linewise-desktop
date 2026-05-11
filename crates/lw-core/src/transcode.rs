@@ -785,20 +785,40 @@ enum EncoderKind {
 }
 
 impl EncoderKind {
+    // The BtbN FFmpeg Windows build registers every encoder regardless of
+    // platform, so `find_by_name("h264_videotoolbox")` returns Some(_) on
+    // Windows — but opening it fails with EPERM at avcodec_open2 time
+    // because the kernel extension isn't there. Filter by target_os first
+    // so we don't even try impossible families.
+    #[cfg(target_os = "macos")]
+    const HW_FAMILIES_HEVC: &'static [(&'static str, EncoderKind)] =
+        &[("hevc_videotoolbox", EncoderKind::VideoToolbox)];
+    #[cfg(target_os = "macos")]
+    const HW_FAMILIES_H264: &'static [(&'static str, EncoderKind)] =
+        &[("h264_videotoolbox", EncoderKind::VideoToolbox)];
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    const HW_FAMILIES_HEVC: &'static [(&'static str, EncoderKind)] = &[
+        ("hevc_nvenc", EncoderKind::Nvenc),
+        ("hevc_qsv", EncoderKind::Qsv),
+        ("hevc_amf", EncoderKind::Amf),
+    ];
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    const HW_FAMILIES_H264: &'static [(&'static str, EncoderKind)] = &[
+        ("h264_nvenc", EncoderKind::Nvenc),
+        ("h264_qsv", EncoderKind::Qsv),
+        ("h264_amf", EncoderKind::Amf),
+    ];
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    const HW_FAMILIES_HEVC: &'static [(&'static str, EncoderKind)] = &[];
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    const HW_FAMILIES_H264: &'static [(&'static str, EncoderKind)] = &[];
+
     fn hw_candidates(codec: &str) -> &'static [(&'static str, EncoderKind)] {
         match codec {
-            "hevc" | "h265" => &[
-                ("hevc_videotoolbox", EncoderKind::VideoToolbox),
-                ("hevc_nvenc", EncoderKind::Nvenc),
-                ("hevc_qsv", EncoderKind::Qsv),
-                ("hevc_amf", EncoderKind::Amf),
-            ],
-            "h264" => &[
-                ("h264_videotoolbox", EncoderKind::VideoToolbox),
-                ("h264_nvenc", EncoderKind::Nvenc),
-                ("h264_qsv", EncoderKind::Qsv),
-                ("h264_amf", EncoderKind::Amf),
-            ],
+            "hevc" | "h265" => Self::HW_FAMILIES_HEVC,
+            "h264" => Self::HW_FAMILIES_H264,
             _ => &[],
         }
     }
@@ -833,12 +853,51 @@ fn software_name(codec: &str) -> Result<&'static str, TranscodeError> {
     }
 }
 
+/// Returns `true` if the FFmpeg build registers an encoder under `name`.
+/// Registration is not the same as usability — `h264_nvenc` is registered
+/// on a BtbN Windows build even on a machine without an NVIDIA card.
+fn encoder_registered(name: &str) -> bool {
+    codec::encoder::find_by_name(name).is_some()
+}
+
+/// Try to actually open the encoder so we know the driver is present.
+/// On mismatch (e.g. nvenc on a non-NVIDIA Windows box), avcodec_open2
+/// fails with EPERM / ENOENT / ENODEV and we fall through. Probe
+/// parameters are arbitrary minimal values; we only care whether the
+/// open succeeds, then we immediately drop the context.
+fn encoder_opens(name: &str) -> bool {
+    let Some(codec) = codec::encoder::find_by_name(name) else {
+        return false;
+    };
+    let Ok(ctx) = codec::context::Context::new_with_codec(codec).encoder().video() else {
+        return false;
+    };
+    let mut ctx = ctx;
+    ctx.set_width(16);
+    ctx.set_height(16);
+    ctx.set_format(format::Pixel::NV12);
+    ctx.set_time_base(Rational::new(1, 30));
+    ctx.set_bit_rate(100_000);
+    ctx.open_as(codec).is_ok()
+}
+
 fn find_first_available(
     candidates: &'static [(&'static str, EncoderKind)],
 ) -> Option<(&'static str, EncoderKind)> {
+    // First pass: drop candidates the build doesn't even know about.
+    // Second pass: actually probe-open the survivor to prove the driver
+    // is there. We only probe up to two entries in practice, so the cost
+    // is a few milliseconds on the first transcode.
     candidates
         .iter()
-        .find(|(name, _)| codec::encoder::find_by_name(name).is_some())
+        .filter(|(name, _)| encoder_registered(name))
+        .find(|(name, _)| {
+            let ok = encoder_opens(name);
+            if !ok {
+                tracing::debug!("hw encoder {name} registered but open failed; skipping");
+            }
+            ok
+        })
         .copied()
 }
 
