@@ -1,5 +1,5 @@
-#![allow(dead_code)]
-
+use crate::components::select::{Select, SelectList, SelectOption, SelectTrigger, SelectValue};
+use crate::components::switch::{Switch, SwitchThumb};
 use dioxus::prelude::*;
 use lw_core::config::{AppConfig, TranscodeConfig};
 use lw_core::transcode::probe_availability;
@@ -9,7 +9,7 @@ const RESOLUTIONS: &[(u32, &str)] = &[(720, "720p"), (1080, "1080p")];
 const AUDIO_BITRATES: &[u32] = &[128, 192];
 
 #[component]
-pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
+pub fn TranscodeSettingsPane() -> Element {
     let mut config = use_signal(|| AppConfig::load().map(|c| c.transcode).unwrap_or_default());
     let mut saved = use_signal(|| false);
     // Probe ffmpeg + HW encoders once on mount. Safe to re-probe since
@@ -44,39 +44,22 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
         saved.set(false);
     };
 
-    let close = on_close;
-
     rsx! {
         div {
-            style: "padding: 16px; background: var(--bg); color: var(--text); max-width: 400px;",
-
-            // Header
-            div {
-                style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;",
-                h3 { style: "margin: 0; font-size: 16px; font-weight: 600;", "Transcode Settings" }
-                button {
-                    style: "background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 18px; padding: 4px;",
-                    onclick: move |_| close.call(()),
-                    "×"
-                }
-            }
+            style: "background: var(--bg); color: var(--text);",
 
             // Enable toggle — disabled when ffmpeg is absent from the system.
             SettingRow {
                 label: "Enable Transcoding",
-                div {
-                    style: "display: flex; align-items: center;",
-                    input {
-                        r#type: "checkbox",
-                        checked: config.read().enabled,
-                        disabled: !ffmpeg_ok,
-                        onchange: move |_| {
-                            if !ffmpeg_ok { return; }
-                            let current = config.read().enabled;
-                            config.write().enabled = !current;
-                        },
-                        style: "cursor: pointer; accent-color: var(--btn-primary); width: 16px; height: 16px;",
-                    }
+                Switch {
+                    checked: config.read().enabled,
+                    disabled: !ffmpeg_ok,
+                    aria_label: "Enable transcoding",
+                    on_checked_change: move |v: bool| {
+                        if !ffmpeg_ok { return; }
+                        config.write().enabled = v;
+                    },
+                    SwitchThumb {}
                 }
             }
 
@@ -91,18 +74,38 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
             // to Auto + None + whatever HW encoders the current ffmpeg build has.
             SettingRow {
                 label: "Hardware Acceleration",
-                select {
-                    style: select_style(),
-                    value: "{config.read().hw_accel}",
-                    disabled: !master_enabled,
-                    onchange: move |evt: Event<FormData>| config.write().hw_accel = evt.value(),
-                    option { value: "auto", selected: config.read().hw_accel == "auto", "Auto (prefer HW if available)" }
-                    option { value: "none", selected: config.read().hw_accel == "none", "None (software)" }
-                    for hw in availability.read().available_hw.iter() {
-                        option {
-                            value: "{hw.as_config_str()}",
-                            selected: config.read().hw_accel == hw.as_config_str(),
-                            "{hw.display_label()}"
+                {
+                    let hw_options: Vec<(String, String)> = {
+                        let avail = availability.read();
+                        std::iter::once(("auto".to_string(), "Auto (prefer HW if available)".to_string()))
+                            .chain(std::iter::once(("none".to_string(), "None (software)".to_string())))
+                            .chain(avail.available_hw.iter().map(|hw| (hw.as_config_str().to_string(), hw.display_label().to_string())))
+                            .collect()
+                    };
+                    let current = config.read().hw_accel.clone();
+                    rsx! {
+                        Select::<String> {
+                            key: "{current}",
+                            default_value: current.clone(),
+                            disabled: !master_enabled,
+                            on_value_change: move |v: Option<String>| {
+                                if let Some(v) = v {
+                                    config.write().hw_accel = v;
+                                }
+                            },
+                            SelectTrigger { aria_label: "Hardware acceleration",
+                                SelectValue { placeholder: "Select..." }
+                            }
+                            SelectList { aria_label: "Hardware acceleration options",
+                                for (i, (value, label)) in hw_options.iter().enumerate() {
+                                    SelectOption::<String> {
+                                        index: i,
+                                        value: value.clone(),
+                                        text_value: label.clone(),
+                                        "{label}"
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -111,13 +114,27 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
             // Preset
             SettingRow {
                 label: "Encoding Preset",
-                select {
-                    style: select_style(),
-                    value: "{config.read().preset}",
+                Select::<String> {
+                    key: "{config.read().preset}",
+                    default_value: config.read().preset.clone(),
                     disabled: !master_enabled,
-                    onchange: move |evt: Event<FormData>| config.write().preset = evt.value(),
-                    for preset in PRESETS {
-                        option { value: *preset, selected: config.read().preset == *preset, "{preset}" }
+                    on_value_change: move |v: Option<String>| {
+                        if let Some(v) = v {
+                            config.write().preset = v;
+                        }
+                    },
+                    SelectTrigger { aria_label: "Encoding preset",
+                        SelectValue { placeholder: "Select..." }
+                    }
+                    SelectList { aria_label: "Encoding preset options",
+                        for (i, preset) in PRESETS.iter().enumerate() {
+                            SelectOption::<String> {
+                                index: i,
+                                value: preset.to_string(),
+                                text_value: preset.to_string(),
+                                "{preset}"
+                            }
+                        }
                     }
                 }
             }
@@ -162,17 +179,27 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
             // Max resolution
             SettingRow {
                 label: "Max Resolution",
-                select {
-                    style: select_style(),
-                    value: "{config.read().max_height}",
+                Select::<u32> {
+                    key: "{config.read().max_height}",
+                    default_value: config.read().max_height,
                     disabled: !master_enabled,
-                    onchange: move |evt: Event<FormData>| {
-                        if let Ok(v) = evt.value().parse::<u32>() {
+                    on_value_change: move |v: Option<u32>| {
+                        if let Some(v) = v {
                             config.write().max_height = v;
                         }
                     },
-                    for (height, label) in RESOLUTIONS {
-                        option { value: "{height}", selected: config.read().max_height == *height, "{label}" }
+                    SelectTrigger { aria_label: "Max resolution",
+                        SelectValue { placeholder: "Select..." }
+                    }
+                    SelectList { aria_label: "Max resolution options",
+                        for (i, (height, label)) in RESOLUTIONS.iter().enumerate() {
+                            SelectOption::<u32> {
+                                index: i,
+                                value: *height,
+                                text_value: label.to_string(),
+                                "{label}"
+                            }
+                        }
                     }
                 }
             }
@@ -180,17 +207,27 @@ pub fn TranscodeSettings(on_close: EventHandler<()>) -> Element {
             // Audio bitrate
             SettingRow {
                 label: "Audio Bitrate",
-                select {
-                    style: select_style(),
-                    value: "{config.read().audio_bitrate_kbps}",
+                Select::<u32> {
+                    key: "{config.read().audio_bitrate_kbps}",
+                    default_value: config.read().audio_bitrate_kbps,
                     disabled: !master_enabled,
-                    onchange: move |evt: Event<FormData>| {
-                        if let Ok(v) = evt.value().parse::<u32>() {
+                    on_value_change: move |v: Option<u32>| {
+                        if let Some(v) = v {
                             config.write().audio_bitrate_kbps = v;
                         }
                     },
-                    for rate in AUDIO_BITRATES {
-                        option { value: "{rate}", selected: config.read().audio_bitrate_kbps == *rate, "{rate}k" }
+                    SelectTrigger { aria_label: "Audio bitrate",
+                        SelectValue { placeholder: "Select..." }
+                    }
+                    SelectList { aria_label: "Audio bitrate options",
+                        for (i, rate) in AUDIO_BITRATES.iter().enumerate() {
+                            SelectOption::<u32> {
+                                index: i,
+                                value: *rate,
+                                text_value: format!("{rate}k"),
+                                "{rate}k"
+                            }
+                        }
                     }
                 }
             }
@@ -232,10 +269,6 @@ fn SettingRow(label: &'static str, children: Element) -> Element {
             {children}
         }
     }
-}
-
-fn select_style() -> &'static str {
-    "padding: 6px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text); font-size: 13px; width: 100%;"
 }
 
 fn input_style() -> &'static str {

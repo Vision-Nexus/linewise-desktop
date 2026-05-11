@@ -97,6 +97,7 @@ pub struct AppState {
     pub is_loading: Signal<bool>,
     pub error_message: Signal<Option<String>>,
     pub auth_token: Signal<String>,
+    pub show_settings: Signal<bool>,
 }
 
 impl AppState {
@@ -112,6 +113,7 @@ impl AppState {
             is_loading: Signal::new(false),
             error_message: Signal::new(None),
             auth_token: Signal::new(String::new()),
+            show_settings: Signal::new(false),
         }
     }
 }

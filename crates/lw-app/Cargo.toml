@@ -20,6 +20,8 @@ sentry = { workspace = true }
 sentry-tracing = { workspace = true }
 uuid = { workspace = true }
 rfd = { workspace = true }
+dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
+dioxus-icons = { version = "0.1.0", default-features = false }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 use lw_chat::{ChatConfig, ChatPanel};
 
 const TAILWIND_CSS: &str = include_str!("../tailwind.generated.css");
+const DX_COMPONENTS_THEME_CSS: &str = include_str!("../assets/dx-components-theme.css");
 
 /// Global CSS for hover/active states (can't do :hover in inline styles)
 const GLOBAL_CSS: &str = r#"
@@ -242,6 +243,7 @@ pub fn App() -> Element {
     rsx! {
         style { "{GLOBAL_CSS}" }
         style { "{TAILWIND_CSS}" }
+        style { "{DX_COMPONENTS_THEME_CSS}" }
         style { "{lw_chat::styles::CHAT_CSS}" }
         if is_restoring {
             div { class: "loading-screen",
@@ -284,7 +286,7 @@ async fn fetch_user_info(api: &lw_core::api_client::ApiClient, app_state: &mut A
 #[component]
 fn MainView() -> Element {
     let mut chat_open = use_signal(|| false);
-    let app_state = use_context::<AppState>();
+    let mut app_state = use_context::<AppState>();
     let services = use_context::<CoreServices>();
 
     let mut tenant_id = use_signal(String::new);
@@ -396,6 +398,13 @@ fn MainView() -> Element {
                     style: "width: 380px; flex-shrink: 0; border-left: 1px solid var(--border); \
                             display: flex; flex-direction: column; overflow: hidden;",
                     ChatPanel { config: chat_config }
+                }
+            }
+
+            // Global settings modal
+            if *app_state.show_settings.read() {
+                crate::components::settings_modal::SettingsModal {
+                    on_close: move |_| app_state.show_settings.set(false),
                 }
             }
         }

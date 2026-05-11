@@ -133,43 +133,55 @@ pub fn Sidebar() -> Element {
                     }
                 }
 
-                // User button & popover
+                // User row: avatar-button + gear-button, with Sign Out popover
                 div {
                     class: "border-t border-border shrink-0 relative",
 
-                    button {
-                        class: "w-full flex items-center gap-2 p-1.5 rounded hover:bg-accent transition cursor-pointer text-left appearance-none border-none bg-transparent",
-                        onclick: move |_| {
-                            let current = *show_user_menu.read();
-                            show_user_menu.set(!current);
-                        },
+                    div {
+                        class: "flex items-center gap-1 p-1.5",
 
-                        if let Some(url) = &user_photo_url {
-                            img {
-                                src: "{url}",
-                                alt: "User avatar",
-                                class: "w-10 h-10 min-w-10 shrink-0 rounded-full object-cover",
-                                referrerpolicy: "no-referrer",
+                        button {
+                            class: "flex-1 min-w-0 flex items-center gap-2 rounded hover:bg-accent transition cursor-pointer text-left appearance-none border-none bg-transparent p-0",
+                            onclick: move |_| {
+                                let current = *show_user_menu.read();
+                                show_user_menu.set(!current);
+                            },
+
+                            if let Some(url) = &user_photo_url {
+                                img {
+                                    src: "{url}",
+                                    alt: "User avatar",
+                                    class: "w-10 h-10 min-w-10 shrink-0 rounded-full object-cover",
+                                    referrerpolicy: "no-referrer",
+                                }
+                            } else {
+                                div {
+                                    class: "w-10 h-10 min-w-10 shrink-0 rounded-full flex items-center justify-center bg-primary/10 text-primary text-base font-semibold",
+                                    "{avatar_initial}"
+                                }
                             }
-                        } else {
+
                             div {
-                                class: "w-10 h-10 min-w-10 shrink-0 rounded-full flex items-center justify-center bg-primary/10 text-primary text-base font-semibold",
-                                "{avatar_initial}"
+                                class: "flex flex-col items-start min-w-0 overflow-hidden",
+                                if let Some(name) = &user_display_name {
+                                    div {
+                                        class: "text-[12px] text-foreground font-medium truncate",
+                                        "{name}"
+                                    }
+                                }
+                                div {
+                                    class: "text-[11px] text-muted-foreground truncate",
+                                    "{user_email}"
+                                }
                             }
                         }
 
-                        div {
-                            class: "flex flex-col items-start min-w-0 overflow-hidden",
-                            if let Some(name) = &user_display_name {
-                                div {
-                                    class: "text-[12px] text-foreground font-medium truncate",
-                                    "{name}"
-                                }
-                            }
-                            div {
-                                class: "text-[11px] text-muted-foreground truncate",
-                                "{user_email}"
-                            }
+                        button {
+                            class: "w-8 h-8 shrink-0 rounded hover:bg-accent transition cursor-pointer flex items-center justify-center appearance-none border-none bg-transparent text-muted-foreground",
+                            title: "Settings",
+                            aria_label: "Open settings",
+                            onclick: move |_| app_state.show_settings.set(true),
+                            crate::icons::SettingsIcon {}
                         }
                     }
 

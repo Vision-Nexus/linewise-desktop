@@ -9,6 +9,7 @@ use crate::storage::{self, StorageBackend};
 use crate::{transcode, video};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Semaphore, mpsc};
 use uuid::Uuid;
 
@@ -51,7 +52,11 @@ pub struct UploadEngine {
     api: Arc<ApiClient>,
     storage: Arc<StorageBackend>,
     event_tx: mpsc::UnboundedSender<UploadEvent>,
-    auto_clean: bool,
+    /// Whether to delete the original file on disk after a successful upload.
+    /// Flipped live from the settings UI; reads are `Relaxed` because each
+    /// upload task reads this exactly once, after the upload has already
+    /// completed, so ordering against other work is irrelevant.
+    auto_clean: AtomicBool,
     strip_metadata: bool,
     transcode_config: TranscodeConfig,
     chunk_size: u64,
@@ -76,12 +81,23 @@ impl UploadEngine {
             api,
             storage,
             event_tx,
-            auto_clean,
+            auto_clean: AtomicBool::new(auto_clean),
             strip_metadata,
             transcode_config,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
         }
+    }
+
+    /// Update the auto-clean flag at runtime. Takes effect on the next
+    /// upload that finishes — already-completed tasks have already decided.
+    pub fn set_auto_clean(&self, value: bool) {
+        self.auto_clean.store(value, Ordering::Relaxed);
+    }
+
+    /// Read the current auto-clean flag.
+    pub fn auto_clean(&self) -> bool {
+        self.auto_clean.load(Ordering::Relaxed)
     }
 
     /// Stage a file for review (step 1 of two-step upload).
@@ -455,7 +471,7 @@ impl UploadEngine {
         }
 
         // Auto-clean original file
-        if self.auto_clean
+        if self.auto_clean()
             && let Err(e) = tokio::fs::remove_file(&task.local_path).await
         {
             tracing::warn!("Failed to auto-clean {}: {e}", task.local_path);
