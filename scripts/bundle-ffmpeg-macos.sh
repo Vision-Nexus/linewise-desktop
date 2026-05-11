@@ -29,8 +29,10 @@ chmod +x "$RESOURCES/ffmpeg"
 echo "  Copied ffmpeg binary → Resources/"
 
 # Copy required dylibs. libavdevice is pulled in by ffmpeg-sys-next 8.1+
-# even when we don't use it directly.
-DYLIBS=(
+# even when we don't use it directly. libpostproc is GPL-only and not
+# present in Homebrew's LGPL ffmpeg formula — bundle it only if the
+# ffmpeg install includes it.
+REQUIRED_DYLIBS=(
     libavcodec
     libavformat
     libavutil
@@ -38,24 +40,39 @@ DYLIBS=(
     libswresample
     libavfilter
     libavdevice
+)
+OPTIONAL_DYLIBS=(
     libpostproc
 )
 
-for lib in "${DYLIBS[@]}"; do
+copy_major_versioned () {
+    local lib="$1"
+    local required="$2"
     # Pick the major-versioned file (e.g. libavdevice.62.dylib), not the
     # bare symlink (libavdevice.dylib) or the fully-versioned file
     # (libavdevice.62.0.100.dylib). The linker stamps the major-versioned
     # SONAME into LC_LOAD_DYLIB, so that's the exact filename we must
     # produce in Contents/Frameworks.
+    local dylib
     dylib=$(find "$FFMPEG_PREFIX/lib" -name "${lib}.*.dylib" -not -name "*.*.*.dylib" | head -1)
     if [ -z "$dylib" ]; then
-        echo "Error: could not find major-versioned ${lib}.*.dylib under $FFMPEG_PREFIX/lib"
-        ls "$FFMPEG_PREFIX/lib" | grep "^${lib}" || true
-        exit 1
+        if [ "$required" = "1" ]; then
+            echo "Error: could not find major-versioned ${lib}.*.dylib under $FFMPEG_PREFIX/lib"
+            ls "$FFMPEG_PREFIX/lib" | grep "^${lib}" || true
+            exit 1
+        fi
+        echo "  Skipped $lib (not present in this FFmpeg build)"
+        return
     fi
     cp "$dylib" "$FRAMEWORKS/"
     echo "  Copied $(basename "$dylib") → Frameworks/"
-done
+}
+
+for lib in "${REQUIRED_DYLIBS[@]}"; do copy_major_versioned "$lib" 1; done
+for lib in "${OPTIONAL_DYLIBS[@]}"; do copy_major_versioned "$lib" 0; done
+
+# Combined list used by the rewrite loops below.
+DYLIBS=("${REQUIRED_DYLIBS[@]}" "${OPTIONAL_DYLIBS[@]}")
 
 # Fix dylib references to use @rpath
 for dylib in "$FRAMEWORKS"/*.dylib; do

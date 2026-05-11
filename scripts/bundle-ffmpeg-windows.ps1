@@ -37,29 +37,40 @@ if (Test-Path $FfmpegBin) {
 }
 
 # Copy DLLs
-$Dlls = @(
+$RequiredDlls = @(
     "avcodec-*.dll",
     "avformat-*.dll",
     "avutil-*.dll",
     "swscale-*.dll",
     "swresample-*.dll",
     "avfilter-*.dll",
-    "avdevice-*.dll",
+    "avdevice-*.dll"
+)
+# postproc is GPL-only; not every FFmpeg build ships it.
+$OptionalDlls = @(
     "postproc-*.dll"
 )
 
 $BinDir = Join-Path $FfmpegDir "bin"
-foreach ($pattern in $Dlls) {
-    $files = Get-ChildItem -Path $BinDir -Filter $pattern -ErrorAction SilentlyContinue
-    if (-not $files) {
-        Write-Error "No DLL matched $pattern under $BinDir"
-        Get-ChildItem -Path $BinDir -Filter "*.dll" | ForEach-Object { Write-Host "  present: $($_.Name)" }
-        exit 1
-    }
-    foreach ($file in $files) {
-        Copy-Item $file.FullName -Destination $ExeDir
-        Write-Host "  Copied $($file.Name)"
+function Copy-Dlls ($patterns, $required) {
+    foreach ($pattern in $patterns) {
+        $files = Get-ChildItem -Path $BinDir -Filter $pattern -ErrorAction SilentlyContinue
+        if (-not $files) {
+            if ($required) {
+                Write-Error "No DLL matched $pattern under $BinDir"
+                Get-ChildItem -Path $BinDir -Filter "*.dll" | ForEach-Object { Write-Host "  present: $($_.Name)" }
+                exit 1
+            }
+            Write-Host "  Skipped $pattern (not present in this FFmpeg build)"
+            continue
+        }
+        foreach ($file in $files) {
+            Copy-Item $file.FullName -Destination $ExeDir
+            Write-Host "  Copied $($file.Name)"
+        }
     }
 }
+Copy-Dlls $RequiredDlls $true
+Copy-Dlls $OptionalDlls $false
 
 Write-Host "Done bundling FFmpeg into $ExeDir"
