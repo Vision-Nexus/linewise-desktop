@@ -43,12 +43,18 @@ $Dlls = @(
     "avutil-*.dll",
     "swscale-*.dll",
     "swresample-*.dll",
-    "avfilter-*.dll"
+    "avfilter-*.dll",
+    "avdevice-*.dll"
 )
 
 $BinDir = Join-Path $FfmpegDir "bin"
 foreach ($pattern in $Dlls) {
     $files = Get-ChildItem -Path $BinDir -Filter $pattern -ErrorAction SilentlyContinue
+    if (-not $files) {
+        Write-Error "No DLL matched $pattern under $BinDir"
+        Get-ChildItem -Path $BinDir -Filter "*.dll" | ForEach-Object { Write-Host "  present: $($_.Name)" }
+        exit 1
+    }
     foreach ($file in $files) {
         Copy-Item $file.FullName -Destination $ExeDir
         Write-Host "  Copied $($file.Name)"
