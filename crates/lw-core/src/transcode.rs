@@ -28,7 +28,10 @@
 use crate::config::TranscodeConfig;
 use crate::error::TranscodeError;
 use crate::models::VideoInfo;
-use ffmpeg_next::{Dictionary, Packet, Rational, codec, format, media, picture, sys};
+use ffmpeg_next::{
+    ChannelLayout, Dictionary, Error as FfError, Packet, Rational, codec, filter, format, media,
+    picture, sys,
+};
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -344,21 +347,24 @@ fn encode_to_hls(
     }
     let v_out_idx = vst.index();
 
-    // Audio: stream-copy if present.
-    let a_out_idx = if let Some(ai) = a_idx {
-        let a_stream = ictx.stream(ai).expect("audio stream");
-        let mut ost = octx
-            .add_stream(codec::encoder::find(codec::Id::None))
-            .map_err(|e| enc_err(format!("Add audio stream: {e}")))?;
-        ost.set_parameters(a_stream.parameters());
-        // SAFETY: codec_tag=0 asks the MP4/HLS muxer to derive the tag from codec_id.
-        unsafe {
-            (*ost.parameters().as_mut_ptr()).codec_tag = 0;
-        }
-        Some(ost.index())
+    // Audio: decode the source track and re-encode to AAC-LC. Stream-copy
+    // worked for AAC-in-MP4 sources but fails on MKV containers that carry
+    // TrueHD / DTS-HD / FLAC / Opus — none of those are legal in MPEG-TS,
+    // so `write_interleaved` on their packets returns EINVAL. AAC-LC is
+    // the canonical HLS audio codec and handles every input the desktop
+    // client is likely to see.
+    let mut audio_pipeline = if let Some(ai) = a_idx {
+        Some(build_audio_pipeline(
+            &ictx,
+            &mut octx,
+            ai,
+            config,
+            global_header,
+        )?)
     } else {
         None
     };
+    let a_out_idx = audio_pipeline.as_ref().map(|p| p.out_idx);
 
     // HLS muxer options. CRITICAL: the AVOption name is `start_number`, not
     // `hls_start_number`. A typo is silently ignored — the leftover dictionary
@@ -398,7 +404,11 @@ fn encode_to_hls(
         .stream(v_out_idx)
         .expect("video out stream")
         .time_base();
-    let a_out_tb = a_out_idx.and_then(|i| octx.stream(i).map(|s| s.time_base()));
+    if let Some(p) = audio_pipeline.as_mut()
+        && let Some(idx) = a_out_idx
+    {
+        p.out_tb = octx.stream(idx).expect("audio out stream").time_base();
+    }
     let a_in_tb = a_idx.and_then(|i| ictx.stream(i).map(|s| s.time_base()));
 
     // Build scaler if input pix_fmt / dimensions differ from encoder target.
@@ -428,6 +438,13 @@ fn encode_to_hls(
     // that offset so the UI bar continues where it left off.
     let mut frames_done = (resume.resume_seconds * info.fps).ceil() as u64;
     let mut v_enc = v_enc;
+    // Monotonic DTS guard for the audio remux path. After rescale_ts
+    // rounds the input timebase into the output timebase, two distinct
+    // input packets can land on the same output DTS — which fails the
+    // HLS muxer's strict-monotonic check. Track the last emitted DTS
+    // and bump collisions by +1 tick, same pattern ffmpeg's CLI uses
+    // when it emits "non monotonic DTS ... clipping".
+    let mut last_audio_dts: Option<i64> = None;
 
     for (stream, mut packet) in ictx.packets() {
         let sidx = stream.index();
@@ -447,7 +464,8 @@ fn encode_to_hls(
                 on_progress,
             )?;
         } else if Some(sidx) == a_idx
-            && let (Some(out_idx), Some(tb_out), Some(tb_in)) = (a_out_idx, a_out_tb, a_in_tb)
+            && let Some(pipeline) = audio_pipeline.as_mut()
+            && let Some(tb_in) = a_in_tb
         {
             // Drop audio packets that predate the resume point by more than
             // half a segment — same shape the PoC used. Small intentional
@@ -460,12 +478,10 @@ fn encode_to_hls(
                     continue;
                 }
             }
-            packet.set_stream(out_idx);
-            packet.rescale_ts(tb_in, tb_out);
-            packet.set_position(-1);
-            packet
-                .write_interleaved(&mut octx)
-                .map_err(|e| enc_err(format!("Write audio: {e}")))?;
+            // rescale into the decoder's time base so pts from different
+            // containers land on a consistent scale before filter / encode.
+            packet.rescale_ts(tb_in, pipeline.dec_tb);
+            process_audio_packet(&packet, pipeline, &mut octx, &mut last_audio_dts)?;
         }
     }
 
@@ -489,6 +505,13 @@ fn encode_to_hls(
     }
     v_enc.send_eof().ok();
     drain_video(&mut v_enc, v_in_tb, v_out_tb, v_out_idx, &mut octx)?;
+
+    // Flush the audio pipeline: push EOF through the decoder, pump any
+    // remaining frames through the filter graph, then drain the encoder.
+    if let Some(pipeline) = audio_pipeline.as_mut() {
+        pipeline.dec.send_eof().ok();
+        flush_audio_pipeline(pipeline, &mut octx, &mut last_audio_dts)?;
+    }
 
     on_progress(total_frames, total_frames);
     octx.write_trailer()
@@ -756,6 +779,317 @@ fn open_video_decoder(
         .map_err(|e| enc_err(format!("Video decoder: {e}")))
 }
 
+// ── Audio pipeline (decode → filter → AAC encode → mux) ─────────────────────
+
+/// Holds every piece of mutable state the audio re-encode path needs across
+/// iterations of the main packet loop. Packaging them up keeps the loop body
+/// flat and the per-packet call site readable.
+struct AudioPipeline {
+    dec: ffmpeg_next::decoder::Audio,
+    /// Filter graph: `abuffer` (source) → resample/format-convert/FIFO →
+    /// `abuffersink`. Rebuilding 1024-sample AAC frames is the whole reason
+    /// we use a graph here instead of `swresample` alone.
+    graph: filter::Graph,
+    enc: ffmpeg_next::encoder::audio::Encoder,
+    /// Output stream index in the HLS muxer.
+    out_idx: usize,
+    /// Decoder-side time base. Input packets are rescaled into this space
+    /// before being pushed to the decoder so the filter graph sees a
+    /// consistent scale regardless of the source container.
+    dec_tb: Rational,
+    /// Muxer-side time base after `write_header` has possibly rewritten it.
+    out_tb: Rational,
+}
+
+fn open_audio_decoder(
+    stream: &ffmpeg_next::Stream,
+) -> Result<ffmpeg_next::decoder::Audio, TranscodeError> {
+    let ctx = codec::context::Context::from_parameters(stream.parameters())
+        .map_err(|e| enc_err(format!("Audio decoder ctx: {e}")))?;
+    ctx.decoder()
+        .audio()
+        .map_err(|e| enc_err(format!("Audio decoder: {e}")))
+}
+
+/// AAC-LC accepts any sample rate the encoder reports, but the common MPEG-TS
+/// players and browsers expect 44.1 or 48 kHz. Keep those rates as-is,
+/// otherwise normalize to 48 kHz.
+fn aac_target_rate(src_rate: u32) -> u32 {
+    match src_rate {
+        44_100 | 48_000 => src_rate,
+        _ => 48_000,
+    }
+}
+
+/// AAC-LC encoders in ffmpeg accept mono and stereo. Anything else (5.1,
+/// 7.1, Dolby Atmos beds) gets downmixed to stereo by the filter graph's
+/// automatic channel conversion.
+fn aac_target_layout(src_layout: ChannelLayout) -> ChannelLayout {
+    if src_layout.channels() == 1 {
+        ChannelLayout::MONO
+    } else {
+        ChannelLayout::STEREO
+    }
+}
+
+fn build_audio_pipeline(
+    ictx: &format::context::Input,
+    octx: &mut format::context::Output,
+    a_idx: usize,
+    config: &TranscodeConfig,
+    global_header: bool,
+) -> Result<AudioPipeline, TranscodeError> {
+    let a_stream = ictx.stream(a_idx).expect("audio stream");
+    let mut dec = open_audio_decoder(&a_stream)?;
+    // Normalize the decoder time base to (1, sample_rate). abuffer requires
+    // a valid time_base, and some containers leave it at 0/0.
+    let dec_rate = dec.rate().max(1);
+    let dec_tb = Rational::new(1, dec_rate as i32);
+    dec.set_packet_time_base(dec_tb);
+
+    let aac_codec = codec::encoder::find(codec::Id::AAC).ok_or_else(|| {
+        TranscodeError::CodecNotFound("aac (libavcodec built without AAC encoder)".into())
+    })?;
+
+    let target_rate = aac_target_rate(dec_rate);
+    let target_layout = aac_target_layout(dec.channel_layout());
+    // AAC-LC requires planar float samples.
+    let target_format = format::Sample::F32(format::sample::Type::Planar);
+    let target_tb = Rational::new(1, target_rate as i32);
+
+    let mut enc_ctx = codec::context::Context::new_with_codec(aac_codec)
+        .encoder()
+        .audio()
+        .map_err(|e| enc_err(format!("Audio enc ctx: {e}")))?;
+    enc_ctx.set_bit_rate(config.audio_bitrate_kbps as usize * 1000);
+    enc_ctx.set_rate(target_rate as i32);
+    enc_ctx.set_format(target_format);
+    enc_ctx.set_channel_layout(target_layout);
+    enc_ctx.set_time_base(target_tb);
+    if global_header {
+        enc_ctx.set_flags(codec::Flags::GLOBAL_HEADER);
+    }
+
+    let enc = enc_ctx
+        .open_as(aac_codec)
+        .map_err(|e| enc_err(format!("Open AAC enc: {e}")))?;
+
+    let graph = build_audio_filter_graph(&dec, &enc, dec_tb)?;
+
+    let mut ost = octx
+        .add_stream(aac_codec)
+        .map_err(|e| enc_err(format!("Add audio stream: {e}")))?;
+    ost.set_parameters(&enc);
+    ost.set_time_base(target_tb);
+    // codec_tag=0 lets the muxer pick the canonical tag for AAC.
+    // SAFETY: setting codec_tag on an output stream before write_header.
+    unsafe {
+        (*ost.parameters().as_mut_ptr()).codec_tag = 0;
+    }
+    let out_idx = ost.index();
+
+    Ok(AudioPipeline {
+        dec,
+        graph,
+        enc,
+        out_idx,
+        dec_tb,
+        out_tb: target_tb,
+    })
+}
+
+/// Build an abuffer → (implicit resample/format/channel conversion) → abuffersink
+/// graph that feeds the AAC encoder. The `anull` filter spec leaves the
+/// processing chain empty; libavfilter inserts the necessary `aresample` and
+/// channel-mix filters automatically from the mismatch between the source
+/// definition (the `abuffer` args) and the sink's requested format / rate /
+/// layout. This is the pattern ffmpeg-next's own `transcode-audio` example
+/// uses and is the canonical way to rebuild fixed-size frames for encoders
+/// like AAC-LC that require exactly `frame_size()` samples per call.
+fn build_audio_filter_graph(
+    dec: &ffmpeg_next::decoder::Audio,
+    enc: &ffmpeg_next::encoder::audio::Encoder,
+    dec_tb: Rational,
+) -> Result<filter::Graph, TranscodeError> {
+    let mut graph = filter::Graph::new();
+
+    let args = format!(
+        "time_base={}/{}:sample_rate={}:sample_fmt={}:channel_layout=0x{:x}",
+        dec_tb.numerator(),
+        dec_tb.denominator(),
+        dec.rate(),
+        dec.format().name(),
+        dec.channel_layout().bits(),
+    );
+
+    let abuffer = filter::find("abuffer").ok_or_else(|| enc_err("abuffer filter missing"))?;
+    let abuffersink =
+        filter::find("abuffersink").ok_or_else(|| enc_err("abuffersink filter missing"))?;
+
+    graph
+        .add(&abuffer, "in", &args)
+        .map_err(|e| enc_err(format!("abuffer add: {e}")))?;
+    graph
+        .add(&abuffersink, "out", "")
+        .map_err(|e| enc_err(format!("abuffersink add: {e}")))?;
+
+    // FFmpeg 8 dropped `sample_fmts` / `sample_rates` / `channel_layouts` from
+    // the runtime-settable AVOption set on `abuffersink`, so the pre-8 idiom of
+    // `sink.set_sample_format(...)` now errors with
+    // "Option 'sample_fmts' is not a runtime option". Instead, thread the
+    // format constraints through an `aformat` filter inside the parse spec —
+    // libavfilter inserts `aresample` / channel-mix upstream of `aformat`
+    // automatically when the format differs.
+    let aformat_spec = format!(
+        "aformat=sample_fmts={}:sample_rates={}:channel_layouts=0x{:x}",
+        enc.format().name(),
+        enc.rate(),
+        enc.channel_layout().bits(),
+    );
+
+    graph
+        .output("in", 0)
+        .map_err(|e| enc_err(format!("graph output: {e}")))?
+        .input("out", 0)
+        .map_err(|e| enc_err(format!("graph input: {e}")))?
+        .parse(&aformat_spec)
+        .map_err(|e| enc_err(format!("graph parse: {e}")))?;
+    graph
+        .validate()
+        .map_err(|e| enc_err(format!("graph validate: {e}")))?;
+
+    // Unless the encoder tolerates variable frame sizes (AAC-LC does not),
+    // pin the sink to emit fixed-size frames matching the encoder's
+    // frame_size so `send_frame` never rejects a short frame.
+    let needs_fixed_size = enc.codec().is_some_and(|c| {
+        !c.capabilities()
+            .contains(codec::Capabilities::VARIABLE_FRAME_SIZE)
+    });
+    if needs_fixed_size && enc.frame_size() > 0 {
+        graph
+            .get("out")
+            .expect("out node")
+            .sink()
+            .set_frame_size(enc.frame_size());
+    }
+
+    Ok(graph)
+}
+
+/// Push one decoded packet through the audio pipeline: decoder → filter
+/// graph → AAC encoder → muxer.
+fn process_audio_packet(
+    packet: &Packet,
+    pipeline: &mut AudioPipeline,
+    octx: &mut format::context::Output,
+    last_audio_dts: &mut Option<i64>,
+) -> Result<(), TranscodeError> {
+    pipeline
+        .dec
+        .send_packet(packet)
+        .map_err(|e| enc_err(format!("Send audio pkt: {e}")))?;
+    drain_audio_decoder(pipeline, octx, last_audio_dts)
+}
+
+/// Pull every ready frame out of the decoder, feed it into the filter graph,
+/// collect every filtered frame that pops out, push those into the AAC
+/// encoder, and drain its packets into the muxer.
+fn drain_audio_decoder(
+    pipeline: &mut AudioPipeline,
+    octx: &mut format::context::Output,
+    last_audio_dts: &mut Option<i64>,
+) -> Result<(), TranscodeError> {
+    let mut decoded = ffmpeg_next::util::frame::Audio::empty();
+    while pipeline.dec.receive_frame(&mut decoded).is_ok() {
+        // libav's filter graph wants frame pts in the graph's input time
+        // base, which matches the decoder's. `timestamp()` returns the
+        // best-effort pts the decoder assigned.
+        let ts = decoded.timestamp();
+        decoded.set_pts(ts);
+        pipeline
+            .graph
+            .get("in")
+            .expect("in node")
+            .source()
+            .add(&decoded)
+            .map_err(|e| enc_err(format!("Filter add: {e}")))?;
+        pump_audio_filter_to_encoder(pipeline, octx, last_audio_dts)?;
+    }
+    Ok(())
+}
+
+fn pump_audio_filter_to_encoder(
+    pipeline: &mut AudioPipeline,
+    octx: &mut format::context::Output,
+    last_audio_dts: &mut Option<i64>,
+) -> Result<(), TranscodeError> {
+    let mut filtered = ffmpeg_next::util::frame::Audio::empty();
+    loop {
+        match pipeline
+            .graph
+            .get("out")
+            .expect("out node")
+            .sink()
+            .frame(&mut filtered)
+        {
+            Ok(()) => {}
+            // Normal "no frame ready" / "input side closed" conditions —
+            // stop draining, let the caller decide what to do next.
+            Err(FfError::Other { errno }) if errno == ffmpeg_next::error::EAGAIN => {
+                return Ok(());
+            }
+            Err(FfError::Eof) => return Ok(()),
+            // Anything else is a real failure — propagate it instead of
+            // silently eating it.
+            Err(e) => return Err(enc_err(format!("Filter sink: {e}"))),
+        }
+        pipeline
+            .enc
+            .send_frame(&filtered)
+            .map_err(|e| enc_err(format!("Enc audio: {e}")))?;
+        drain_audio_encoder(pipeline, octx, last_audio_dts)?;
+    }
+}
+
+fn drain_audio_encoder(
+    pipeline: &mut AudioPipeline,
+    octx: &mut format::context::Output,
+    last_audio_dts: &mut Option<i64>,
+) -> Result<(), TranscodeError> {
+    let mut pkt = Packet::empty();
+    while pipeline.enc.receive_packet(&mut pkt).is_ok() {
+        pkt.set_stream(pipeline.out_idx);
+        pkt.rescale_ts(pipeline.enc.time_base(), pipeline.out_tb);
+        pkt.set_position(-1);
+        enforce_monotonic_dts(&mut pkt, last_audio_dts);
+        pkt.write_interleaved(octx)
+            .map_err(|e| enc_err(format!("Write audio: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Flush the audio chain at EOF. Caller must have already called
+/// `pipeline.dec.send_eof()` so the decoder is in draining mode.
+fn flush_audio_pipeline(
+    pipeline: &mut AudioPipeline,
+    octx: &mut format::context::Output,
+    last_audio_dts: &mut Option<i64>,
+) -> Result<(), TranscodeError> {
+    drain_audio_decoder(pipeline, octx, last_audio_dts)?;
+    // Close the graph's input side so trailing samples buffered for
+    // frame-size alignment get emitted rather than dropped.
+    pipeline
+        .graph
+        .get("in")
+        .expect("in node")
+        .source()
+        .flush()
+        .map_err(|e| enc_err(format!("Filter flush: {e}")))?;
+    pump_audio_filter_to_encoder(pipeline, octx, last_audio_dts)?;
+    pipeline.enc.send_eof().ok();
+    drain_audio_encoder(pipeline, octx, last_audio_dts)
+}
+
 fn target_resolution(
     info: &VideoInfo,
     config: &TranscodeConfig,
@@ -785,20 +1119,40 @@ enum EncoderKind {
 }
 
 impl EncoderKind {
+    // The BtbN FFmpeg Windows build registers every encoder regardless of
+    // platform, so `find_by_name("h264_videotoolbox")` returns Some(_) on
+    // Windows — but opening it fails with EPERM at avcodec_open2 time
+    // because the kernel extension isn't there. Filter by target_os first
+    // so we don't even try impossible families.
+    #[cfg(target_os = "macos")]
+    const HW_FAMILIES_HEVC: &'static [(&'static str, EncoderKind)] =
+        &[("hevc_videotoolbox", EncoderKind::VideoToolbox)];
+    #[cfg(target_os = "macos")]
+    const HW_FAMILIES_H264: &'static [(&'static str, EncoderKind)] =
+        &[("h264_videotoolbox", EncoderKind::VideoToolbox)];
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    const HW_FAMILIES_HEVC: &'static [(&'static str, EncoderKind)] = &[
+        ("hevc_nvenc", EncoderKind::Nvenc),
+        ("hevc_qsv", EncoderKind::Qsv),
+        ("hevc_amf", EncoderKind::Amf),
+    ];
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    const HW_FAMILIES_H264: &'static [(&'static str, EncoderKind)] = &[
+        ("h264_nvenc", EncoderKind::Nvenc),
+        ("h264_qsv", EncoderKind::Qsv),
+        ("h264_amf", EncoderKind::Amf),
+    ];
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    const HW_FAMILIES_HEVC: &'static [(&'static str, EncoderKind)] = &[];
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    const HW_FAMILIES_H264: &'static [(&'static str, EncoderKind)] = &[];
+
     fn hw_candidates(codec: &str) -> &'static [(&'static str, EncoderKind)] {
         match codec {
-            "hevc" | "h265" => &[
-                ("hevc_videotoolbox", EncoderKind::VideoToolbox),
-                ("hevc_nvenc", EncoderKind::Nvenc),
-                ("hevc_qsv", EncoderKind::Qsv),
-                ("hevc_amf", EncoderKind::Amf),
-            ],
-            "h264" => &[
-                ("h264_videotoolbox", EncoderKind::VideoToolbox),
-                ("h264_nvenc", EncoderKind::Nvenc),
-                ("h264_qsv", EncoderKind::Qsv),
-                ("h264_amf", EncoderKind::Amf),
-            ],
+            "hevc" | "h265" => Self::HW_FAMILIES_HEVC,
+            "h264" => Self::HW_FAMILIES_H264,
             _ => &[],
         }
     }
@@ -833,12 +1187,78 @@ fn software_name(codec: &str) -> Result<&'static str, TranscodeError> {
     }
 }
 
+/// Bump a packet's DTS (and PTS if needed) so it's strictly greater than
+/// the last emitted DTS for the same stream. Two distinct input audio
+/// packets can rescale onto the same output DTS after timebase rounding,
+/// which trips the HLS muxer's monotonicity check. Mirrors the "non
+/// monotonic DTS … clipping" fallback the ffmpeg CLI uses.
+fn enforce_monotonic_dts(packet: &mut ffmpeg_next::Packet, last_dts: &mut Option<i64>) {
+    let Some(dts) = packet.dts() else { return };
+    match *last_dts {
+        Some(prev) if dts <= prev => {
+            let fixed = prev + 1;
+            packet.set_dts(Some(fixed));
+            if packet.pts().is_some_and(|p| p < fixed) {
+                packet.set_pts(Some(fixed));
+            }
+            *last_dts = Some(fixed);
+        }
+        _ => *last_dts = Some(dts),
+    }
+}
+
+/// Returns `true` if the FFmpeg build registers an encoder under `name`.
+/// Registration is not the same as usability — `h264_nvenc` is registered
+/// on a BtbN Windows build even on a machine without an NVIDIA card.
+fn encoder_registered(name: &str) -> bool {
+    codec::encoder::find_by_name(name).is_some()
+}
+
+/// Try to actually open the encoder so we know the driver is present.
+/// On mismatch (e.g. nvenc on a non-NVIDIA Windows box), avcodec_open2
+/// fails with EPERM / ENOENT / ENODEV and we fall through.
+///
+/// Probe dimensions must clear the minimum frame size each hardware
+/// family enforces — AMF refuses below ~130x130, NVENC HEVC refuses
+/// below 64x64, QSV is also picky on undersized inputs. 256x144
+/// (16:9-ish, multiple of 16 on both axes) is accepted by every
+/// family we target.
+fn encoder_opens(name: &str) -> bool {
+    let Some(codec) = codec::encoder::find_by_name(name) else {
+        return false;
+    };
+    let Ok(ctx) = codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .video()
+    else {
+        return false;
+    };
+    let mut ctx = ctx;
+    ctx.set_width(256);
+    ctx.set_height(144);
+    ctx.set_format(format::Pixel::NV12);
+    ctx.set_time_base(Rational::new(1, 30));
+    ctx.set_bit_rate(1_000_000);
+    ctx.open_as(codec).is_ok()
+}
+
 fn find_first_available(
     candidates: &'static [(&'static str, EncoderKind)],
 ) -> Option<(&'static str, EncoderKind)> {
+    // First pass: drop candidates the build doesn't even know about.
+    // Second pass: actually probe-open the survivor to prove the driver
+    // is there. We only probe up to two entries in practice, so the cost
+    // is a few milliseconds on the first transcode.
     candidates
         .iter()
-        .find(|(name, _)| codec::encoder::find_by_name(name).is_some())
+        .filter(|(name, _)| encoder_registered(name))
+        .find(|(name, _)| {
+            let ok = encoder_opens(name);
+            if !ok {
+                tracing::debug!("hw encoder {name} registered but open failed; skipping");
+            }
+            ok
+        })
         .copied()
 }
 

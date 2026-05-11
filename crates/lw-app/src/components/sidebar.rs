@@ -117,7 +117,11 @@ pub fn Sidebar() -> Element {
                                     key: "{tenant.id}",
                                     class: "px-3 py-2.5 mx-2 cursor-pointer text-sm transition-colors truncate {active_class}",
                                     onclick: move |_| {
+                                        let changing = app_state.selected_tenant.read().as_ref().map(|t| t.id.clone()) != Some(tenant_clone.id.clone());
                                         app_state.selected_tenant.set(Some(tenant_clone.clone()));
+                                        if changing {
+                                            app_state.selected_project.set(None);
+                                        }
                                     },
                                     "{tenant.display_name}"
                                 }

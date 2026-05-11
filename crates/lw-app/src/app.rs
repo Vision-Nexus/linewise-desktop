@@ -326,72 +326,40 @@ fn MainView() -> Element {
 
     let is_open = *chat_open.read();
 
-    // Resize window when chat panel opens/closes
-    use_effect(move || {
-        let open = *chat_open.read();
-        let desktop = dioxus::desktop::window();
-        let scale = desktop.scale_factor();
-        let current = desktop.inner_size();
-        let current_w = current.width as f64 / scale;
-        let current_h = current.height as f64 / scale;
-        let chat_w = 380.0;
-
-        let new_w = if open {
-            current_w + chat_w
-        } else {
-            (current_w - chat_w).max(900.0)
-        };
-
-        desktop.set_inner_size(dioxus::desktop::LogicalSize::new(new_w, current_h));
-    });
-
-    let toggle_class = if is_open {
-        "btn-primary"
-    } else {
-        "btn-outline"
-    };
-    let toggle_style = if is_open {
-        "width: 90px; padding: 4px 0; border-radius: 6px; font-size: 13px; \
-         cursor: pointer; border: 1px solid var(--btn-primary); \
-         background: var(--btn-primary); color: white; font-weight: 500; \
-         transition: background 0.15s, color 0.15s, border-color 0.15s; text-align: center;"
-    } else {
-        "width: 90px; padding: 4px 0; border-radius: 6px; font-size: 13px; \
-         cursor: pointer; border: 1px solid var(--border); \
-         background: var(--btn-outline-bg); color: var(--text); font-weight: 500; \
-         transition: background 0.15s, color 0.15s, border-color 0.15s; text-align: center;"
-    };
-    let toggle_label = if is_open { "Close Chat" } else { "Ask Linus" };
-
     rsx! {
         div {
-            style: "display: flex; height: 100vh;",
+            style: "display: flex; height: 100vh; position: relative;",
 
             crate::components::sidebar::Sidebar {}
 
             // Main content — upload queue
             div {
-                style: "flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0;",
-
-                // Top bar with chat toggle
-                div {
-                    style: "display: flex; align-items: center; justify-content: flex-end; \
-                            padding: 6px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0;",
-                    button {
-                        class: "{toggle_class}",
-                        style: "{toggle_style}",
-                        onclick: move |_| chat_open.set(!is_open),
-                        "{toggle_label}"
-                    }
-                }
+                style: "flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; position: relative;",
 
                 main {
                     style: "flex: 1; overflow-y: auto; padding: 16px;",
                     UploadQueue {}
                 }
+
+                button {
+                    style: "position: absolute; bottom: 24px; right: 24px; z-index: 100; \
+                            width: 48px; height: 48px; border-radius: 50%; \
+                            display: flex; align-items: center; justify-content: center; \
+                            background: var(--btn-primary, #5C01DA); color: white; \
+                            border: none; cursor: pointer; \
+                            box-shadow: 0 4px 12px rgba(0,0,0,0.2); \
+                            transition: background 0.15s, transform 0.15s;",
+                    onclick: move |_| chat_open.set(!is_open),
+                    title: if is_open { "Close Chat" } else { "Ask Linus" },
+                    if is_open {
+                        crate::icons::CloseIcon {}
+                    } else {
+                        crate::icons::ChatIcon {}
+                    }
+                }
             }
 
-            // Right panel — chat (window already extended)
+            // Right panel — chat
             if is_open {
                 div {
                     class: "slide-in-right",

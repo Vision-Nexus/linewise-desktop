@@ -3,8 +3,10 @@
 
 $ErrorActionPreference = "Stop"
 
-$Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (-not $Root) { $Root = Join-Path $PSScriptRoot ".." }
+# $PSScriptRoot is <repo>/scripts, so one Split-Path -Parent gets us to
+# <repo>. The previous double-parent popped one level too many on GitHub
+# Actions runners, where the repo lives at D:\a\<repo>\<repo>.
+$Root = Split-Path -Parent $PSScriptRoot
 $Root = Resolve-Path $Root
 
 $ReleaseDir = Join-Path $Root "target\x86_64-pc-windows-msvc\release"
@@ -35,22 +37,40 @@ if (Test-Path $FfmpegBin) {
 }
 
 # Copy DLLs
-$Dlls = @(
+$RequiredDlls = @(
     "avcodec-*.dll",
     "avformat-*.dll",
     "avutil-*.dll",
     "swscale-*.dll",
     "swresample-*.dll",
-    "avfilter-*.dll"
+    "avfilter-*.dll",
+    "avdevice-*.dll"
+)
+# postproc is GPL-only; not every FFmpeg build ships it.
+$OptionalDlls = @(
+    "postproc-*.dll"
 )
 
 $BinDir = Join-Path $FfmpegDir "bin"
-foreach ($pattern in $Dlls) {
-    $files = Get-ChildItem -Path $BinDir -Filter $pattern -ErrorAction SilentlyContinue
-    foreach ($file in $files) {
-        Copy-Item $file.FullName -Destination $ExeDir
-        Write-Host "  Copied $($file.Name)"
+function Copy-Dlls ($patterns, $required) {
+    foreach ($pattern in $patterns) {
+        $files = Get-ChildItem -Path $BinDir -Filter $pattern -ErrorAction SilentlyContinue
+        if (-not $files) {
+            if ($required) {
+                Write-Error "No DLL matched $pattern under $BinDir"
+                Get-ChildItem -Path $BinDir -Filter "*.dll" | ForEach-Object { Write-Host "  present: $($_.Name)" }
+                exit 1
+            }
+            Write-Host "  Skipped $pattern (not present in this FFmpeg build)"
+            continue
+        }
+        foreach ($file in $files) {
+            Copy-Item $file.FullName -Destination $ExeDir
+            Write-Host "  Copied $($file.Name)"
+        }
     }
 }
+Copy-Dlls $RequiredDlls $true
+Copy-Dlls $OptionalDlls $false
 
 Write-Host "Done bundling FFmpeg into $ExeDir"

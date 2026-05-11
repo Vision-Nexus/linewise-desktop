@@ -35,16 +35,24 @@ chmod +x "$LIB_DIR/ffmpeg"
 echo "  Copied ffmpeg binary"
 
 # Copy required shared libraries
-LIBS=(
+REQUIRED_LIBS=(
     libavcodec
     libavformat
     libavutil
     libswscale
     libswresample
     libavfilter
+    libavdevice
+)
+# libpostproc is GPL-only and not shipped by every FFmpeg build.
+OPTIONAL_LIBS=(
+    libpostproc
 )
 
-for lib in "${LIBS[@]}"; do
+copy_so () {
+    local lib="$1"
+    local required="$2"
+    local so_file
     so_file=$(ldconfig -p | grep "$lib" | grep "x86-64" | awk '{print $NF}' | head -1)
     if [ -z "$so_file" ]; then
         so_file=$(find /usr/lib -name "${lib}.so*" | head -1)
@@ -52,10 +60,17 @@ for lib in "${LIBS[@]}"; do
     if [ -n "$so_file" ] && [ -f "$so_file" ]; then
         cp -L "$so_file" "$LIB_DIR/"
         echo "  Copied $(basename "$so_file")"
-    else
-        echo "  Warning: $lib not found"
+        return
     fi
-done
+    if [ "$required" = "1" ]; then
+        echo "Error: required library $lib not found"
+        exit 1
+    fi
+    echo "  Skipped $lib (not present on this system)"
+}
+
+for lib in "${REQUIRED_LIBS[@]}"; do copy_so "$lib" 1; done
+for lib in "${OPTIONAL_LIBS[@]}"; do copy_so "$lib" 0; done
 
 # Patch RPATH on the main binary
 BIN_PATH="$WORK_DIR/pkg/usr/bin/linewise-desktop"
