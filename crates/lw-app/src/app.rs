@@ -324,7 +324,6 @@ fn MainView() -> Element {
 
     let is_open = *chat_open.read();
 
-
     rsx! {
         div {
             style: "display: flex; height: 100vh; position: relative;",
