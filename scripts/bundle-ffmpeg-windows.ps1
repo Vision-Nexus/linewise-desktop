@@ -44,7 +44,8 @@ $Dlls = @(
     "swscale-*.dll",
     "swresample-*.dll",
     "avfilter-*.dll",
-    "avdevice-*.dll"
+    "avdevice-*.dll",
+    "postproc-*.dll"
 )
 
 $BinDir = Join-Path $FfmpegDir "bin"

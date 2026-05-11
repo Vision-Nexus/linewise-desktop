@@ -42,6 +42,8 @@ LIBS=(
     libswscale
     libswresample
     libavfilter
+    libavdevice
+    libpostproc
 )
 
 for lib in "${LIBS[@]}"; do

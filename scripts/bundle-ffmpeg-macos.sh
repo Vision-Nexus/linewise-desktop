@@ -38,6 +38,7 @@ DYLIBS=(
     libswresample
     libavfilter
     libavdevice
+    libpostproc
 )
 
 for lib in "${DYLIBS[@]}"; do
