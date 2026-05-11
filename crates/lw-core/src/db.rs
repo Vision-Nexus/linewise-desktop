@@ -31,6 +31,7 @@ struct UploadRow {
     retry_count: Option<i64>,
     video_info: Option<String>,
     transcode: i64,
+    transcoded_size: Option<i64>,
 }
 
 impl From<UploadRow> for UploadTask {
@@ -55,6 +56,7 @@ impl From<UploadRow> for UploadTask {
             validation_warnings: warnings,
             retry_count: r.retry_count.unwrap_or(0) as u32,
             transcode: r.transcode != 0,
+            transcoded_size: r.transcoded_size.map(|v| v as u64),
             video_info: r
                 .video_info
                 .as_deref()
@@ -202,6 +204,24 @@ impl Database {
         Ok(())
     }
 
+    /// Record the transcoded artifact size. Called once transcoding completes
+    /// so the UI can render "original → transcoded" bytes even across restarts.
+    pub async fn update_upload_transcoded_size(
+        &self,
+        id: &str,
+        transcoded_size: u64,
+    ) -> Result<(), DbError> {
+        let size = transcoded_size as i64;
+        sqlx::query!(
+            "UPDATE upload_queue SET transcoded_size = ?, updated_at = datetime('now') WHERE id = ?",
+            size,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn reset_stale_uploads(&self) -> Result<u64, DbError> {
         let result = sqlx::query!(
             "UPDATE upload_queue SET state = 'FAILED', error_message = 'Interrupted by app restart', updated_at = datetime('now')
@@ -218,7 +238,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info, transcode
+                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size
              FROM upload_queue
              WHERE state = 'FAILED'
                AND retry_count < 10
@@ -240,7 +260,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info, transcode
+                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size
              FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -253,7 +273,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info, transcode
+                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size
              FROM upload_queue
              WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
              ORDER BY created_at ASC",
@@ -268,7 +288,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info, transcode
+                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size
              FROM upload_queue ORDER BY created_at DESC LIMIT 100",
         )
         .fetch_all(&self.pool)

@@ -116,4 +116,37 @@ impl AppState {
             show_settings: Signal::new(false),
         }
     }
+
+    /// Resolve a tenant id to its human-readable display name. Falls back to
+    /// the id itself when the tenant isn't in the user_info cache — graceful
+    /// for cross-tenant queue rows whose tenant isn't the currently selected
+    /// one.
+    pub fn tenant_display_name(&self, tenant_id: &str) -> String {
+        let found = self
+            .user_info
+            .read()
+            .as_ref()
+            .and_then(|u| u.tenants.iter().find(|t| t.id == tenant_id).cloned());
+        match found {
+            Some(t) => t.display_name,
+            None => tenant_id.to_string(),
+        }
+    }
+
+    /// Resolve a (tenant_id, project_id) pair to the project's display name.
+    /// Searches `tenant_projects` first (populated on sidebar mount) and
+    /// `projects` second. Falls back to the raw id when neither has been
+    /// hydrated yet — e.g. a queued task belonging to a tenant the user
+    /// hasn't selected this session.
+    pub fn project_display_name(&self, tenant_id: &str, project_id: &str) -> String {
+        if let Some(projects) = self.tenant_projects.read().get(tenant_id)
+            && let Some(project) = projects.iter().find(|p| p.id == project_id)
+        {
+            return project.name.clone();
+        }
+        if let Some(project) = self.projects.read().iter().find(|p| p.id == project_id) {
+            return project.name.clone();
+        }
+        project_id.to_string()
+    }
 }

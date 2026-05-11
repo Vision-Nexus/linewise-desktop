@@ -1,0 +1,51 @@
+/* Segmented toggle group — single-select (radio) by default.
+ * When `allow_multiple_pressed=true`, each item gets its own border.
+ * The pressed/color rules use !important because tailwind preflight
+ * (`button { color: inherit }`) otherwise wins and renders the selected
+ * label in body color on top of the accent background — unreadable.
+ */
+
+.toggle-group {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.toggle-item {
+  flex: 1;
+  min-width: 35px;
+  padding: 5px 8px;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.toggle-item:last-child {
+  border-right: none;
+}
+
+.toggle-item:hover:not(:disabled):not([data-state="on"]),
+.toggle-item:focus-visible:not(:disabled):not([data-state="on"]) {
+  background: var(--btn-outline-hover);
+  color: var(--text);
+}
+
+.toggle-item[data-state="on"] {
+  background: var(--btn-primary) !important;
+  color: #ffffff !important;
+  font-weight: 500;
+}
+
+.toggle-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  color: var(--text-muted);
+}

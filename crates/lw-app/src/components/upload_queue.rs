@@ -1,3 +1,5 @@
+use crate::components::progress::{Progress, ProgressIndicator};
+use crate::components::transcode_dialog::TranscodeDialog;
 use crate::state::{AppState, CoreServices};
 use crate::styles;
 use dioxus::html::HasFileData;
@@ -48,7 +50,13 @@ pub fn UploadQueue() -> Element {
         }
     });
 
-    // Progress signals — separate from task state to avoid re-render oscillation
+    // Progress signals — separate from task state to avoid re-render oscillation.
+    // `upload_progress` is kept monotonic per task: once we've seen a higher
+    // bytes-uploaded value for a task id, we never regress to a lower one in
+    // the UI. This prevents two legitimate-but-confusing zero-dips: (a) the
+    // GCS resumable-session retry path at upload.rs re-initiates a session
+    // and emits a fresh Progress(0, total), and (b) a render that lands on a
+    // task before the first Progress event arrives.
     let mut transcode_progress: Signal<HashMap<String, f32>> = use_signal(HashMap::new);
     let mut upload_progress: Signal<HashMap<String, (u64, u64)>> = use_signal(HashMap::new);
 
@@ -470,25 +478,26 @@ pub fn UploadQueue() -> Element {
                 }
             }
 
-            // Transcode config dialog overlay
-            if transcode_dialog_task.read().is_some() {
-                {
-                    let mut app_state_dialog = app_state.clone();
-                    rsx! {
-                        TranscodeDialog {
-                            task_id: transcode_dialog_task.read().clone().unwrap_or_default(),
-                            on_close: move |enabled: bool| {
-                                if enabled
-                                    && let Some(tid) = transcode_dialog_task.read().clone()
-                                {
-                                    let mut tasks = app_state_dialog.upload_tasks.write();
-                                    if let Some(task) = tasks.iter_mut().find(|t| t.id == tid) {
-                                        task.transcode = true;
-                                    }
+            // Transcode config sheet. Mounted unconditionally so the slide-out
+            // animation can play on close; visibility is controlled by `open`.
+            {
+                let mut app_state_dialog = app_state.clone();
+                let dialog_task = transcode_dialog_task.read().clone();
+                rsx! {
+                    TranscodeDialog {
+                        task_id: dialog_task.clone().unwrap_or_default(),
+                        open: dialog_task.is_some(),
+                        on_close: move |enabled: bool| {
+                            if enabled
+                                && let Some(tid) = transcode_dialog_task.read().clone()
+                            {
+                                let mut tasks = app_state_dialog.upload_tasks.write();
+                                if let Some(task) = tasks.iter_mut().find(|t| t.id == tid) {
+                                    task.transcode = true;
                                 }
-                                transcode_dialog_task.set(None);
-                            },
-                        }
+                            }
+                            transcode_dialog_task.set(None);
+                        },
                     }
                 }
             }
@@ -629,45 +638,35 @@ fn UploadTaskRow(
     on_pause: EventHandler<String>,
     on_resume: EventHandler<String>,
 ) -> Element {
-    // Read progress from dedicated signals (not task.bytes_uploaded) to avoid render oscillation
-    let (progress, bytes_uploaded) = if task.state == UploadState::Transcoding {
-        let pct = transcode_progress
-            .read()
-            .get(&task.id)
-            .copied()
-            .unwrap_or(0.0) as u32;
-        (pct, 0u64)
-    } else if let Some(&(uploaded, total)) = upload_progress.read().get(&task.id) {
-        let pct = if total > 0 {
-            (uploaded as f64 / total as f64 * 100.0) as u32
-        } else {
-            0
-        };
-        (pct, uploaded)
-    } else if task.size > 0 {
-        let pct = (task.bytes_uploaded as f64 / task.size as f64 * 100.0) as u32;
-        (pct, task.bytes_uploaded)
-    } else {
-        (0, 0)
-    };
+    let app_state = use_context::<AppState>();
 
-    let progress_color = if task.state == UploadState::Paused {
-        "var(--warning)"
-    } else {
-        "var(--info)"
-    };
-    let state_label = match task.state {
-        UploadState::Validating => "Validating...",
-        UploadState::Transcoding => "Transcoding...",
-        UploadState::Desensitizing => "Desensitizing...",
-        UploadState::Creating => "Creating...",
-        UploadState::Uploading => "Uploading",
-        UploadState::Verifying => "Verifying...",
-        UploadState::Paused => "Paused",
-        UploadState::Pending => "Pending...",
-        UploadState::Staged => "",
-        UploadState::Completed => "",
-        UploadState::Failed => "",
+    // The bytes-actually-uploaded denominator: transcoded size when we have
+    // it, otherwise the original. GCS only ever sees one of these on the wire.
+    let upload_total = task.transcoded_size.unwrap_or(task.size);
+
+    // Phase-aware progress reader. Read from the live signals only — never
+    // from the cloned task's `bytes_uploaded`, which lags behind and snaps
+    // back to 0 on render races.
+    let (progress_pct, uploaded_bytes) = match task.state {
+        UploadState::Completed => (100u32, upload_total),
+        UploadState::Transcoding => {
+            let pct = transcode_progress
+                .read()
+                .get(&task.id)
+                .copied()
+                .unwrap_or(0.0) as u32;
+            (pct.min(100), 0u64)
+        }
+        UploadState::Uploading | UploadState::Verifying | UploadState::Paused => {
+            match upload_progress.read().get(&task.id) {
+                Some(&(uploaded, total)) if total > 0 => {
+                    let pct = (uploaded as f64 / total as f64 * 100.0) as u32;
+                    (pct.min(100), uploaded)
+                }
+                _ => (0, 0),
+            }
+        }
+        _ => (0, 0),
     };
 
     let (status_color, status_bg) = match task.state {
@@ -676,6 +675,21 @@ fn UploadTaskRow(
         UploadState::Uploading => ("var(--info)", "var(--info-bg)"),
         UploadState::Paused => ("var(--warning)", "var(--warning-bg)"),
         _ => ("var(--text-muted)", "var(--bg-secondary)"),
+    };
+
+    let tenant_name = app_state.tenant_display_name(&task.tenant_id);
+    let project_name = app_state.project_display_name(&task.tenant_id, &task.project_id);
+
+    // Size column: "original" for non-transcoded tasks, "original → transcoded"
+    // when transcode is enabled. The transcoded half is "…" until the engine
+    // emits TranscodeCompleted.
+    let size_line = if task.transcode {
+        match task.transcoded_size {
+            Some(tr) => format!("{} → {}", format_size(task.size), format_size(tr)),
+            None => format!("{} → …", format_size(task.size)),
+        }
+    } else {
+        format_size(task.size)
     };
 
     rsx! {
@@ -691,6 +705,10 @@ fn UploadTaskRow(
                         style: "font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;",
                         "{task.filename}"
                     }
+                    span {
+                        style: "font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; margin-top: 2px;",
+                        "{tenant_name} / {project_name}"
+                    }
                 }
                 div {
                     style: "display: flex; align-items: center; gap: 6px; margin-left: 8px; flex-shrink: 0;",
@@ -702,7 +720,6 @@ fn UploadTaskRow(
                     {
                         let id1 = task.id.clone();
                         let id2 = task.id.clone();
-                        let _id3 = task.id.clone();
                         let small_btn = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; transition: background 0.15s, transform 0.08s;";
                         match task.state {
                             UploadState::Uploading
@@ -762,30 +779,43 @@ fn UploadTaskRow(
             }
 
             div {
-                style: "font-size: 12px; color: var(--text-muted); margin-top: 2px;",
-                "{format_size(task.size)}"
+                style: "font-size: 12px; color: var(--text-muted); margin-top: 4px;",
+                "{size_line}"
             }
 
             {
                 let show_progress = task.state.is_active() || task.state == UploadState::Paused;
-                let bar_visibility = if show_progress { "margin-top: 6px; height: 4px;" } else { "margin-top: 0; height: 0;" };
-                let label_visibility = if show_progress { "font-size: 11px; margin-top: 2px;" } else { "font-size: 0; margin-top: 0; height: 0; overflow: hidden;" };
+                let phase_label = phase_label(&task.state, progress_pct, uploaded_bytes, upload_total);
+                let bar_wrapper_style = if show_progress {
+                    "margin-top: 6px;"
+                } else {
+                    "display: none;"
+                };
+                let label_style = if show_progress {
+                    "font-size: 11px; margin-top: 2px; color: var(--text-muted);"
+                } else {
+                    "display: none;"
+                };
+                let paused_class = if task.state == UploadState::Paused {
+                    "progress-paused"
+                } else {
+                    ""
+                };
+                let value = progress_pct as f64;
                 rsx! {
                     div {
-                        style: "{bar_visibility} background: var(--border); border-radius: 2px; overflow: hidden; transition: height 0.2s ease;",
-                        div {
-                            style: "height: 100%; min-height: 4px; width: {progress}%; background: {progress_color}; transition: width 0.3s ease;",
+                        style: "{bar_wrapper_style}",
+                        Progress {
+                            class: paused_class,
+                            value,
+                            max: 100.0,
+                            "aria-label": "Upload progress",
+                            ProgressIndicator {}
                         }
                     }
                     div {
-                        style: "{label_visibility} color: var(--text-muted); transition: height 0.2s ease, font-size 0.2s ease;",
-                        if task.state == UploadState::Transcoding {
-                            "{state_label} {progress}%"
-                        } else if task.state == UploadState::Uploading {
-                            "{state_label} {progress}% — {format_size(bytes_uploaded)} / {format_size(task.size)}"
-                        } else if show_progress {
-                            "{state_label}"
-                        }
+                        style: "{label_style}",
+                        "{phase_label}"
                     }
                 }
             }
@@ -807,6 +837,27 @@ fn UploadTaskRow(
     }
 }
 
+/// Phase label rendered under the progress bar. Single bar, single label —
+/// the state determines whether we're showing transcode %, upload bytes,
+/// or a static stage name.
+fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> String {
+    match state {
+        UploadState::Transcoding => format!("Transcoding {pct}%"),
+        UploadState::Uploading => format!(
+            "Uploading {pct}% — {} / {}",
+            format_size(uploaded),
+            format_size(total)
+        ),
+        UploadState::Validating => "Validating...".to_string(),
+        UploadState::Desensitizing => "Desensitizing...".to_string(),
+        UploadState::Creating => "Creating...".to_string(),
+        UploadState::Verifying => "Verifying...".to_string(),
+        UploadState::Paused => "Paused".to_string(),
+        UploadState::Pending => "Pending...".to_string(),
+        UploadState::Staged | UploadState::Completed | UploadState::Failed => String::new(),
+    }
+}
+
 fn handle_upload_event(
     app_state: &mut AppState,
     transcode_progress: &mut Signal<HashMap<String, f32>>,
@@ -825,9 +876,15 @@ fn handle_upload_event(
             bytes_uploaded,
             total_bytes,
         } => {
-            upload_progress
-                .write()
-                .insert(task_id, (bytes_uploaded, total_bytes));
+            // Monotonic clamp: never let the displayed bytes drop below the
+            // highest value we've already seen for this task. GCS resumable
+            // retries legitimately reset the byte counter mid-stream, but the
+            // wire-side progress never regresses — acknowledged bytes stay
+            // acknowledged across sessions.
+            let mut guard = upload_progress.write();
+            let entry = guard.entry(task_id).or_insert((0, total_bytes));
+            entry.0 = entry.0.max(bytes_uploaded);
+            entry.1 = total_bytes;
         }
         UploadEvent::ValidationWarnings { task_id, warnings } => {
             update_task(app_state, &task_id, |t| t.validation_warnings = warnings);
@@ -835,16 +892,31 @@ fn handle_upload_event(
         UploadEvent::TranscodeProgress { task_id, percent } => {
             transcode_progress.write().insert(task_id, percent);
         }
+        UploadEvent::TranscodeCompleted {
+            task_id,
+            transcoded_size,
+        } => {
+            transcode_progress.write().remove(&task_id);
+            update_task(app_state, &task_id, |t| {
+                t.transcoded_size = Some(transcoded_size)
+            });
+        }
         UploadEvent::DuplicateDetected { task_id, .. } => {
+            upload_progress.write().remove(&task_id);
+            transcode_progress.write().remove(&task_id);
             update_task(app_state, &task_id, |t| {
                 t.state = UploadState::Failed;
                 t.error_message = Some("Duplicate file detected".to_string());
             });
         }
         UploadEvent::Completed { task_id } => {
+            upload_progress.write().remove(&task_id);
+            transcode_progress.write().remove(&task_id);
             update_task(app_state, &task_id, |t| t.state = UploadState::Completed);
         }
         UploadEvent::Failed { task_id, error } => {
+            upload_progress.write().remove(&task_id);
+            transcode_progress.write().remove(&task_id);
             update_task(app_state, &task_id, |t| {
                 t.state = UploadState::Failed;
                 t.error_message = Some(error);
@@ -860,247 +932,8 @@ fn update_task(app_state: &mut AppState, task_id: &str, f: impl FnOnce(&mut Uplo
     }
 }
 
-// ── Transcode config dialog ──────────────────────────────────────────
-
-const PRESETS: &[&str] = &["fast", "medium", "slow"];
-const RESOLUTIONS: &[(u32, &str)] = &[(720, "720p"), (1080, "1080p")];
-const AUDIO_BITRATES: &[u32] = &[128, 192];
-const FPS_OPTIONS: &[(u32, &str)] = &[(24, "24fps"), (30, "30fps"), (60, "60fps")];
-
-#[component]
-fn TranscodeDialog(task_id: String, on_close: EventHandler<bool>) -> Element {
-    let app_state = use_context::<AppState>();
-    let mut config = use_signal(|| {
-        lw_core::config::AppConfig::load()
-            .map(|c| c.transcode)
-            .unwrap_or_default()
-    });
-
-    // Find the task to show estimated output size
-    let task_info = app_state
-        .upload_tasks
-        .read()
-        .iter()
-        .find(|t| t.id == task_id)
-        .and_then(|t| t.video_info.clone());
-
-    let estimated = task_info
-        .as_ref()
-        .map(|info| lw_core::transcode::estimate_transcoded_size(info, &config.read()));
-
-    let on_ok = move |_| {
-        // Save config to disk
-        if let Ok(mut app_config) = lw_core::config::AppConfig::load() {
-            app_config.transcode = config.read().clone();
-            if let Err(e) = app_config.save() {
-                tracing::error!("Failed to save transcode config: {e}");
-            }
-        }
-        on_close.call(true);
-    };
-
-    let label_style = "font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 4px; display: block;";
-    let src_height = task_info.as_ref().map(|i| i.height).unwrap_or(u32::MAX);
-    let src_fps = task_info.as_ref().map(|i| i.fps as u32).unwrap_or(u32::MAX);
-    let current_bitrate = config.read().max_bitrate_mbps;
-
-    rsx! {
-        // Overlay backdrop
-        div {
-            style: "position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 100; display: flex; align-items: center; justify-content: center;",
-            onclick: move |_| on_close.call(false),
-
-            // Dialog
-            div {
-                style: "background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; width: 320px; max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.2);",
-                onclick: move |e| e.stop_propagation(),
-
-                h3 {
-                    style: "margin: 0 0 12px; font-size: 15px; font-weight: 600; color: var(--text);",
-                    "Transcode Settings"
-                }
-
-                // Estimated output
-                if let Some(est) = estimated {
-                    div {
-                        style: "font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; padding: 6px 8px; background: var(--bg-secondary); border-radius: 4px;",
-                        "Estimated output: ~{format_size(est)}"
-                    }
-                }
-
-                // Preset — button group
-                div {
-                    style: "margin-bottom: 12px;",
-                    label { style: label_style, "Speed" }
-                    ButtonGroup {
-                        options: PRESETS.iter().map(|p| (p.to_string(), p.to_string(), true)).collect(),
-                        selected: config.read().preset.clone(),
-                        on_select: move |v: String| config.write().preset = v,
-                    }
-                }
-
-                // Resolution — button group (disable above source)
-                div {
-                    style: "margin-bottom: 12px;",
-                    label { style: label_style, "Resolution" }
-                    ButtonGroup {
-                        options: RESOLUTIONS
-                            .iter()
-                            .map(|(h, l)| (h.to_string(), l.to_string(), *h <= src_height))
-                            .collect(),
-                        selected: config.read().max_height.to_string(),
-                        on_select: move |v: String| {
-                            if let Ok(h) = v.parse::<u32>() {
-                                config.write().max_height = h;
-                            }
-                        },
-                    }
-                }
-
-                // FPS — button group (disable above source)
-                div {
-                    style: "margin-bottom: 12px;",
-                    label { style: label_style, "Frame Rate" }
-                    {
-                        let mut fps_opts: Vec<(String, String, bool)> =
-                            vec![("0".to_string(), "Original".to_string(), true)];
-                        fps_opts.extend(
-                            FPS_OPTIONS
-                                .iter()
-                                .map(|(f, l)| (f.to_string(), l.to_string(), *f <= src_fps)),
-                        );
-                        rsx! {
-                            ButtonGroup {
-                                options: fps_opts,
-                                selected: config.read().target_fps.to_string(),
-                                on_select: move |v: String| {
-                                    if let Ok(f) = v.parse::<u32>() {
-                                        config.write().target_fps = f;
-                                    }
-                                },
-                            }
-                        }
-                    }
-                }
-
-                // Max bitrate — range slider (5–20 Mbps, recommend 10)
-                {
-                    let (bitrate_color, bitrate_hint) = if (7..=15).contains(&current_bitrate) {
-                        ("var(--success)", "Recommended")
-                    } else if current_bitrate <= 6 {
-                        ("var(--error)", "Low quality")
-                    } else {
-                        ("var(--warning)", "Large file size")
-                    };
-                    rsx! {
-                        div {
-                            style: "margin-bottom: 12px;",
-                            label {
-                                style: label_style,
-                                "Max Bitrate: "
-                                span { style: "color: {bitrate_color};", "{current_bitrate} Mbps" }
-                                span { style: "font-size: 10px; color: {bitrate_color}; margin-left: 6px; font-weight: 400;", "({bitrate_hint})" }
-                            }
-                            input {
-                                r#type: "range",
-                                min: "5",
-                                max: "20",
-                                value: "{current_bitrate}",
-                                onchange: move |evt: Event<FormData>| {
-                                    if let Ok(v) = evt.value().parse::<u32>() {
-                                        config.write().max_bitrate_mbps = v;
-                                    }
-                                },
-                                style: "width: 100%; accent-color: {bitrate_color};",
-                            }
-                            div {
-                                style: "display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted);",
-                                span { "5 Mbps" }
-                                span { "20 Mbps" }
-                            }
-                        }
-                    }
-                }
-
-                // Audio bitrate — button group
-                div {
-                    style: "margin-bottom: 14px;",
-                    label { style: label_style, "Audio Bitrate" }
-                    ButtonGroup {
-                        options: AUDIO_BITRATES
-                            .iter()
-                            .map(|r| (r.to_string(), format!("{r}k"), true))
-                            .collect(),
-                        selected: config.read().audio_bitrate_kbps.to_string(),
-                        on_select: move |v: String| {
-                            if let Ok(r) = v.parse::<u32>() {
-                                config.write().audio_bitrate_kbps = r;
-                            }
-                        },
-                    }
-                }
-
-                // Actions
-                div {
-                    style: "display: flex; gap: 8px;",
-                    button {
-                        style: "flex: 1; padding: 7px 14px; border-radius: 6px; border: none; background: var(--btn-primary); color: white; cursor: pointer; font-weight: 500; font-size: 13px;",
-                        onclick: on_ok,
-                        "Enable Transcode"
-                    }
-                    button {
-                        style: "padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 13px;",
-                        onclick: move |_| on_close.call(false),
-                        "Cancel"
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Segmented button group. Each option is (value, label, enabled).
-#[component]
-fn ButtonGroup(
-    options: Vec<(String, String, bool)>,
-    selected: String,
-    on_select: EventHandler<String>,
-) -> Element {
-    rsx! {
-        div {
-            style: "display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;",
-            for (value, label, enabled) in options.iter() {
-                {
-                    let is_selected = *value == selected;
-                    let is_enabled = *enabled;
-                    let bg = if is_selected {
-                        "var(--btn-primary)"
-                    } else {
-                        "transparent"
-                    };
-                    let color = if is_selected {
-                        "white"
-                    } else if is_enabled {
-                        "var(--text-secondary)"
-                    } else {
-                        "var(--text-muted)"
-                    };
-                    let opacity = if is_enabled { "1" } else { "0.5" };
-                    let cursor = if is_enabled { "pointer" } else { "not-allowed" };
-                    let val = value.clone();
-                    rsx! {
-                        button {
-                            style: "flex: 1; padding: 5px 8px; font-size: 12px; border: none; border-right: 1px solid var(--border); background: {bg}; color: {color}; opacity: {opacity}; cursor: {cursor}; transition: background 0.15s;",
-                            disabled: !is_enabled,
-                            onclick: move |_| on_select.call(val.clone()),
-                            "{label}"
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+// The transcode dialog, its `ButtonGroup` facade, and related constants now
+// live in `transcode_dialog.rs`.
 
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;

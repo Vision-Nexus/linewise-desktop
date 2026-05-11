@@ -242,6 +242,9 @@ pub struct UploadTask {
     pub retry_count: u32,
     /// User opted in to transcode this file before upload
     pub transcode: bool,
+    /// Size of the transcoded artifact in bytes. `None` until transcode
+    /// completes (and remains `None` if transcode was disabled for this task).
+    pub transcoded_size: Option<u64>,
     /// Video probe info (populated at staging time for video files)
     pub video_info: Option<VideoInfo>,
 }

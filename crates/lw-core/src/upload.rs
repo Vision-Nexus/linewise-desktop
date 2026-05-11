@@ -34,6 +34,13 @@ pub enum UploadEvent {
         task_id: String,
         percent: f32,
     },
+    /// Emitted once when transcoding finishes and the final artifact size is
+    /// known. The UI uses this to render "original → transcoded" bytes and to
+    /// switch the progress label from "Transcoding" to "Uploading".
+    TranscodeCompleted {
+        task_id: String,
+        transcoded_size: u64,
+    },
     DuplicateDetected {
         task_id: String,
         existing_document_id: String,
@@ -152,6 +159,7 @@ impl UploadEngine {
             validation_warnings,
             retry_count: 0,
             transcode: false,
+            transcoded_size: None,
             video_info,
         };
 
@@ -296,6 +304,33 @@ impl UploadEngine {
             .or(desensitized_path.as_deref())
             .unwrap_or(path);
         let upload_size = tokio::fs::metadata(upload_path).await?.len();
+
+        // Sanity check: if this task carries a recorded `transcoded_size`
+        // (persisted when `maybe_transcode` finished in this run OR loaded
+        // from SQLite on a resumed task) and we just picked the transcoded
+        // file as the upload source, the two sizes must agree. A mismatch
+        // means either the scratch file was rewritten between runs or the
+        // DB row is stale — either way, the UI's "original → transcoded"
+        // readout would misreport progress.
+        if let (Some(recorded), true) = (task.transcoded_size, transcoded_path.as_deref().is_some())
+            && recorded != upload_size
+        {
+            tracing::warn!(
+                task_id = %task.id,
+                recorded = recorded,
+                actual = upload_size,
+                "transcoded_size mismatch — resumed upload_size differs from recorded artifact size; syncing"
+            );
+            task.transcoded_size = Some(upload_size);
+            let _ = self
+                .db
+                .update_upload_transcoded_size(&task.id, upload_size)
+                .await;
+            let _ = self.event_tx.send(UploadEvent::TranscodeCompleted {
+                task_id: task.id.clone(),
+                transcoded_size: upload_size,
+            });
+        }
 
         // Stage 4: Create document (skip if already has document_id)
         let doc_id = if let Some(ref doc_id) = task.document_id {
@@ -655,6 +690,15 @@ impl UploadEngine {
             result.original_size as f64 / 1_048_576.0,
             result.transcoded_size as f64 / 1_048_576.0,
         );
+        task.transcoded_size = Some(result.transcoded_size);
+        let _ = self
+            .db
+            .update_upload_transcoded_size(&task.id, result.transcoded_size)
+            .await;
+        let _ = self.event_tx.send(UploadEvent::TranscodeCompleted {
+            task_id: task.id.clone(),
+            transcoded_size: result.transcoded_size,
+        });
         Ok(Some(result.output_path))
     }
 

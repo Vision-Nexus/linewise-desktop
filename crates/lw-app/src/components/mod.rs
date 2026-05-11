@@ -1,10 +1,14 @@
 pub mod login;
+pub mod progress;
 pub mod project_select;
 pub mod select;
 pub mod settings_modal;
+pub mod sheet;
 pub mod sidebar;
 pub mod switch;
 pub mod tenant_select;
+pub mod toggle_group;
+pub mod transcode_dialog;
 pub mod transcode_settings;
 pub mod upload_queue;
 pub mod upload_settings;
