@@ -862,9 +862,13 @@ fn encoder_registered(name: &str) -> bool {
 
 /// Try to actually open the encoder so we know the driver is present.
 /// On mismatch (e.g. nvenc on a non-NVIDIA Windows box), avcodec_open2
-/// fails with EPERM / ENOENT / ENODEV and we fall through. Probe
-/// parameters are arbitrary minimal values; we only care whether the
-/// open succeeds, then we immediately drop the context.
+/// fails with EPERM / ENOENT / ENODEV and we fall through.
+///
+/// Probe dimensions must clear the minimum frame size each hardware
+/// family enforces — AMF refuses below ~130x130, NVENC HEVC refuses
+/// below 64x64, QSV is also picky on undersized inputs. 256x144
+/// (16:9-ish, multiple of 16 on both axes) is accepted by every
+/// family we target.
 fn encoder_opens(name: &str) -> bool {
     let Some(codec) = codec::encoder::find_by_name(name) else {
         return false;
@@ -873,11 +877,11 @@ fn encoder_opens(name: &str) -> bool {
         return false;
     };
     let mut ctx = ctx;
-    ctx.set_width(16);
-    ctx.set_height(16);
+    ctx.set_width(256);
+    ctx.set_height(144);
     ctx.set_format(format::Pixel::NV12);
     ctx.set_time_base(Rational::new(1, 30));
-    ctx.set_bit_rate(100_000);
+    ctx.set_bit_rate(1_000_000);
     ctx.open_as(codec).is_ok()
 }
 
