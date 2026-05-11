@@ -1,0 +1,23 @@
+# Auto-normalize text files to LF on check-in, keep native line endings on
+# check-out (Windows contributors get CRLF locally but never commit it).
+# This prevents the "whole file looks modified" diff noise that happens when
+# an editor or tool rewrites a file with CRLF endings.
+* text=auto eol=lf
+
+# Keep Windows shell/batch scripts with their native CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Treat these as binary — never touch line endings or attempt merges.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.mp4 binary
+*.mov binary
+*.webm binary
+*.woff binary
+*.woff2 binary
