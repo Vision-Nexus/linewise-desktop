@@ -428,6 +428,13 @@ fn encode_to_hls(
     // that offset so the UI bar continues where it left off.
     let mut frames_done = (resume.resume_seconds * info.fps).ceil() as u64;
     let mut v_enc = v_enc;
+    // Monotonic DTS guard for the audio remux path. After rescale_ts
+    // rounds the input timebase into the output timebase, two distinct
+    // input packets can land on the same output DTS — which fails the
+    // HLS muxer's strict-monotonic check. Track the last emitted DTS
+    // and bump collisions by +1 tick, same pattern ffmpeg's CLI uses
+    // when it emits "non monotonic DTS ... clipping".
+    let mut last_audio_dts: Option<i64> = None;
 
     for (stream, mut packet) in ictx.packets() {
         let sidx = stream.index();
@@ -463,6 +470,9 @@ fn encode_to_hls(
             packet.set_stream(out_idx);
             packet.rescale_ts(tb_in, tb_out);
             packet.set_position(-1);
+
+            enforce_monotonic_dts(&mut packet, &mut last_audio_dts);
+
             packet
                 .write_interleaved(&mut octx)
                 .map_err(|e| enc_err(format!("Write audio: {e}")))?;
@@ -850,6 +860,26 @@ fn software_name(codec: &str) -> Result<&'static str, TranscodeError> {
         "hevc" | "h265" => Ok("libx265"),
         "h264" => Ok("libx264"),
         other => Err(TranscodeError::CodecNotFound(other.to_string())),
+    }
+}
+
+/// Bump a packet's DTS (and PTS if needed) so it's strictly greater than
+/// the last emitted DTS for the same stream. Two distinct input audio
+/// packets can rescale onto the same output DTS after timebase rounding,
+/// which trips the HLS muxer's monotonicity check. Mirrors the "non
+/// monotonic DTS … clipping" fallback the ffmpeg CLI uses.
+fn enforce_monotonic_dts(packet: &mut ffmpeg_next::Packet, last_dts: &mut Option<i64>) {
+    let Some(dts) = packet.dts() else { return };
+    match *last_dts {
+        Some(prev) if dts <= prev => {
+            let fixed = prev + 1;
+            packet.set_dts(Some(fixed));
+            if packet.pts().is_some_and(|p| p < fixed) {
+                packet.set_pts(Some(fixed));
+            }
+            *last_dts = Some(fixed);
+        }
+        _ => *last_dts = Some(dts),
     }
 }
 
