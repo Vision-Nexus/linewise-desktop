@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, validation_warnings, retry_count, video_info, transcode\n             FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size\n             FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -87,6 +87,11 @@
         "name": "transcode",
         "ordinal": 16,
         "type_info": "Integer"
+      },
+      {
+        "name": "transcoded_size",
+        "ordinal": 17,
+        "type_info": "Integer"
       }
     ],
     "parameters": {
@@ -109,8 +114,9 @@
       true,
       false,
       true,
-      false
+      false,
+      true
     ]
   },
-  "hash": "7abf8a78b152ebeb240c5255c74b2f7296f449a82c8f21b97048cf4b0be54438"
+  "hash": "a6444468f76843ef0e43d0f4b5b3c0e1deb0664cedf1da962b56d342066fce5b"
 }

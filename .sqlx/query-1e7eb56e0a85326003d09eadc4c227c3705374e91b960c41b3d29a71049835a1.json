@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE upload_queue SET transcoded_size = ?, updated_at = datetime('now') WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "1e7eb56e0a85326003d09eadc4c227c3705374e91b960c41b3d29a71049835a1"
+}
