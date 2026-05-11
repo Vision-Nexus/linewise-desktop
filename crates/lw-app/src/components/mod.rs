@@ -1,10 +1,10 @@
 pub mod login;
 pub mod progress;
 pub mod project_select;
-pub mod select;
 pub mod settings_modal;
 pub mod sheet;
 pub mod sidebar;
+pub mod slider;
 pub mod switch;
 pub mod tenant_select;
 pub mod toggle_group;

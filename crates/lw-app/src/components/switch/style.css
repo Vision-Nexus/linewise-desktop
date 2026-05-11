@@ -1,43 +1,45 @@
-.dx-switch-example {
-  display: flex;
-  align-items: center;
-  padding: 20px;
-  gap: 15px;
-}
-
+/* Track: 36px × 20px. Thumb: 16px × 16px (20px − 2px top − 2px bottom). */
 .dx-switch {
   all: unset;
   position: relative;
-  width: 2rem;
-  height: 1.15rem;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
   border-radius: 9999px;
-  background-color: var(--primary-color-6);
+  background-color: var(--border);
   cursor: pointer;
-  transition: background-color 150ms;
+  transition: background-color 150ms ease;
 }
 
 .dx-switch[data-state="checked"] {
-  background-color: var(--secondary-color-2);
+  background-color: var(--btn-primary);
 }
 
 .dx-switch-thumb {
   display: block;
-  width: calc(1.15rem - 2px);
-  height: calc(1.15rem - 2px);
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
   border-radius: 9999px;
-  background-color: var(--light, var(--primary-color)) var(--dark, var(--secondary-color-2));
-  transform: translateX(1px);
-  transition: transform 150ms;
+  background-color: #ffffff;
+  box-shadow: var(--shadow-sm);
+  transform: translateX(0);
+  transition: transform 150ms ease;
   will-change: transform;
 }
 
+/* 36 (track) − 16 (thumb) − 2 (left inset) − 2 (right inset) = 16px travel. */
 .dx-switch[data-state="checked"] .dx-switch-thumb {
-  background-color: var(--light, var(--primary-color)) var(--dark, var(--primary-color-3));
-  transform: translateX(calc(2rem - 1px - (1.15rem - 2px)));
+  transform: translateX(16px);
 }
 
-/* Only apply disabled styles when data-disabled is "true" */
 .dx-switch[data-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.dx-switch:focus-visible {
+  box-shadow: var(--focus-ring);
 }

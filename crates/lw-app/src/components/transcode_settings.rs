@@ -1,8 +1,10 @@
-use crate::components::select::{Select, SelectList, SelectOption, SelectTrigger, SelectValue};
+use crate::components::slider::{Slider, SliderRange, SliderThumb, SliderTrack};
 use crate::components::switch::{Switch, SwitchThumb};
+use crate::components::toggle_group::{ToggleGroup, ToggleItem};
 use dioxus::prelude::*;
 use lw_core::config::{AppConfig, TranscodeConfig};
 use lw_core::transcode::probe_availability;
+use std::collections::HashSet;
 
 const PRESETS: &[&str] = &["fast", "medium", "slow"];
 const RESOLUTIONS: &[(u32, &str)] = &[(720, "720p"), (1080, "1080p")];
@@ -44,6 +46,34 @@ pub fn TranscodeSettingsPane() -> Element {
         saved.set(false);
     };
 
+    let hw_options: Vec<(String, String)> = {
+        let avail = availability.read();
+        std::iter::once(("auto".to_string(), "Auto".to_string()))
+            .chain(std::iter::once((
+                "none".to_string(),
+                "Software".to_string(),
+            )))
+            .chain(avail.available_hw.iter().map(|hw| {
+                (
+                    hw.as_config_str().to_string(),
+                    hw.display_label().to_string(),
+                )
+            }))
+            .collect()
+    };
+    let preset_options: Vec<(String, String)> = PRESETS
+        .iter()
+        .map(|p| (p.to_string(), p.to_string()))
+        .collect();
+    let resolution_options: Vec<(u32, String)> = RESOLUTIONS
+        .iter()
+        .map(|(h, label)| (*h, label.to_string()))
+        .collect();
+    let audio_options: Vec<(u32, String)> = AUDIO_BITRATES
+        .iter()
+        .map(|r| (*r, format!("{r}k")))
+        .collect();
+
     rsx! {
         div {
             style: "background: var(--bg); color: var(--text);",
@@ -70,165 +100,64 @@ pub fn TranscodeSettingsPane() -> Element {
                 }
             }
 
-            // Hardware acceleration — sub-setting of the master toggle. Filtered
-            // to Auto + None + whatever HW encoders the current ffmpeg build has.
+            // Hardware acceleration — sub-setting of the master toggle.
             SettingRow {
                 label: "Hardware Acceleration",
-                {
-                    let hw_options: Vec<(String, String)> = {
-                        let avail = availability.read();
-                        std::iter::once(("auto".to_string(), "Auto (prefer HW if available)".to_string()))
-                            .chain(std::iter::once(("none".to_string(), "None (software)".to_string())))
-                            .chain(avail.available_hw.iter().map(|hw| (hw.as_config_str().to_string(), hw.display_label().to_string())))
-                            .collect()
-                    };
-                    let current = config.read().hw_accel.clone();
-                    rsx! {
-                        Select::<String> {
-                            key: "{current}",
-                            default_value: current.clone(),
-                            disabled: !master_enabled,
-                            on_value_change: move |v: Option<String>| {
-                                if let Some(v) = v {
-                                    config.write().hw_accel = v;
-                                }
-                            },
-                            SelectTrigger { aria_label: "Hardware acceleration",
-                                SelectValue { placeholder: "Select..." }
-                            }
-                            SelectList { aria_label: "Hardware acceleration options",
-                                for (i, (value, label)) in hw_options.iter().enumerate() {
-                                    SelectOption::<String> {
-                                        index: i,
-                                        value: value.clone(),
-                                        text_value: label.clone(),
-                                        "{label}"
-                                    }
-                                }
-                            }
-                        }
-                    }
+                StringToggleRow {
+                    options: hw_options,
+                    value: config.read().hw_accel.clone(),
+                    disabled: !master_enabled,
+                    on_change: move |v: String| config.write().hw_accel = v,
                 }
             }
 
             // Preset
             SettingRow {
                 label: "Encoding Preset",
-                Select::<String> {
-                    key: "{config.read().preset}",
-                    default_value: config.read().preset.clone(),
+                StringToggleRow {
+                    options: preset_options,
+                    value: config.read().preset.clone(),
                     disabled: !master_enabled,
-                    on_value_change: move |v: Option<String>| {
-                        if let Some(v) = v {
-                            config.write().preset = v;
-                        }
-                    },
-                    SelectTrigger { aria_label: "Encoding preset",
-                        SelectValue { placeholder: "Select..." }
-                    }
-                    SelectList { aria_label: "Encoding preset options",
-                        for (i, preset) in PRESETS.iter().enumerate() {
-                            SelectOption::<String> {
-                                index: i,
-                                value: preset.to_string(),
-                                text_value: preset.to_string(),
-                                "{preset}"
-                            }
-                        }
-                    }
+                    on_change: move |v: String| config.write().preset = v,
                 }
             }
 
             // Target average bitrate (the VBR target).
-            SettingRow {
-                label: "Target Bitrate (Mbps)",
-                input {
-                    r#type: "number",
-                    min: "1",
-                    max: "100",
-                    value: "{config.read().target_bitrate_mbps}",
-                    disabled: !master_enabled,
-                    onchange: move |evt: Event<FormData>| {
-                        if let Ok(v) = evt.value().parse::<u32>() {
-                            config.write().target_bitrate_mbps = v;
-                        }
-                    },
-                    style: "{input_style()} width: 80px;",
-                }
+            BitrateSliderRow {
+                label: "Target Bitrate",
+                value: config.read().target_bitrate_mbps,
+                disabled: !master_enabled,
+                on_change: move |v: u32| config.write().target_bitrate_mbps = v,
             }
 
             // Peak cap. Typical 2× target; at equal values VideoToolbox
             // systematically undershoots the target.
-            SettingRow {
-                label: "Peak Bitrate Cap (Mbps)",
-                input {
-                    r#type: "number",
-                    min: "1",
-                    max: "100",
-                    value: "{config.read().max_bitrate_mbps}",
-                    disabled: !master_enabled,
-                    onchange: move |evt: Event<FormData>| {
-                        if let Ok(v) = evt.value().parse::<u32>() {
-                            config.write().max_bitrate_mbps = v;
-                        }
-                    },
-                    style: "{input_style()} width: 80px;",
-                }
+            BitrateSliderRow {
+                label: "Peak Bitrate Cap",
+                value: config.read().max_bitrate_mbps,
+                disabled: !master_enabled,
+                on_change: move |v: u32| config.write().max_bitrate_mbps = v,
             }
 
             // Max resolution
             SettingRow {
                 label: "Max Resolution",
-                Select::<u32> {
-                    key: "{config.read().max_height}",
-                    default_value: config.read().max_height,
+                U32ToggleRow {
+                    options: resolution_options,
+                    value: config.read().max_height,
                     disabled: !master_enabled,
-                    on_value_change: move |v: Option<u32>| {
-                        if let Some(v) = v {
-                            config.write().max_height = v;
-                        }
-                    },
-                    SelectTrigger { aria_label: "Max resolution",
-                        SelectValue { placeholder: "Select..." }
-                    }
-                    SelectList { aria_label: "Max resolution options",
-                        for (i, (height, label)) in RESOLUTIONS.iter().enumerate() {
-                            SelectOption::<u32> {
-                                index: i,
-                                value: *height,
-                                text_value: label.to_string(),
-                                "{label}"
-                            }
-                        }
-                    }
+                    on_change: move |v: u32| config.write().max_height = v,
                 }
             }
 
             // Audio bitrate
             SettingRow {
                 label: "Audio Bitrate",
-                Select::<u32> {
-                    key: "{config.read().audio_bitrate_kbps}",
-                    default_value: config.read().audio_bitrate_kbps,
+                U32ToggleRow {
+                    options: audio_options,
+                    value: config.read().audio_bitrate_kbps,
                     disabled: !master_enabled,
-                    on_value_change: move |v: Option<u32>| {
-                        if let Some(v) = v {
-                            config.write().audio_bitrate_kbps = v;
-                        }
-                    },
-                    SelectTrigger { aria_label: "Audio bitrate",
-                        SelectValue { placeholder: "Select..." }
-                    }
-                    SelectList { aria_label: "Audio bitrate options",
-                        for (i, rate) in AUDIO_BITRATES.iter().enumerate() {
-                            SelectOption::<u32> {
-                                index: i,
-                                value: *rate,
-                                text_value: format!("{rate}k"),
-                                "{rate}k"
-                            }
-                        }
-                    }
+                    on_change: move |v: u32| config.write().audio_bitrate_kbps = v,
                 }
             }
 
@@ -271,6 +200,118 @@ fn SettingRow(label: &'static str, children: Element) -> Element {
     }
 }
 
-fn input_style() -> &'static str {
-    "padding: 6px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text); font-size: 13px;"
+// --- ToggleGroup wrappers ----------------------------------------------------
+// ToggleGroup's `pressed` API is index-based. We generate a row per option,
+// map the current config value back to its index, and on click look up the
+// pressed index to find the new value. One wrapper per value type because
+// Dioxus `#[component]` doesn't yet support generic props with closures.
+
+#[component]
+fn StringToggleRow(
+    options: Vec<(String, String)>,
+    value: String,
+    disabled: bool,
+    on_change: EventHandler<String>,
+) -> Element {
+    let pressed: HashSet<usize> = options
+        .iter()
+        .position(|(v, _)| v == &value)
+        .map(|i| HashSet::from([i]))
+        .unwrap_or_default();
+    let opts_for_callback = options.clone();
+
+    rsx! {
+        ToggleGroup {
+            horizontal: true,
+            disabled,
+            pressed,
+            on_pressed_change: move |set: HashSet<usize>| {
+                if let Some(&i) = set.iter().next()
+                    && let Some((v, _)) = opts_for_callback.get(i)
+                {
+                    on_change.call(v.clone());
+                }
+            },
+            for (i, (_, label)) in options.iter().enumerate() {
+                ToggleItem {
+                    index: i,
+                    "{label}"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn U32ToggleRow(
+    options: Vec<(u32, String)>,
+    value: u32,
+    disabled: bool,
+    on_change: EventHandler<u32>,
+) -> Element {
+    let pressed: HashSet<usize> = options
+        .iter()
+        .position(|(v, _)| *v == value)
+        .map(|i| HashSet::from([i]))
+        .unwrap_or_default();
+    let opts_for_callback = options.clone();
+
+    rsx! {
+        ToggleGroup {
+            horizontal: true,
+            disabled,
+            pressed,
+            on_pressed_change: move |set: HashSet<usize>| {
+                if let Some(&i) = set.iter().next()
+                    && let Some((v, _)) = opts_for_callback.get(i)
+                {
+                    on_change.call(*v);
+                }
+            },
+            for (i, (_, label)) in options.iter().enumerate() {
+                ToggleItem {
+                    index: i,
+                    "{label}"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn BitrateSliderRow(
+    label: &'static str,
+    value: u32,
+    disabled: bool,
+    on_change: EventHandler<u32>,
+) -> Element {
+    rsx! {
+        div {
+            style: "margin-bottom: 12px;",
+            div {
+                style: "display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px;",
+                span {
+                    style: "font-size: 13px; font-weight: 500; color: var(--text);",
+                    "{label}"
+                }
+                span {
+                    style: "font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums;",
+                    "{value} Mbps"
+                }
+            }
+            Slider {
+                default_value: value as f64,
+                min: 1.0,
+                max: 100.0,
+                step: 1.0,
+                disabled,
+                label: label.to_string(),
+                on_value_change: move |v: f64| on_change.call(v.round() as u32),
+                SliderTrack {
+                    SliderRange {}
+                    SliderThumb { index: 0usize }
+                }
+            }
+        }
+    }
 }
