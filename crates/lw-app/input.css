@@ -2,7 +2,7 @@
 
 @source "./src/**/*.rs";
 
-@custom-variant dark (&:is(.dark *));
+@custom-variant dark (@media (prefers-color-scheme: dark));
 
 @theme inline {
   --radius-sm: calc(0.625rem - 4px);
@@ -33,6 +33,31 @@
   --color-border: #eeeeee;
   --color-input: oklch(0.92 0.004 286.32);
   --color-ring: var(--color-primary-hovered);
+}
+
+/* Dark-mode token overrides mirror the --bg/--text/--border palette in
+ * lw-app/src/app.rs GLOBAL_CSS, so Tailwind utilities flip with the OS theme
+ * in lockstep with inline `var(--bg)` styles. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background: #1a1a2e;
+    --color-foreground: #e2e8f0;
+
+    --color-secondary: #16213e;
+    --color-secondary-hovered: #1e293b;
+    --color-secondary-foreground: #e2e8f0;
+
+    --color-muted: #1e293b;
+    --color-muted-foreground: #94a3b8;
+
+    --color-accent: #334155;
+    --color-accent-foreground: #e2e8f0;
+
+    --color-destructive-light: #450a0a;
+
+    --color-border: #334155;
+    --color-input: #475569;
+  }
 }
 
 @layer base {

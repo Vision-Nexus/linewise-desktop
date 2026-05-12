@@ -1,13 +1,12 @@
 use dioxus::prelude::*;
 use dioxus_primitives::progress::{self, ProgressIndicatorProps, ProgressProps};
 
-/// Thin wrapper around `dioxus_primitives::progress::Progress` that ensures
-/// our stylesheet is mounted and that the default class is applied. Any extra
-/// class passed via attributes is appended by Dioxus.
+/// Thin wrapper around `dioxus_primitives::progress::Progress` that applies
+/// the default class. Any extra class passed via attributes is appended by
+/// Dioxus. Stylesheet is inlined globally in `app.rs`.
 #[component]
 pub fn Progress(props: ProgressProps) -> Element {
     rsx! {
-        document::Link { rel: "stylesheet", href: asset!("./style.css") }
         progress::Progress {
             class: "progress",
             value: props.value,

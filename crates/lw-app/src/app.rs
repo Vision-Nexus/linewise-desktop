@@ -9,6 +9,15 @@ use std::sync::Arc;
 const TAILWIND_CSS: &str = include_str!("../tailwind.generated.css");
 const DX_COMPONENTS_THEME_CSS: &str = include_str!("../assets/dx-components-theme.css");
 
+// Per-component stylesheets are inlined here (same mechanism as TAILWIND_CSS
+// above) because Dioxus's `asset!()` / `#[css_module]` asset resolver doesn't
+// reliably deliver files to WebView2 on Windows when built with plain `cargo`.
+const SWITCH_CSS: &str = include_str!("components/switch/style.css");
+const SLIDER_CSS: &str = include_str!("components/slider/style.css");
+const TOGGLE_GROUP_CSS: &str = include_str!("components/toggle_group/style.css");
+const SHEET_CSS: &str = include_str!("components/sheet/style.css");
+const PROGRESS_CSS: &str = include_str!("components/progress/style.css");
+
 /// Global CSS for hover/active states (can't do :hover in inline styles)
 const GLOBAL_CSS: &str = r#"
 /* ── CSS Variables: Light theme (default) ─────────────────────────── */
@@ -254,10 +263,16 @@ pub fn App() -> Element {
         style { "{GLOBAL_CSS}" }
         style { "{TAILWIND_CSS}" }
         style { "{DX_COMPONENTS_THEME_CSS}" }
+        style { "{SWITCH_CSS}" }
+        style { "{SLIDER_CSS}" }
+        style { "{TOGGLE_GROUP_CSS}" }
+        style { "{SHEET_CSS}" }
+        style { "{PROGRESS_CSS}" }
         style { "{lw_chat::styles::CHAT_CSS}" }
         div {
             class: "flex flex-col h-screen w-screen overflow-hidden",
             crate::components::title_bar::TitleBar {}
+            crate::components::toast::ToastOverlay {}
             div {
                 class: "flex-1 min-h-0 overflow-hidden",
                 match state {

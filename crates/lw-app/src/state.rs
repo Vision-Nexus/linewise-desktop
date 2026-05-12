@@ -24,6 +24,10 @@ const GOOGLE_OAUTH_CLIENT_ID: &str =
 const GOOGLE_OAUTH_CLIENT_SECRET: &str = "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";
 const MICROSOFT_OAUTH_CLIENT_ID: &str = "e83e590c-33fd-4361-8063-b93e95206a14";
 
+/// How long a toast stays visible before it auto-dismisses. Defined
+/// next to `show_toast` because the dismiss task lives on `AppState`.
+const TOAST_LIFETIME_MS: u64 = 2500;
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct CoreServices {
@@ -113,6 +117,29 @@ pub struct AppState {
     pub error_message: Signal<Option<String>>,
     pub auth_token: Signal<String>,
     pub show_settings: Signal<bool>,
+    pub toast: Signal<Option<Toast>>,
+}
+
+/// Lightweight toast notification. Only one toast lives at a time — a
+/// fresh `show_toast` call replaces any in-flight toast, which keeps the
+/// overlay simple and matches the behaviour users expect (a save ack
+/// never lines up behind an unrelated info message).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Toast {
+    /// Monotonic counter so the overlay's auto-dismiss can tell "the
+    /// toast I was asked to dismiss" from "a newer toast that replaced
+    /// it while I was sleeping".
+    pub id: u64,
+    pub message: String,
+    pub kind: ToastKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ToastKind {
+    Success,
+    Error,
+    Info,
 }
 
 /// Current filter for the upload queue. Derived from `selected_tenant` +
@@ -166,7 +193,47 @@ impl AppState {
             error_message: Signal::new(None),
             auth_token: Signal::new(String::new()),
             show_settings: Signal::new(false),
+            toast: Signal::new(None),
         }
+    }
+
+    /// Publish a toast. Replaces any currently-visible toast and
+    /// schedules its auto-dismiss after `TOAST_LIFETIME_MS`. The id
+    /// guard inside the dismiss task means an older toast's timer
+    /// can't accidentally clear a newer replacement toast.
+    ///
+    /// Must be called from a Dioxus scope (i.e. from a component body
+    /// or event handler) because the dismiss task is scheduled via
+    /// `dioxus::prelude::spawn`.
+    pub fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        let next_id = self
+            .toast
+            .read()
+            .as_ref()
+            .map(|t| t.id.wrapping_add(1))
+            .unwrap_or(1);
+        self.toast.set(Some(Toast {
+            id: next_id,
+            message: message.into(),
+            kind,
+        }));
+
+        let mut state = self.clone();
+        spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(TOAST_LIFETIME_MS)).await;
+            // Only clear if the currently-visible toast is still the
+            // one we just showed — a newer toast may have replaced it
+            // while we were sleeping.
+            let still_mine = state
+                .toast
+                .read()
+                .as_ref()
+                .map(|t| t.id == next_id)
+                .unwrap_or(false);
+            if still_mine {
+                state.toast.set(None);
+            }
+        });
     }
 
     /// Resolve a tenant id to its human-readable display name. Falls back to

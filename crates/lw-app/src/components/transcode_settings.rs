@@ -1,6 +1,7 @@
 use crate::components::slider::{Slider, SliderRange, SliderThumb, SliderTrack};
 use crate::components::switch::{Switch, SwitchThumb};
 use crate::components::toggle_group::{ToggleGroup, ToggleItem};
+use crate::state::{AppState, ToastKind};
 use dioxus::prelude::*;
 use lw_core::config::{AppConfig, TranscodeConfig};
 use lw_core::transcode::probe_availability;
@@ -12,8 +13,8 @@ const AUDIO_BITRATES: &[u32] = &[128, 192];
 
 #[component]
 pub fn TranscodeSettingsPane() -> Element {
+    let mut app_state = use_context::<AppState>();
     let mut config = use_signal(|| AppConfig::load().map(|c| c.transcode).unwrap_or_default());
-    let mut saved = use_signal(|| false);
     // Probe ffmpeg + HW encoders once on mount. Safe to re-probe since
     // `ffmpeg_next::init()` is idempotent — but caching keeps the UI snappy.
     let availability = use_signal(|| probe_availability(&config.read()));
@@ -30,20 +31,30 @@ pub fn TranscodeSettingsPane() -> Element {
         match AppConfig::load() {
             Ok(mut app_config) => {
                 app_config.transcode = tc;
-                if let Err(e) = app_config.save() {
-                    tracing::error!("Failed to save config: {e}");
-                } else {
-                    saved.set(true);
-                    tracing::info!("Transcode settings saved");
+                match app_config.save() {
+                    Ok(()) => {
+                        tracing::info!("Transcode settings saved");
+                        app_state.show_toast("Settings saved", ToastKind::Success);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to save config: {e}");
+                        app_state
+                            .show_toast(format!("Failed to save settings: {e}"), ToastKind::Error);
+                    }
                 }
             }
-            Err(e) => tracing::error!("Failed to load config for save: {e}"),
+            Err(e) => {
+                tracing::error!("Failed to load config for save: {e}");
+                app_state.show_toast(
+                    format!("Failed to load config for save: {e}"),
+                    ToastKind::Error,
+                );
+            }
         }
     };
 
     let reset = move |_| {
         config.set(TranscodeConfig::default());
-        saved.set(false);
     };
 
     let hw_options: Vec<(String, String)> = {
@@ -176,12 +187,6 @@ pub fn TranscodeSettingsPane() -> Element {
                 }
             }
 
-            if saved() {
-                div {
-                    style: "margin-top: 8px; font-size: 12px; color: var(--success); text-align: center;",
-                    "Settings saved"
-                }
-            }
         }
     }
 }
