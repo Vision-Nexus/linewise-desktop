@@ -20,6 +20,14 @@ RESOURCES="$APP_BUNDLE/Contents/Resources"
 MACOS_BIN="$APP_BUNDLE/Contents/MacOS/linewise-desktop"
 mkdir -p "$FRAMEWORKS" "$RESOURCES"
 
+# Ship third-party licence notices inside the bundle so users can find
+# them without a network round-trip.
+LICENSES_DIR="$RESOURCES/licenses"
+mkdir -p "$LICENSES_DIR"
+cp "$ROOT/THIRD_PARTY_LICENSES.md" "$LICENSES_DIR/"
+cp -R "$ROOT/NOTICES" "$LICENSES_DIR/"
+echo "  Copied THIRD_PARTY_LICENSES.md + NOTICES/ → Resources/licenses/"
+
 FFMPEG_PREFIX="${FFMPEG_DIR:-$(brew --prefix ffmpeg)}"
 echo "Using FFmpeg from: $FFMPEG_PREFIX"
 

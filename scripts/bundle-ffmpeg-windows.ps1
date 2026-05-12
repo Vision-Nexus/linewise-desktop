@@ -27,6 +27,13 @@ if (-not $FfmpegDir) {
 
 Write-Host "Bundling FFmpeg from: $FfmpegDir"
 
+# Ship third-party licence notices alongside the binary.
+$LicensesDir = Join-Path $ExeDir "licenses"
+New-Item -ItemType Directory -Force -Path $LicensesDir | Out-Null
+Copy-Item (Join-Path $Root "THIRD_PARTY_LICENSES.md") -Destination $LicensesDir -Force
+Copy-Item -Recurse -Force (Join-Path $Root "NOTICES") -Destination $LicensesDir
+Write-Host "  Copied THIRD_PARTY_LICENSES.md + NOTICES\ -> licenses\"
+
 # Copy ffmpeg.exe
 $FfmpegBin = Join-Path $FfmpegDir "bin\ffmpeg.exe"
 if (Test-Path $FfmpegBin) {

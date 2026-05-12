@@ -3,6 +3,13 @@ use crate::components::upload_settings::UploadSettingsPane;
 use crate::state::AppState;
 use dioxus::prelude::*;
 
+/// Attribution file baked into the binary so the About pane can render
+/// it regardless of installer layout. The same file is also shipped
+/// under `licenses/` inside each installer (see `scripts/bundle-*`).
+const THIRD_PARTY_LICENSES: &str = include_str!("../../../../THIRD_PARTY_LICENSES.md");
+
+const PROJECT_URL: &str = "https://github.com/Vision-Nexus/linewise-desktop";
+
 #[component]
 pub fn SettingsModal(on_close: EventHandler<()>) -> Element {
     let close = on_close;
@@ -47,6 +54,45 @@ pub fn SettingsModal(on_close: EventHandler<()>) -> Element {
                 // Transcode section
                 SectionHeader { label: "Transcode" }
                 TranscodeSettingsPane {}
+
+                // Divider
+                div { style: "height: 1px; background: var(--border); margin: 20px 0;" }
+
+                // About & Notices
+                SectionHeader { label: "About & Notices" }
+                AboutPane {}
+            }
+        }
+    }
+}
+
+#[component]
+fn AboutPane() -> Element {
+    let version = env!("CARGO_PKG_VERSION");
+    rsx! {
+        div {
+            style: "font-size: 13px; color: var(--text); margin-bottom: 8px;",
+            div { style: "font-weight: 600;", "Linewise Desktop {version}" }
+            div { style: "font-size: 12px; color: var(--text-secondary); margin-top: 4px;",
+                "Released under the GNU GPLv2-or-later. Source at "
+                a {
+                    href: "{PROJECT_URL}",
+                    style: "color: var(--btn-primary);",
+                    "{PROJECT_URL}"
+                }
+                "."
+            }
+        }
+
+        div {
+            style: "margin-top: 12px; padding: 12px; border: 1px solid var(--border); \
+                    border-radius: 6px; background: var(--bg-secondary); \
+                    max-height: 280px; overflow-y: auto;",
+            pre {
+                style: "font-family: ui-monospace, SFMono-Regular, Menlo, monospace; \
+                        font-size: 11px; line-height: 1.5; color: var(--text); \
+                        white-space: pre-wrap; word-break: break-word; margin: 0;",
+                "{THIRD_PARTY_LICENSES}"
             }
         }
     }

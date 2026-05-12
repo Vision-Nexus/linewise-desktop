@@ -5,7 +5,7 @@ members = ["crates/lw-core", "crates/lw-chat", "crates/lw-app"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "GPL-2.0-or-later"
 authors = ["Linewise <dev@linewise.io>"]
 
 [workspace.dependencies]

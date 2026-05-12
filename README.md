@@ -8,7 +8,7 @@ Built with **Rust** + **Dioxus** + **Tailwind CSS v4**.
 ![Dioxus](https://img.shields.io/badge/Dioxus-0.7-blue)
 ![Tailwind](https://img.shields.io/badge/Tailwind_CSS-v4-38bdf8?logo=tailwindcss)
 ![SQLite](https://img.shields.io/badge/SQLite-sqlx-green)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+![License](https://img.shields.io/badge/License-GPLv2--or--later-blue)
 
 ## Features
 
@@ -151,4 +151,10 @@ DATABASE_URL=sqlite:linewise.db
 
 ## License
 
-MIT
+Linewise Desktop is licensed under the **GNU General Public License v2.0
+or later**. See [LICENSE](LICENSE) for the full text.
+
+This binary distribution includes ffmpeg, x264, x265, and libpostproc —
+each licensed under the GNU GPL. Full attributions, source links, and
+licence texts are in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+and in the [`NOTICES/`](NOTICES/) directory.

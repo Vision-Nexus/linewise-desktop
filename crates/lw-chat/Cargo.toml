@@ -2,6 +2,7 @@
 name = "lw-chat"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 dioxus = { workspace = true }

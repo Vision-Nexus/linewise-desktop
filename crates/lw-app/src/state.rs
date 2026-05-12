@@ -194,16 +194,8 @@ impl AppState {
     /// selected-project signals. Reading `Scope` via this helper avoids the
     /// two-signal drift that used to drive the stale/empty-queue bug.
     pub fn scope(&self) -> Scope {
-        let tenant_id = self
-            .selected_tenant
-            .read()
-            .as_ref()
-            .map(|t| t.id.clone());
-        let project_id = self
-            .selected_project
-            .read()
-            .as_ref()
-            .map(|p| p.id.clone());
+        let tenant_id = self.selected_tenant.read().as_ref().map(|t| t.id.clone());
+        let project_id = self.selected_project.read().as_ref().map(|p| p.id.clone());
         match (tenant_id, project_id) {
             (None, _) => Scope::All,
             (Some(tenant_id), None) => Scope::Tenant { tenant_id },

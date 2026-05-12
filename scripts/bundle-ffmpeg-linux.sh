@@ -28,6 +28,13 @@ dpkg-deb -R "$DEB_FILE" "$WORK_DIR/pkg"
 LIB_DIR="$WORK_DIR/pkg/usr/lib/linewise-desktop"
 mkdir -p "$LIB_DIR"
 
+# Ship third-party licence notices under the standard Linux doc path.
+DOC_DIR="$WORK_DIR/pkg/usr/share/doc/linewise-desktop"
+mkdir -p "$DOC_DIR"
+cp "$ROOT/THIRD_PARTY_LICENSES.md" "$DOC_DIR/"
+cp -R "$ROOT/NOTICES" "$DOC_DIR/"
+echo "  Copied THIRD_PARTY_LICENSES.md + NOTICES/ → /usr/share/doc/linewise-desktop/"
+
 # Copy ffmpeg binary
 FFMPEG_BIN=$(which ffmpeg)
 cp "$FFMPEG_BIN" "$LIB_DIR/ffmpeg"
