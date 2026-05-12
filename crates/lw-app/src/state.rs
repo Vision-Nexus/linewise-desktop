@@ -100,6 +100,43 @@ pub struct AppState {
     pub show_settings: Signal<bool>,
 }
 
+/// Current filter for the upload queue. Derived from `selected_tenant` +
+/// `selected_project`, not stored directly, so the two signals stay the
+/// single source of truth and the derived value can't drift.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// No tenant selected — show every task across every org.
+    All,
+    /// Tenant selected but no project — show every task for that tenant.
+    Tenant { tenant_id: String },
+    /// Fully qualified — show tasks for this (tenant, project) pair.
+    Project {
+        tenant_id: String,
+        project_id: String,
+    },
+}
+
+impl Scope {
+    /// True when the given task belongs to this scope. Used to filter the
+    /// upload queue view.
+    pub fn matches(&self, task_tenant_id: &str, task_project_id: &str) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Tenant { tenant_id } => tenant_id == task_tenant_id,
+            Scope::Project {
+                tenant_id,
+                project_id,
+            } => tenant_id == task_tenant_id && project_id == task_project_id,
+        }
+    }
+
+    /// Only `Project` scope has enough context to stage new uploads; the
+    /// engine needs both a tenant id AND a project id.
+    pub fn is_uploadable(&self) -> bool {
+        matches!(self, Scope::Project { .. })
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
@@ -138,6 +175,30 @@ impl AppState {
     /// `projects` second. Falls back to the raw id when neither has been
     /// hydrated yet — e.g. a queued task belonging to a tenant the user
     /// hasn't selected this session.
+    /// Derive the current upload-queue scope from the selected-tenant and
+    /// selected-project signals. Reading `Scope` via this helper avoids the
+    /// two-signal drift that used to drive the stale/empty-queue bug.
+    pub fn scope(&self) -> Scope {
+        let tenant_id = self
+            .selected_tenant
+            .read()
+            .as_ref()
+            .map(|t| t.id.clone());
+        let project_id = self
+            .selected_project
+            .read()
+            .as_ref()
+            .map(|p| p.id.clone());
+        match (tenant_id, project_id) {
+            (None, _) => Scope::All,
+            (Some(tenant_id), None) => Scope::Tenant { tenant_id },
+            (Some(tenant_id), Some(project_id)) => Scope::Project {
+                tenant_id,
+                project_id,
+            },
+        }
+    }
+
     pub fn project_display_name(&self, tenant_id: &str, project_id: &str) -> String {
         if let Some(projects) = self.tenant_projects.read().get(tenant_id)
             && let Some(project) = projects.iter().find(|p| p.id == project_id)

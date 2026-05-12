@@ -78,6 +78,27 @@ pub fn Sidebar() -> Element {
 
                 div {
                     class: "flex-1 overflow-y-auto py-2",
+
+                    // Pseudo-entry: no tenant selected → queue shows all orgs.
+                    {
+                        let is_all = selected_tenant.is_none();
+                        let active_class = if is_all {
+                            "bg-primary/10 text-primary font-semibold"
+                        } else {
+                            "text-muted-foreground hover:bg-accent"
+                        };
+                        rsx! {
+                            div {
+                                class: "px-3 py-2 mx-2 rounded cursor-pointer text-sm transition-colors truncate {active_class}",
+                                onclick: move |_| {
+                                    app_state.selected_tenant.set(None);
+                                    app_state.selected_project.set(None);
+                                },
+                                "All orgs"
+                            }
+                        }
+                    }
+
                     for tenant in tenant_list.iter() {
                         {
                             let is_active = tenant.id == selected_tenant_id;
@@ -124,6 +145,27 @@ pub fn Sidebar() -> Element {
 
                     div {
                         class: "flex-1 overflow-y-auto py-2",
+
+                        // Pseudo-entry: tenant selected, no project → queue
+                        // shows every project in this tenant.
+                        {
+                            let is_all = app_state.selected_project.read().is_none();
+                            let active_class = if is_all {
+                                "bg-primary/10 text-primary font-medium border-l-2 border-primary"
+                            } else {
+                                "text-muted-foreground hover:bg-accent hover:text-foreground"
+                            };
+                            rsx! {
+                                div {
+                                    class: "px-4 py-2 mx-2 rounded cursor-pointer text-sm transition-colors {active_class}",
+                                    onclick: move |_| {
+                                        app_state.selected_project.set(None);
+                                    },
+                                    "All projects"
+                                }
+                            }
+                        }
+
                         for project in projects_for_selected.iter() {
                             {
                                 let is_active = project.id == selected_project_id;

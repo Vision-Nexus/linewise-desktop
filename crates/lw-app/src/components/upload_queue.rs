@@ -85,15 +85,40 @@ pub fn UploadQueue() -> Element {
     // Transcode dialog state: Some(task_id) = dialog open for that task
     let mut transcode_dialog_task: Signal<Option<String>> = use_signal(|| None);
 
-    let tasks = app_state.upload_tasks.read();
-    let has_context =
-        app_state.selected_tenant.read().is_some() && app_state.selected_project.read().is_some();
+    // Scope drives everything visible below. `All` shows every task,
+    // `Tenant` narrows to one org, `Project` narrows to one (org, project)
+    // pair — and is the only scope in which staging new uploads makes
+    // sense (the engine needs both ids). This replaces the old
+    // `has_context` boolean, which couldn't express the tenant-only view
+    // and left the queue empty on sign-in.
+    let scope = app_state.scope();
+    let can_upload = scope.is_uploadable();
+
+    let all_tasks = app_state.upload_tasks.read();
+    let tasks: Vec<UploadTask> = all_tasks
+        .iter()
+        .filter(|t| scope.matches(&t.tenant_id, &t.project_id))
+        .cloned()
+        .collect();
 
     let staged_count = tasks
         .iter()
         .filter(|t| t.state == UploadState::Staged)
         .count();
     let _active_count = tasks.iter().filter(|t| t.state.is_active()).count();
+
+    // Human-readable label for the Add Files button, e.g. "Add Files to
+    // Acme / Website". Only rendered when `can_upload`, so both reads are
+    // guaranteed to be `Some` in practice — still, fall back gracefully.
+    let add_files_label = match (
+        app_state.selected_tenant.read().as_ref(),
+        app_state.selected_project.read().as_ref(),
+    ) {
+        (Some(tenant), Some(project)) => {
+            format!("Add Files to {} / {}", tenant.display_name, project.name)
+        }
+        _ => "Add Files".to_string(),
+    };
 
     // Stage files (step 1)
     let engine_for_add = services.upload_engine.clone();
@@ -288,7 +313,7 @@ pub fn UploadQueue() -> Element {
     let app_state_drop = app_state.clone();
     let on_drop = move |evt: DragEvent| {
         is_dragging.set(false);
-        if !has_context {
+        if !can_upload {
             return;
         }
         let engine = engine_for_drop.clone();
@@ -318,7 +343,7 @@ pub fn UploadQueue() -> Element {
         });
     };
 
-    let drop_border = if *is_dragging.read() && has_context {
+    let drop_border = if *is_dragging.read() && can_upload {
         "2px dashed var(--border-focus)"
     } else {
         "2px dashed transparent"
@@ -359,12 +384,12 @@ pub fn UploadQueue() -> Element {
                 h2 { style: "margin: 0; font-size: 16px;", "Upload Queue" }
                 div {
                     style: "display: flex; gap: 8px; align-items: center;",
-                    if has_context {
+                    if can_upload {
                         button {
                             class: "btn-primary",
                             style: "{styles::BTN_PRIMARY}",
                             onclick: on_add_files,
-                            "Add Files"
+                            "{add_files_label}"
                         }
                         if staged_count > 0 {
                             {
@@ -384,15 +409,20 @@ pub fn UploadQueue() -> Element {
                             }
                         }
                     } else {
-                        button { style: "{styles::BTN_DISABLED}", disabled: true, "Add Files" }
+                        button {
+                            style: "{styles::BTN_DISABLED}",
+                            disabled: true,
+                            title: "Select a project in the sidebar to enable uploading",
+                            "Add Files"
+                        }
                     }
                 }
             }
 
-            if !has_context {
+            if !can_upload && tasks.is_empty() {
                 div {
                     style: "text-align: center; padding: 48px 16px; color: var(--text-muted); font-size: 14px;",
-                    "Select an organization and project to start uploading"
+                    "Select a project in the sidebar to start uploading"
                 }
             } else {
                 // Staged files (step 1)
@@ -468,12 +498,18 @@ pub fn UploadQueue() -> Element {
                     }
                 }
 
-                // Empty state
+                // Empty state. Wording tracks the scope — only prompt for
+                // drop/add when the current scope can actually accept new
+                // uploads (Project scope).
                 if staged.is_empty() && transcoding.is_empty() && active.is_empty() && history.is_empty() {
                     div {
                         style: "text-align: center; padding: 48px 16px; color: var(--text-muted);",
                         p { style: "font-size: 14px; margin: 0 0 4px;", "No files in queue" }
-                        p { style: "font-size: 13px; margin: 0;", "Drop files here or click \"Add Files\"" }
+                        if can_upload {
+                            p { style: "font-size: 13px; margin: 0;", "Drop files here or click \"Add Files\"" }
+                        } else {
+                            p { style: "font-size: 13px; margin: 0;", "Select a project in the sidebar to start uploading" }
+                        }
                     }
                 }
             }
