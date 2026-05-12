@@ -136,6 +136,61 @@ pub fn SettingsIcon() -> Element {
 }
 
 #[component]
+pub fn MinimizeIcon() -> Element {
+    rsx! {
+        svg {
+            width: "16",
+            height: "16",
+            view_box: "0 0 24 24",
+            fill: "none",
+            xmlns: "http://www.w3.org/2000/svg",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            line { x1: "6", y1: "12", x2: "18", y2: "12" }
+        }
+    }
+}
+
+#[component]
+pub fn MaximizeIcon() -> Element {
+    rsx! {
+        svg {
+            width: "16",
+            height: "16",
+            view_box: "0 0 24 24",
+            fill: "none",
+            xmlns: "http://www.w3.org/2000/svg",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            rect { x: "6", y: "6", width: "12", height: "12", rx: "1" }
+        }
+    }
+}
+
+#[component]
+pub fn RestoreIcon() -> Element {
+    rsx! {
+        svg {
+            width: "16",
+            height: "16",
+            view_box: "0 0 24 24",
+            fill: "none",
+            xmlns: "http://www.w3.org/2000/svg",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            rect { x: "9", y: "5", width: "10", height: "10", rx: "1" }
+            rect { x: "5", y: "9", width: "10", height: "10", rx: "1", fill: "var(--bg, white)" }
+        }
+    }
+}
+
+#[component]
 pub fn MicrosoftIcon() -> Element {
     rsx! {
         svg {

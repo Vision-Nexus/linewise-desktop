@@ -208,11 +208,22 @@ pub fn App() -> Element {
         _ => {}
     });
 
-    // Handle tray icon click — show window
-    dioxus::desktop::use_tray_icon_event_handler(move |_event| {
-        let window = dioxus::desktop::window();
-        window.set_visible(true);
-        window.set_focus();
+    // Handle tray icon click — show window. The handler fires on EVERY
+    // TrayIconEvent (including Enter/Move/Leave), so gate on left-button
+    // click-up only to avoid pulling focus when the cursor just passes
+    // over the tray icon.
+    dioxus::desktop::use_tray_icon_event_handler(move |event| {
+        use dioxus::desktop::trayicon::{MouseButton, MouseButtonState, TrayIconEvent};
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = event
+        {
+            let window = dioxus::desktop::window();
+            window.set_visible(true);
+            window.set_focus();
+        }
     });
 
     let app_state = use_context::<AppState>();
@@ -245,15 +256,22 @@ pub fn App() -> Element {
         style { "{TAILWIND_CSS}" }
         style { "{DX_COMPONENTS_THEME_CSS}" }
         style { "{lw_chat::styles::CHAT_CSS}" }
-        if is_restoring {
-            div { class: "loading-screen",
-                span { class: "spinner" }
-                span { "Signing in..." }
+        div {
+            class: "flex flex-col h-screen w-screen overflow-hidden",
+            crate::components::title_bar::TitleBar {}
+            div {
+                class: "flex-1 min-h-0 overflow-hidden",
+                if is_restoring {
+                    div { class: "loading-screen",
+                        span { class: "spinner" }
+                        span { "Signing in..." }
+                    }
+                } else if !is_authenticated {
+                    LoginPage {}
+                } else {
+                    MainView {}
+                }
             }
-        } else if !is_authenticated {
-            LoginPage {}
-        } else {
-            MainView {}
         }
     }
 }
@@ -328,7 +346,7 @@ fn MainView() -> Element {
 
     rsx! {
         div {
-            style: "display: flex; height: 100vh; position: relative;",
+            style: "display: flex; height: 100%; position: relative;",
 
             crate::components::sidebar::Sidebar {}
 

@@ -69,11 +69,38 @@ fn main() {
                 .body(body)
                 .expect("failed to build protocol response")
         })
-        .with_window(
-            dioxus::desktop::WindowBuilder::new()
-                .with_title("Linewise Upload")
-                .with_inner_size(dioxus::desktop::LogicalSize::new(1200.0, 750.0)),
-        );
+        .with_window(build_window());
 
     LaunchBuilder::desktop().with_cfg(cfg).launch(app::App);
+}
+
+/// Builds the main window with the right chrome for the current OS.
+///
+/// macOS uses the native transparent-titlebar + fullsize-content-view
+/// pattern: the traffic-light buttons stay (users expect them in their
+/// usual position) and the window title is hidden, while our custom bar
+/// renders underneath and extends to the top edge. Content is padded to
+/// clear the traffic lights via `TitleBar`.
+///
+/// Windows and Linux go fully frameless — we render our own min/max/close
+/// buttons in `WindowControls`.
+#[cfg(target_os = "macos")]
+fn build_window() -> dioxus::desktop::WindowBuilder {
+    use dioxus::desktop::tao::platform::macos::WindowBuilderExtMacOS;
+    dioxus::desktop::WindowBuilder::new()
+        .with_title("Linewise Upload")
+        .with_titlebar_transparent(true)
+        .with_title_hidden(true)
+        .with_fullsize_content_view(true)
+        .with_resizable(true)
+        .with_inner_size(dioxus::desktop::LogicalSize::new(1200.0, 750.0))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_window() -> dioxus::desktop::WindowBuilder {
+    dioxus::desktop::WindowBuilder::new()
+        .with_title("Linewise Upload")
+        .with_decorations(false)
+        .with_resizable(true)
+        .with_inner_size(dioxus::desktop::LogicalSize::new(1200.0, 750.0))
 }

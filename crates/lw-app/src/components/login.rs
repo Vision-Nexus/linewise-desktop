@@ -115,7 +115,7 @@ pub fn LoginPage() -> Element {
 
     rsx! {
         div {
-            class: "flex h-screen w-full",
+            class: "flex h-full w-full",
 
             // Left panel — login form
             main {

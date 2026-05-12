@@ -7,6 +7,7 @@ pub mod sidebar;
 pub mod slider;
 pub mod switch;
 pub mod tenant_select;
+pub mod title_bar;
 pub mod toggle_group;
 pub mod transcode_dialog;
 pub mod transcode_settings;
