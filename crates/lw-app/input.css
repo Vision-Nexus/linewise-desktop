@@ -4,7 +4,12 @@
 
 @custom-variant dark (@media (prefers-color-scheme: dark));
 
-@theme inline {
+/* Tokens are declared without `inline` so utilities emit
+ * `background-color: var(--color-background)` (etc.) rather than
+ * inlining literal colors at build time. This lets the
+ * `@media (prefers-color-scheme: dark)` overrides below actually
+ * take effect — with `inline`, the dark block was dead code. */
+@theme {
   --radius-sm: calc(0.625rem - 4px);
   --radius-md: calc(0.625rem - 2px);
   --radius-lg: 0.625rem;
