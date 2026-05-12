@@ -35,6 +35,21 @@ pub struct CoreServices {
     pub event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<UploadEvent>>>,
 }
 
+/// Identity-based equality for Dioxus prop memoization. Two `CoreServices`
+/// are "equal" iff they share the same underlying Arc handles — i.e. they
+/// come from the same `init()` call. After a reset-and-retry the new
+/// services have fresh Arcs, so `PartialEq` returns false and Dioxus
+/// remounts the dependent subtree.
+impl PartialEq for CoreServices {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.auth, &other.auth)
+            && Arc::ptr_eq(&self.api, &other.api)
+            && Arc::ptr_eq(&self.db, &other.db)
+            && Arc::ptr_eq(&self.upload_engine, &other.upload_engine)
+            && Arc::ptr_eq(&self.event_rx, &other.event_rx)
+    }
+}
+
 impl CoreServices {
     pub async fn init() -> Result<Self, String> {
         let config = AppConfig::load().map_err(|e| format!("Config error: {e}"))?;

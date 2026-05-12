@@ -4,6 +4,7 @@ use crate::state::{AppState, CoreServices};
 use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
 use dioxus::prelude::*;
 use lw_chat::{ChatConfig, ChatPanel};
+use std::sync::Arc;
 
 const TAILWIND_CSS: &str = include_str!("../tailwind.generated.css");
 const DX_COMPONENTS_THEME_CSS: &str = include_str!("../assets/dx-components-theme.css");
@@ -180,24 +181,31 @@ input:focus { border-color: var(--border-focus) !important; box-shadow: var(--fo
 .stagger { animation: fadeIn 0.2s ease-out backwards; }
 "#;
 
+/// Boot phase. `App` drives `CoreServices::init()` off-thread and flips
+/// through these states. `Ready` is the only branch that provides the
+/// `CoreServices` context and mounts `AppInner`, so downstream components
+/// (which unconditionally `use_context::<CoreServices>()`) never see a
+/// missing or half-constructed service.
+#[derive(Clone)]
+enum BootState {
+    Initializing,
+    Ready(Arc<CoreServices>),
+    Failed(String),
+}
+
 #[component]
 pub fn App() -> Element {
+    // AppState is cheap and never fails, so it's safe to provide here and
+    // let the recovery screen read from it too.
     use_context_provider(AppState::new);
-    use_context_provider(|| {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(CoreServices::init())
-                .expect("failed to initialize core services")
-        })
-    });
 
-    // Initialize system tray
+    // Tray init has to happen exactly once over the lifetime of the
+    // process; do it here so it's live even while we're still booting or
+    // recovering from a DB error.
     use_hook(|| {
         let menu = build_tray_menu();
         init_tray_icon(menu, None);
     });
-
-    // Handle tray menu events
     dioxus::desktop::use_tray_menu_event_handler(move |event| match event.id().0.as_str() {
         "show" => {
             let window = dioxus::desktop::window();
@@ -207,11 +215,6 @@ pub fn App() -> Element {
         "quit" => std::process::exit(0),
         _ => {}
     });
-
-    // Handle tray icon click — show window. The handler fires on EVERY
-    // TrayIconEvent (including Enter/Move/Leave), so gate on left-button
-    // click-up only to avoid pulling focus when the cursor just passes
-    // over the tray icon.
     dioxus::desktop::use_tray_icon_event_handler(move |event| {
         use dioxus::desktop::trayicon::{MouseButton, MouseButtonState, TrayIconEvent};
         if let TrayIconEvent::Click {
@@ -226,11 +229,72 @@ pub fn App() -> Element {
         }
     });
 
+    let mut boot = use_signal(|| BootState::Initializing);
+
+    // Bootstrap effect — re-runs when `boot` is flipped back to
+    // `Initializing` by the recovery screen (Retry / Reset → retry).
+    use_future(move || async move {
+        // Short-circuit if we're already Ready / Failed — the effect ran
+        // for that phase and the user hasn't asked to retry yet.
+        if !matches!(&*boot.read(), BootState::Initializing) {
+            return;
+        }
+        match CoreServices::init().await {
+            Ok(services) => boot.set(BootState::Ready(Arc::new(services))),
+            Err(e) => {
+                tracing::error!("Core services failed to initialize: {e}");
+                boot.set(BootState::Failed(e));
+            }
+        }
+    });
+
+    let state = boot.read().clone();
+
+    rsx! {
+        style { "{GLOBAL_CSS}" }
+        style { "{TAILWIND_CSS}" }
+        style { "{DX_COMPONENTS_THEME_CSS}" }
+        style { "{lw_chat::styles::CHAT_CSS}" }
+        div {
+            class: "flex flex-col h-screen w-screen overflow-hidden",
+            crate::components::title_bar::TitleBar {}
+            div {
+                class: "flex-1 min-h-0 overflow-hidden",
+                match state {
+                    BootState::Initializing => rsx! {
+                        div { class: "loading-screen",
+                            span { class: "spinner" }
+                            span { "Starting up..." }
+                        }
+                    },
+                    BootState::Failed(error) => rsx! {
+                        DbErrorScreen {
+                            error,
+                            on_retry: move |_| boot.set(BootState::Initializing),
+                        }
+                    },
+                    BootState::Ready(services) => rsx! {
+                        AuthedShell { services }
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Renders the login/main split. Receives the initialized `CoreServices`
+/// as a prop and publishes it into the context tree so deeply-nested
+/// children (upload queue, chat panel, etc.) can reach it via
+/// `use_context`.
+#[component]
+fn AuthedShell(services: Arc<CoreServices>) -> Element {
+    let services_for_ctx: CoreServices = (*services).clone();
+    use_context_provider(|| services_for_ctx);
+
     let app_state = use_context::<AppState>();
     let services = use_context::<CoreServices>();
     let mut restoring = use_signal(|| true);
 
-    // Try to restore session on first render
     let app_state_restore = app_state.clone();
     use_future(move || {
         let auth = services.auth.clone();
@@ -252,24 +316,125 @@ pub fn App() -> Element {
     let is_restoring = *restoring.read();
 
     rsx! {
-        style { "{GLOBAL_CSS}" }
-        style { "{TAILWIND_CSS}" }
-        style { "{DX_COMPONENTS_THEME_CSS}" }
-        style { "{lw_chat::styles::CHAT_CSS}" }
+        if is_restoring {
+            div { class: "loading-screen",
+                span { class: "spinner" }
+                span { "Signing in..." }
+            }
+        } else if !is_authenticated {
+            LoginPage {}
+        } else {
+            MainView {}
+        }
+    }
+}
+
+#[component]
+fn DbErrorScreen(error: String, on_retry: EventHandler<()>) -> Element {
+    let mut resetting = use_signal(|| false);
+    let mut reset_error: Signal<Option<String>> = use_signal(|| None);
+    let mut confirming = use_signal(|| false);
+
+    let on_confirm_reset = move |_| {
+        if *resetting.read() {
+            return;
+        }
+        resetting.set(true);
+        reset_error.set(None);
+        // `reset_local_files` is synchronous file I/O — fast enough to run
+        // on the UI thread. On success, flip back to Initializing so the
+        // outer bootstrap re-runs.
+        match lw_core::db::Database::reset_local_files() {
+            Ok(()) => {
+                tracing::info!("Local database reset; retrying initialization");
+                resetting.set(false);
+                confirming.set(false);
+                on_retry.call(());
+            }
+            Err(e) => {
+                tracing::error!("Failed to reset local database: {e}");
+                reset_error.set(Some(e.to_string()));
+                resetting.set(false);
+            }
+        }
+    };
+
+    let db_path = lw_core::config::AppConfig::db_path();
+    let db_path_display = db_path.display().to_string();
+    let is_busy = *resetting.read();
+
+    rsx! {
         div {
-            class: "flex flex-col h-screen w-screen overflow-hidden",
-            crate::components::title_bar::TitleBar {}
+            class: "h-full w-full flex items-center justify-center p-8",
             div {
-                class: "flex-1 min-h-0 overflow-hidden",
-                if is_restoring {
-                    div { class: "loading-screen",
-                        span { class: "spinner" }
-                        span { "Signing in..." }
+                class: "max-w-[520px] w-full flex flex-col gap-4 bg-background border border-border rounded-lg p-6 shadow-md",
+
+                h2 {
+                    class: "text-lg font-semibold text-foreground",
+                    "Couldn't open the local database"
+                }
+                p {
+                    class: "text-sm text-muted-foreground",
+                    "Linewise Desktop tracks upload history in a local SQLite file. The app couldn't open or migrate it, so it can't start."
+                }
+                div {
+                    class: "text-xs font-mono bg-destructive-light text-destructive border border-destructive rounded px-3 py-2 whitespace-pre-wrap break-words",
+                    "{error}"
+                }
+                p {
+                    class: "text-xs text-muted-foreground",
+                    "Database file: "
+                    span { class: "font-mono", "{db_path_display}" }
+                }
+
+                if *confirming.read() {
+                    div {
+                        class: "flex flex-col gap-3 border-t border-border pt-4",
+                        p {
+                            class: "text-sm text-foreground",
+                            "Reset deletes the local database. Upload history is lost, but no uploaded files are affected — every completed upload lives on the server."
+                        }
+                        if let Some(err) = reset_error.read().as_ref() {
+                            div {
+                                class: "text-xs text-destructive bg-destructive-light border border-destructive rounded px-3 py-2",
+                                "{err}"
+                            }
+                        }
+                        div {
+                            class: "flex gap-2 justify-end",
+                            button {
+                                class: "h-9 px-4 text-sm rounded border border-border bg-background text-foreground hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer",
+                                disabled: is_busy,
+                                onclick: move |_| confirming.set(false),
+                                "Cancel"
+                            }
+                            button {
+                                class: "h-9 px-4 text-sm rounded bg-destructive text-destructive-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer",
+                                disabled: is_busy,
+                                onclick: on_confirm_reset,
+                                if is_busy {
+                                    span { class: "spinner spinner-sm mr-1" }
+                                    "Resetting..."
+                                } else {
+                                    "Delete and Retry"
+                                }
+                            }
+                        }
                     }
-                } else if !is_authenticated {
-                    LoginPage {}
                 } else {
-                    MainView {}
+                    div {
+                        class: "flex gap-2 justify-end border-t border-border pt-4",
+                        button {
+                            class: "h-9 px-4 text-sm rounded border border-border bg-background text-foreground hover:bg-accent cursor-pointer",
+                            onclick: move |_| on_retry.call(()),
+                            "Retry"
+                        }
+                        button {
+                            class: "h-9 px-4 text-sm rounded bg-destructive text-destructive-foreground hover:opacity-90 cursor-pointer",
+                            onclick: move |_| confirming.set(true),
+                            "Reset local database"
+                        }
+                    }
                 }
             }
         }

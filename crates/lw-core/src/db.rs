@@ -66,6 +66,37 @@ impl From<UploadRow> for UploadTask {
 }
 
 impl Database {
+    /// Delete the on-disk SQLite database so the next `open()` call starts
+    /// from a fresh schema. Used as an escape hatch when a migration fails
+    /// on a legacy DB that we can't resolve in place. Also removes the
+    /// WAL / SHM sidecar files, otherwise SQLite can replay a stale log
+    /// against the new DB and re-corrupt it.
+    ///
+    /// The upload queue is local-only state: every task has a remote
+    /// counterpart (either a staged file on disk the user can re-add, or
+    /// an already-uploaded document tracked by the API), so resetting is
+    /// safe — the user loses queue history but no uploaded data.
+    pub fn reset_local_files() -> Result<(), DbError> {
+        let db_path = AppConfig::db_path();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = db_path.clone();
+            let file_name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(name) => format!("{name}{suffix}"),
+                None => continue,
+            };
+            p.set_file_name(file_name);
+            if p.exists()
+                && let Err(e) = std::fs::remove_file(&p)
+            {
+                return Err(DbError::Migration(format!(
+                    "Failed to remove {}: {e}",
+                    p.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn open() -> Result<Self, DbError> {
         let db_path = AppConfig::db_path();
         std::fs::create_dir_all(db_path.parent().expect("db path must have parent"))
