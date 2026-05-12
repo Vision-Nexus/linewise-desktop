@@ -306,7 +306,8 @@ fn AuthedShell(services: Arc<CoreServices>) -> Element {
     let services_for_ctx: CoreServices = (*services).clone();
     use_context_provider(|| services_for_ctx);
 
-    let app_state = use_context::<AppState>();
+    let mut app_state = use_context::<AppState>();
+    app_state.services.set(Some((*services).clone()));
     let services = use_context::<CoreServices>();
     let mut restoring = use_signal(|| true);
 

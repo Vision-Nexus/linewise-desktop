@@ -118,6 +118,7 @@ pub struct AppState {
     pub auth_token: Signal<String>,
     pub show_settings: Signal<bool>,
     pub toast: Signal<Option<Toast>>,
+    pub services: Signal<Option<CoreServices>>,
 }
 
 /// Lightweight toast notification. Only one toast lives at a time — a
@@ -194,6 +195,7 @@ impl AppState {
             auth_token: Signal::new(String::new()),
             show_settings: Signal::new(false),
             toast: Signal::new(None),
+            services: Signal::new(None),
         }
     }
 

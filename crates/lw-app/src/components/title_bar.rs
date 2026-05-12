@@ -14,7 +14,7 @@
 //! flex-1 spacer intentionally lets mousedown bubble so the empty middle
 //! region acts as a drag handle.
 
-use crate::state::{AppState, CoreServices};
+use crate::state::AppState;
 use dioxus::prelude::*;
 
 fn begin_drag() {
@@ -237,8 +237,11 @@ fn WindowControls() -> Element {
 
 #[component]
 fn SignOutButton() -> Element {
-    let services = use_context::<CoreServices>();
     let app_state = use_context::<AppState>();
+    let services = app_state.services.read().clone();
+    let Some(services) = services else {
+        return rsx! {};
+    };
     let app_state_signout = app_state.clone();
     let mut signing_out = use_signal(|| false);
 
