@@ -1,3 +1,4 @@
+pub mod general_settings;
 pub mod login;
 pub mod progress;
 pub mod project_select;

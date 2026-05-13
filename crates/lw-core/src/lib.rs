@@ -5,6 +5,7 @@ pub mod db;
 pub mod dedup;
 pub mod desensitize;
 pub mod error;
+pub mod logging;
 pub mod models;
 pub mod storage;
 pub mod transcode;

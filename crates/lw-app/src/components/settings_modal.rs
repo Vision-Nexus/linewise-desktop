@@ -1,3 +1,4 @@
+use crate::components::general_settings::GeneralSettingsPane;
 use crate::components::transcode_settings::TranscodeSettingsPane;
 use crate::components::upload_settings::UploadSettingsPane;
 use crate::state::AppState;
@@ -54,6 +55,13 @@ pub fn SettingsModal(on_close: EventHandler<()>) -> Element {
                 // Transcode section
                 SectionHeader { label: "Transcode" }
                 TranscodeSettingsPane {}
+
+                // Divider
+                div { style: "height: 1px; background: var(--border); margin: 20px 0;" }
+
+                // General section (logging, etc.)
+                SectionHeader { label: "General" }
+                GeneralSettingsPane {}
 
                 // Divider
                 div { style: "height: 1px; background: var(--border); margin: 20px 0;" }

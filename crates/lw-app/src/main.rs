@@ -18,15 +18,24 @@ static LOGIN_IMG: &[u8] = include_bytes!("../../../assets/login-img.png");
 const SENTRY_DSN: &str = "https://cf5b74f304f4ea35de113d3ac566b957@o4509472431407104.ingest.us.sentry.io/4511116827820032";
 
 fn main() {
-    // Initialize Sentry — must be before tracing so the guard lives longest
-    let environment = lw_core::config::AppConfig::load()
-        .map(|c| match c.server.environment {
-            lw_core::config::Environment::Dev => "dev",
-            lw_core::config::Environment::Testing => "testing",
-            lw_core::config::Environment::Production => "production",
-        })
-        .unwrap_or("dev");
+    // Load config once — used for both Sentry environment and log level.
+    // Falling back to defaults is deliberate: we still want a usable app if
+    // config.toml is missing or malformed on a fresh install.
+    let config = match lw_core::config::AppConfig::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: failed to load config ({e}); using defaults");
+            lw_core::config::AppConfig::default()
+        }
+    };
 
+    let environment = match config.server.environment {
+        lw_core::config::Environment::Dev => "dev",
+        lw_core::config::Environment::Testing => "testing",
+        lw_core::config::Environment::Production => "production",
+    };
+
+    // Initialize Sentry — must be before tracing so the guard lives longest
     let _sentry_guard = sentry::init((
         SENTRY_DSN,
         sentry::ClientOptions {
@@ -37,10 +46,35 @@ fn main() {
         },
     ));
 
-    // Tracing: fmt layer for console + sentry layer for error reporting
+    // Rolling daily file appender, retaining the last 14 days. The
+    // WorkerGuard returned by `non_blocking` must live for the whole
+    // program — drop it and the background flush thread shuts down,
+    // losing buffered lines. We deliberately abort startup if file
+    // logging cannot be set up: this is an internal-user app where
+    // logs are a debugging requirement, not a nice-to-have.
+    let log_dir = lw_core::logging::ensure_log_dir().expect("failed to create log directory");
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(lw_core::logging::LOG_FILENAME_PREFIX)
+        .filename_suffix(lw_core::logging::LOG_FILENAME_SUFFIX)
+        .max_log_files(14)
+        .build(&log_dir)
+        .expect("failed to build rolling log file appender");
+    let (file_writer, _file_guard) = tracing_appender::non_blocking(file_appender);
+
+    // Filter precedence: RUST_LOG > config.app.log_filter > built-in default.
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(&config.app.log_filter))
+        .unwrap_or_else(|_| EnvFilter::new(lw_core::logging::DEFAULT_LOG_FILTER));
+
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file_writer),
+        )
         .with(sentry_tracing::layer())
         .init();
 

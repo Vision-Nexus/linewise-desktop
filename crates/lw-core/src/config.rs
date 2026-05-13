@@ -184,12 +184,14 @@ pub struct GeneralConfig {
     pub auto_start: bool,
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
+    /// Tracing-subscriber EnvFilter directive — supports per-crate levels
+    /// (e.g. `info,lw_app=trace`). Accepts a plain level too (e.g. `debug`).
+    #[serde(default = "default_log_filter")]
+    pub log_filter: String,
 }
 
-fn default_log_level() -> String {
-    "info".to_string()
+fn default_log_filter() -> String {
+    crate::logging::DEFAULT_LOG_FILTER.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,7 +234,7 @@ impl Default for AppConfig {
             app: GeneralConfig {
                 auto_start: false,
                 minimize_to_tray: true,
-                log_level: "info".to_string(),
+                log_filter: default_log_filter(),
             },
             watch_folders: Vec::new(),
         }
