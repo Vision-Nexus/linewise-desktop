@@ -1,15 +1,44 @@
 use crate::components::progress::{Progress, ProgressIndicator};
 use crate::components::transcode_dialog::TranscodeDialog;
-use crate::state::{AppState, CoreServices};
+use crate::state::{AppState, CoreServices, ToastKind};
 use crate::styles;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use lw_core::config::TranscodeConfig;
+use lw_core::error::UploadError;
 use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload::UploadEvent;
 use lw_core::video;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Formats a staging error into a user-facing toast string. Expected
+/// rejections (the user picked a file we can't accept) get a "Cannot
+/// upload" prefix and the typed error's `Display` as the reason.
+/// Unexpected failures (network, IO, API, DB) get a "Failed to add"
+/// prefix — they look the same to the user, but the prefix matches the
+/// log-level distinction in `UploadError::log`.
+///
+/// Listed exhaustively rather than via a catch-all so that adding a new
+/// `UploadError` variant forces a deliberate routing decision here.
+fn stage_error_toast(path: &Path, err: &UploadError) -> String {
+    let filename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    match err {
+        UploadError::VideoUnplayable { .. }
+        | UploadError::Duplicate { .. }
+        | UploadError::FileTooLarge { .. }
+        | UploadError::FileNotFound(_)
+        | UploadError::Cancelled => format!("Cannot upload \"{filename}\": {err}"),
+        UploadError::Api { .. }
+        | UploadError::GcsUpload { .. }
+        | UploadError::Network(_)
+        | UploadError::Io(_)
+        | UploadError::Database(_) => format!("Failed to add \"{filename}\": {err}"),
+    }
+}
 
 #[component]
 pub fn UploadQueue() -> Element {
@@ -139,6 +168,7 @@ pub fn UploadQueue() -> Element {
             .as_ref()
             .map(|p| p.id.clone())
             .unwrap_or_default();
+        let mut app_state_for_toast = app_state_add.clone();
 
         spawn(async move {
             let files = rfd::AsyncFileDialog::new()
@@ -149,7 +179,8 @@ pub fn UploadQueue() -> Element {
             for file in files {
                 let path = PathBuf::from(file.path());
                 if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
-                    tracing::error!("Failed to stage file: {e}");
+                    e.log("Stage file");
+                    app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
                 }
             }
         });
@@ -244,7 +275,7 @@ pub fn UploadQueue() -> Element {
                 let eng = engine.clone();
                 tokio::spawn(async move {
                     if let Err(e) = eng.process_task(&mut task).await {
-                        tracing::error!("Retry failed for {}: {e}", task.filename);
+                        e.log(format_args!("Retry of {}", task.filename));
                     }
                 });
             }
@@ -287,7 +318,7 @@ pub fn UploadQueue() -> Element {
                 let eng = engine.clone();
                 tokio::spawn(async move {
                     if let Err(e) = eng.process_task(&mut task).await {
-                        tracing::error!("Resume failed for {}: {e}", task.filename);
+                        e.log(format_args!("Resume of {}", task.filename));
                     }
                 });
             }
@@ -329,6 +360,7 @@ pub fn UploadQueue() -> Element {
             .as_ref()
             .map(|p| p.id.clone())
             .unwrap_or_default();
+        let mut app_state_for_toast = app_state_drop.clone();
         let files = evt.files();
         spawn(async move {
             for file in files {
@@ -337,7 +369,8 @@ pub fn UploadQueue() -> Element {
                     continue;
                 }
                 if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
-                    tracing::error!("Failed to stage dropped file: {e}");
+                    e.log("Stage dropped file");
+                    app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
                 }
             }
         });

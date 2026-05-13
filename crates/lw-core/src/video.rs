@@ -25,24 +25,38 @@ pub async fn validate_video(path: &Path) -> Result<VideoValidationResult, VideoV
 }
 
 fn probe_and_validate(path: &Path) -> Result<VideoValidationResult, VideoValidationError> {
-    let ictx = ffmpeg_next::format::input(path)
-        .map_err(|e| VideoValidationError::ProbeFailed(format!("Failed to open: {e}")))?;
+    // Treat the three structural failure points below as `Unplayable`. They
+    // fire when the container has no usable timeline — most often a missing
+    // `moov` atom from a power-cut MP4/MOV recording, but also truncated
+    // headers and unreadable codec parameters. The libav error string is
+    // already informative ("Invalid data found when processing input" for
+    // the moov case), so we keep it in the reason field.
+    let ictx = ffmpeg_next::format::input(path).map_err(|e| VideoValidationError::Unplayable {
+        reason: format!(
+            "container could not be opened (likely missing moov atom or truncated): {e}"
+        ),
+    })?;
 
-    // Find video stream
     let video_stream = ictx
         .streams()
         .best(ffmpeg_next::media::Type::Video)
-        .ok_or_else(|| {
-            VideoValidationError::UnsupportedFormat("No video stream found".to_string())
+        .ok_or_else(|| VideoValidationError::Unplayable {
+            reason: "no video stream in container".to_string(),
         })?;
 
     let video_params = video_stream.parameters();
-    let video_ctx = ffmpeg_next::codec::context::Context::from_parameters(video_params)
-        .map_err(|e| VideoValidationError::ProbeFailed(format!("Video codec context: {e}")))?;
+    let video_ctx =
+        ffmpeg_next::codec::context::Context::from_parameters(video_params).map_err(|e| {
+            VideoValidationError::Unplayable {
+                reason: format!("video stream codec parameters unreadable: {e}"),
+            }
+        })?;
     let video_dec = video_ctx
         .decoder()
         .video()
-        .map_err(|e| VideoValidationError::ProbeFailed(format!("Video decoder: {e}")))?;
+        .map_err(|e| VideoValidationError::Unplayable {
+            reason: format!("video decoder could not be initialised: {e}"),
+        })?;
 
     let width = video_dec.width();
     let height = video_dec.height();
@@ -138,6 +152,44 @@ pub fn transcode_would_help(info: &VideoInfo, cfg: &TranscodeConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writes a minimal ISO-BMFF file containing only an `ftyp` box — no
+    /// `moov`, no `mdat`. This is the shape of a power-cut MP4/MOV: the
+    /// header arrives, but the trailing `moov` (which holds the index)
+    /// never gets written. ffmpeg's `mov,mp4,m4a,3gp` demuxer rejects it
+    /// with "moov atom not found / Invalid data found when processing
+    /// input", which is exactly the case we want to detect.
+    fn write_moovless_mp4(path: &std::path::Path) {
+        // Box layout (big-endian):
+        //   [size:u32][type:'ftyp'][major:'isom'][minor:0][compat:'isom','avc1']
+        // Total: 24 bytes.
+        let bytes: &[u8] = &[
+            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00,
+            0x02, 0x00, b'i', b's', b'o', b'm', b'a', b'v', b'c', b'1',
+        ];
+        std::fs::write(path, bytes).expect("write fixture");
+    }
+
+    #[tokio::test]
+    async fn unplayable_when_moov_missing() {
+        let path =
+            std::env::temp_dir().join(format!("lw-test-no-moov-{}.mp4", uuid::Uuid::new_v4()));
+        write_moovless_mp4(&path);
+
+        let result = validate_video(&path).await;
+
+        let _ = std::fs::remove_file(&path);
+
+        match result {
+            Err(VideoValidationError::Unplayable { reason }) => {
+                assert!(
+                    !reason.is_empty(),
+                    "Unplayable reason should carry the libav error string, got empty"
+                );
+            }
+            other => panic!("expected Unplayable, got {other:?}"),
+        }
+    }
 
     fn info(height: u32, fps: f64, bitrate_kbps: u64) -> VideoInfo {
         VideoInfo {

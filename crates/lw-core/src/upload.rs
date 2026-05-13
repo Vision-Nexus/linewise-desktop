@@ -3,7 +3,7 @@ use crate::config::TranscodeConfig;
 use crate::db::Database;
 use crate::dedup;
 use crate::desensitize;
-use crate::error::{DbError, UploadError};
+use crate::error::{DbError, UploadError, VideoValidationError};
 use crate::models::{CreateDocumentMeta, CreateDocumentRequest, UploadState, UploadTask};
 use crate::storage::{self, StorageBackend};
 use crate::{transcode, video};
@@ -129,10 +129,18 @@ impl UploadEngine {
             .first_or_octet_stream()
             .to_string();
 
-        // Probe video files at staging time so info is available in the UI
+        // Probe video files at staging time so info is available in the UI.
+        // `Unplayable` is fatal — the file has no playable timeline, so we
+        // refuse to stage it at all and let the UI render an immediate error
+        // toast. The other variants (probe environment / codec we don't
+        // understand / transient internal failure) degrade to a warning and
+        // the task still stages without `video_info`.
         let (video_info, validation_warnings) = if mime_type.starts_with("video/") {
             match video::validate_video(path).await {
                 Ok(result) => (Some(result.info), result.warnings),
+                Err(VideoValidationError::Unplayable { reason }) => {
+                    return Err(UploadError::VideoUnplayable { reason });
+                }
                 Err(e) => {
                     tracing::warn!("Video probe failed for {filename}: {e}");
                     (None, Vec::new())
@@ -202,7 +210,7 @@ impl UploadEngine {
                 match engine.process_task(&mut task).await {
                     Ok(()) => tracing::info!("Upload completed: {}", task.filename),
                     Err(e) => {
-                        tracing::error!("Upload failed for {}: {e}", task.filename);
+                        e.log(format_args!("Upload of {}", task.filename));
                         let _ = engine
                             .db
                             .update_upload_state(
@@ -251,7 +259,12 @@ impl UploadEngine {
         }
         let hash = task.hash.clone().unwrap_or_default();
 
-        // Stage 2: Video validation (skip if already probed at staging time)
+        // Stage 2: Video validation (skip if already probed at staging time).
+        // The `Unplayable` branch is defense-in-depth — the staging path
+        // already rejects unplayable files, but a task carried over from a
+        // previous client version may have been staged before that guard
+        // existed. Failing here keeps the bad file from burning transcode
+        // CPU and upload bandwidth before the server rejects it.
         let video_info = if task.video_info.is_some() {
             task.video_info.clone()
         } else if task.mime_type.starts_with("video/") {
@@ -266,6 +279,9 @@ impl UploadEngine {
                         });
                     }
                     Some(result.info)
+                }
+                Err(VideoValidationError::Unplayable { reason }) => {
+                    return Err(UploadError::VideoUnplayable { reason });
                 }
                 Err(e) => {
                     tracing::warn!("Video validation failed for {}: {e}", task.filename);
@@ -539,7 +555,7 @@ impl UploadEngine {
                 match engine.process_task(&mut task).await {
                     Ok(()) => tracing::info!("Upload completed: {}", task.filename),
                     Err(e) => {
-                        tracing::error!("Upload failed for {}: {e}", task.filename);
+                        e.log(format_args!("Upload of {}", task.filename));
                         let _ = engine
                             .db
                             .update_upload_state(
