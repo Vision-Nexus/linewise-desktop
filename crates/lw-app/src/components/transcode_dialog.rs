@@ -19,12 +19,8 @@ const FPS_OPTIONS: &[(u32, &str)] = &[(24, "24fps"), (30, "30fps"), (60, "60fps"
 
 #[component]
 pub fn TranscodeDialog(task_id: String, open: bool, on_close: EventHandler<bool>) -> Element {
-    let app_state = use_context::<AppState>();
-    let mut config = use_signal(|| {
-        lw_core::config::AppConfig::load()
-            .map(|c| c.transcode)
-            .unwrap_or_default()
-    });
+    let mut app_state = use_context::<AppState>();
+    let mut config = use_signal(|| app_state.config.read().transcode.clone());
 
     // Find the task to show estimated output size
     let task_info = app_state
@@ -39,12 +35,10 @@ pub fn TranscodeDialog(task_id: String, open: bool, on_close: EventHandler<bool>
         .map(|info| lw_core::transcode::estimate_transcoded_size(info, &config.read()));
 
     let on_ok = move |_| {
-        // Save config to disk
-        if let Ok(mut app_config) = lw_core::config::AppConfig::load() {
-            app_config.transcode = config.read().clone();
-            if let Err(e) = app_config.save() {
-                tracing::error!("Failed to save transcode config: {e}");
-            }
+        let mut next = app_state.config.read().clone();
+        next.transcode = config.read().clone();
+        if let Err(e) = app_state.save_config(next) {
+            tracing::error!("Failed to save transcode config: {e}");
         }
         on_close.call(true);
     };

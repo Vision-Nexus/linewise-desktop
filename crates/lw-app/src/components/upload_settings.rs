@@ -1,11 +1,11 @@
 use crate::components::switch::{Switch, SwitchThumb};
-use crate::state::CoreServices;
+use crate::state::{AppState, CoreServices};
 use dioxus::prelude::*;
-use lw_core::config::AppConfig;
 
 #[component]
 pub fn UploadSettingsPane() -> Element {
     let services = use_context::<CoreServices>();
+    let mut app_state = use_context::<AppState>();
     let mut auto_clean = use_signal(|| services.upload_engine.auto_clean());
 
     let on_toggle = {
@@ -15,17 +15,12 @@ pub fn UploadSettingsPane() -> Element {
             engine.set_auto_clean(v);
             // 2. Reflect in the UI.
             auto_clean.set(v);
-            // 3. Persist so it survives restart. We reload the file each
-            //    time rather than holding a long-lived copy so we don't
-            //    clobber unrelated fields edited elsewhere.
-            match AppConfig::load() {
-                Ok(mut cfg) => {
-                    cfg.upload.auto_clean = v;
-                    if let Err(e) = cfg.save() {
-                        tracing::error!("Failed to persist auto_clean: {e}");
-                    }
-                }
-                Err(e) => tracing::error!("Failed to load config for auto_clean save: {e}"),
+            // 3. Persist via the live config signal so other readers
+            //    pick up the change without a restart.
+            let mut next = app_state.config.read().clone();
+            next.upload.auto_clean = v;
+            if let Err(e) = app_state.save_config(next) {
+                tracing::error!("Failed to persist auto_clean: {e}");
             }
         }
     };

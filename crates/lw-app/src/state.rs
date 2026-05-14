@@ -3,6 +3,7 @@ use lw_core::api_client::ApiClient;
 use lw_core::auth::{AuthClientConfig, AuthService};
 use lw_core::config::AppConfig;
 use lw_core::db::Database;
+use lw_core::error::ConfigError;
 use lw_core::models::{Project, Tenant, UploadTask, UserInfo};
 use lw_core::upload::{UploadEngine, UploadEvent};
 use std::collections::HashMap;
@@ -115,6 +116,15 @@ pub struct AppState {
     pub show_settings: Signal<bool>,
     pub toast: Signal<Option<Toast>>,
     pub services: Signal<Option<CoreServices>>,
+    /// Live, in-memory `AppConfig`. Settings panes write through
+    /// `save_config` which both persists to disk and updates this
+    /// signal in one step, so any reader (e.g. the upload queue's
+    /// per-task transcode toggle) re-renders on change. The boot
+    /// effect populates this from disk on startup. Treat it as the
+    /// source of truth for any config field that affects UI; the
+    /// `CoreServices.config` field is a frozen snapshot used only by
+    /// services constructed at init time (ApiClient, UploadEngine).
+    pub config: Signal<AppConfig>,
     /// Monotonic counter the root `App` watches; bump it from anywhere
     /// in the tree to ask the bootstrap effect to rebuild
     /// `CoreServices`. Used by the environment switcher in settings —
@@ -198,8 +208,21 @@ impl AppState {
             show_settings: Signal::new(false),
             toast: Signal::new(None),
             services: Signal::new(None),
+            config: Signal::new(AppConfig::default()),
             restart_token: Signal::new(0),
         }
+    }
+
+    /// Persist `next` to `config.toml` and update the live signal in
+    /// one step. Settings panes call this from their Save handler
+    /// instead of `AppConfig::load -> mutate -> save`. Returns the
+    /// disk error so the pane can decide how to surface it (toast).
+    /// On error, the signal is not touched — the on-disk and in-memory
+    /// states stay coherent.
+    pub fn save_config(&mut self, next: AppConfig) -> Result<(), ConfigError> {
+        next.save()?;
+        self.config.set(next);
+        Ok(())
     }
 
     /// Ask the bootstrap effect to re-run `CoreServices::init()`. The

@@ -107,8 +107,12 @@ fn default_processing_mode() -> ProcessingMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscodeConfig {
-    /// Master toggle — false disables transcoding entirely
-    #[serde(default = "default_true")]
+    /// Master toggle — false disables transcoding entirely. Off by
+    /// default for the first public release: most users don't need
+    /// re-encoding, and a wrong codec/CRF choice can degrade footage
+    /// silently. Power users who understand the tradeoffs can flip it
+    /// on from the Transcode settings pane.
+    #[serde(default)]
     pub enabled: bool,
     /// Target video codec (hevc, h264)
     #[serde(default = "default_codec")]
@@ -172,7 +176,7 @@ fn default_hw_accel() -> String {
 impl Default for TranscodeConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             codec: default_codec(),
             crf: default_crf(),
             preset: default_preset(),

@@ -466,7 +466,7 @@ pub fn UploadQueue() -> Element {
                             StagedRow {
                                 key: "{task.id}",
                                 task: task.clone(),
-                                transcode_config: services.config.transcode.clone(),
+                                transcode_config: app_state.config.read().transcode.clone(),
                                 on_remove: on_remove.clone(),
                                 on_transcode_click,
                             }
@@ -608,8 +608,13 @@ fn StagedRow(
         .as_ref()
         .map(|info| video::transcode_would_help(info, &transcode_config))
         .unwrap_or(true);
-    let show_transcode_toggle = is_video && transcode_useful;
-    let show_already_ok_badge = is_video && !transcode_useful;
+    // Master toggle gate: when the feature is disabled in global
+    // settings, don't surface the per-task affordance at all. The
+    // "Already matches targets" badge follows because it only makes
+    // sense relative to a feature the user is using.
+    let feature_enabled = transcode_config.enabled;
+    let show_transcode_toggle = feature_enabled && is_video && transcode_useful;
+    let show_already_ok_badge = feature_enabled && is_video && !transcode_useful;
 
     // Build video info summary line
     let video_summary = task.video_info.as_ref().map(|info| {

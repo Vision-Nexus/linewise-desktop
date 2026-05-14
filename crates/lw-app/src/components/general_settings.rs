@@ -1,6 +1,5 @@
 use crate::state::{AppState, ToastKind};
 use dioxus::prelude::*;
-use lw_core::config::AppConfig;
 use lw_core::logging::DEFAULT_LOG_FILTER;
 
 /// General app settings — currently only the tracing log filter, which
@@ -11,36 +10,23 @@ use lw_core::logging::DEFAULT_LOG_FILTER;
 #[component]
 pub fn GeneralSettingsPane() -> Element {
     let mut app_state = use_context::<AppState>();
-    let initial = AppConfig::load()
-        .map(|c| c.app.log_filter)
-        .unwrap_or_else(|_| DEFAULT_LOG_FILTER.to_string());
+    let initial = app_state.config.read().app.log_filter.clone();
     let mut log_filter = use_signal(|| initial);
 
     let save = move |_| {
         let value = log_filter.read().clone();
-        match AppConfig::load() {
-            Ok(mut cfg) => {
-                cfg.app.log_filter = value;
-                match cfg.save() {
-                    Ok(()) => {
-                        app_state.show_toast(
-                            "Log filter saved — takes effect on next launch",
-                            ToastKind::Success,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to save log_filter: {e}");
-                        app_state
-                            .show_toast(format!("Failed to save settings: {e}"), ToastKind::Error);
-                    }
-                }
+        let mut next = app_state.config.read().clone();
+        next.app.log_filter = value;
+        match app_state.save_config(next) {
+            Ok(()) => {
+                app_state.show_toast(
+                    "Log filter saved — takes effect on next launch",
+                    ToastKind::Success,
+                );
             }
             Err(e) => {
-                tracing::error!("Failed to load config for log_filter save: {e}");
-                app_state.show_toast(
-                    format!("Failed to load config for save: {e}"),
-                    ToastKind::Error,
-                );
+                tracing::error!("Failed to save log_filter: {e}");
+                app_state.show_toast(format!("Failed to save settings: {e}"), ToastKind::Error);
             }
         }
     };

@@ -3,7 +3,7 @@ use crate::components::switch::{Switch, SwitchThumb};
 use crate::components::toggle_group::{ToggleGroup, ToggleItem};
 use crate::state::{AppState, ToastKind};
 use dioxus::prelude::*;
-use lw_core::config::{AppConfig, TranscodeConfig};
+use lw_core::config::TranscodeConfig;
 use lw_core::transcode::probe_availability;
 use std::collections::HashSet;
 
@@ -14,7 +14,9 @@ const AUDIO_BITRATES: &[u32] = &[128, 192];
 #[component]
 pub fn TranscodeSettingsPane() -> Element {
     let mut app_state = use_context::<AppState>();
-    let mut config = use_signal(|| AppConfig::load().map(|c| c.transcode).unwrap_or_default());
+    // Seed local edit-state from the live config signal — anything the
+    // user persists via Save flows back through `AppState::save_config`.
+    let mut config = use_signal(|| app_state.config.read().transcode.clone());
     // Probe ffmpeg + HW encoders once on mount. Safe to re-probe since
     // `ffmpeg_next::init()` is idempotent — but caching keeps the UI snappy.
     let availability = use_signal(|| probe_availability(&config.read()));
@@ -28,27 +30,16 @@ pub fn TranscodeSettingsPane() -> Element {
 
     let save = move |_| {
         let tc = config.read().clone();
-        match AppConfig::load() {
-            Ok(mut app_config) => {
-                app_config.transcode = tc;
-                match app_config.save() {
-                    Ok(()) => {
-                        tracing::info!("Transcode settings saved");
-                        app_state.show_toast("Settings saved", ToastKind::Success);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to save config: {e}");
-                        app_state
-                            .show_toast(format!("Failed to save settings: {e}"), ToastKind::Error);
-                    }
-                }
+        let mut next = app_state.config.read().clone();
+        next.transcode = tc;
+        match app_state.save_config(next) {
+            Ok(()) => {
+                tracing::info!("Transcode settings saved");
+                app_state.show_toast("Settings saved", ToastKind::Success);
             }
             Err(e) => {
-                tracing::error!("Failed to load config for save: {e}");
-                app_state.show_toast(
-                    format!("Failed to load config for save: {e}"),
-                    ToastKind::Error,
-                );
+                tracing::error!("Failed to save config: {e}");
+                app_state.show_toast(format!("Failed to save settings: {e}"), ToastKind::Error);
             }
         }
     };
