@@ -16,15 +16,13 @@ env:
   SQLX_OFFLINE: true
 
 jobs:
-  test:
+  test-mac-windows:
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: ubuntu-26.04
-            target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
 
@@ -58,24 +56,11 @@ jobs:
           key: ${{ matrix.target }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-test-
 
-      # --- FFmpeg setup (mirrors release.yml so test and release agree on
-      #     the libavcodec/libavformat ABI in scope). ---
-
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install ffmpeg pkg-config
           echo "FFMPEG_DIR=$(brew --prefix ffmpeg)" >> $GITHUB_ENV
-
-      - name: Install FFmpeg and system deps (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libavcodec-dev libavformat-dev libavutil-dev \
-            libswscale-dev libswresample-dev libavfilter-dev \
-            libavdevice-dev \
-            ffmpeg pkg-config
 
       - name: Install FFmpeg (Windows)
         if: runner.os == 'Windows'
@@ -89,18 +74,84 @@ jobs:
           echo "FFMPEG_DIR=$ffmpegDir" >> $env:GITHUB_ENV
           echo "$ffmpegDir\bin" >> $env:GITHUB_PATH
 
-      # --- Linux-only system deps for lw-app (Dioxus desktop shell). ---
-      - name: Install lw-app system deps (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
-            libxdo-dev
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
 
-      # --- Lint, build, and tests for the full workspace. lw-core carries
-      #     the test suite; lw-app proves the desktop shell still builds.
-      #     Order matters: fmt and clippy first to fail fast on style/lint
-      #     before spending time on a full build. ---
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo build
+        run: cargo build --workspace
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  # Linux runs inside a Resolute Raccoon container because the
+  # ubuntu-26.04 hosted-runner label isn't published yet. 26.04 ships
+  # FFmpeg 7, matching macOS Homebrew and the BtbN Windows build, which
+  # avoids the libavcodec 58/60 ABI quirks that broke audio fixture
+  # synthesis on the older Ubuntu runners.
+  test-linux:
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:26.04
+
+    steps:
+      # The container is bare — install everything checkout/cache/setup-*
+      # actions implicitly assume on the hosted runner.
+      - name: Install container basics
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libssl-dev sudo
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: clippy, rustfmt
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install npm dependencies (Tailwind CSS)
+        run: npm ci
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: linux-cargo-test-
+
+      - name: Install FFmpeg and system deps
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get install -y --no-install-recommends \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libswscale-dev libswresample-dev libavfilter-dev \
+            libavdevice-dev \
+            ffmpeg
+
+      - name: Install lw-app system deps
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            libxdo-dev
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
