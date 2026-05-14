@@ -2,8 +2,10 @@ use crate::components::environment_settings::EnvironmentSettingsPane;
 use crate::components::general_settings::GeneralSettingsPane;
 use crate::components::transcode_settings::TranscodeSettingsPane;
 use crate::components::upload_settings::UploadSettingsPane;
+use crate::components::version_banner::open_release_page;
 use crate::state::AppState;
 use dioxus::prelude::*;
+use lw_core::version_check::VersionStatus;
 
 /// Tab styles live in a class instead of inline `style` because the
 /// inline approach was unreliable across re-renders: switching tabs
@@ -219,10 +221,57 @@ fn Divider() -> Element {
 #[component]
 fn AboutPane() -> Element {
     let version = env!("CARGO_PKG_VERSION");
+    let app_state = use_context::<AppState>();
+    let status = app_state.version_status.read().clone();
+    // The optional release_url accompanies UpdateAvailable and Unsupported. We
+    // mirror the banner's CTA here so a user who dismissed the banner (or who
+    // sits on the login page where the banner is the only update affordance)
+    // still has a one-click path to the release page.
+    let (status_label, status_color, release_url) = match &status {
+        None => (
+            "Checking for updates…".to_string(),
+            "var(--text-secondary)",
+            None,
+        ),
+        Some(VersionStatus::UpToDate { .. }) => ("Up to date".to_string(), "var(--success)", None),
+        Some(VersionStatus::UpdateAvailable {
+            latest,
+            release_url,
+            ..
+        }) => (
+            format!("Update available — v{latest}"),
+            "var(--info)",
+            Some(release_url.clone()),
+        ),
+        Some(VersionStatus::Unsupported {
+            running,
+            min_supported,
+            release_url,
+            ..
+        }) => (
+            format!("Unsupported — running v{running}, requires v{min_supported}"),
+            "var(--error)",
+            Some(release_url.clone()),
+        ),
+    };
+
     rsx! {
         div {
             style: "font-size: 13px; color: var(--text); margin-bottom: 8px;",
             div { style: "font-weight: 600;", "Linewise Desktop {version}" }
+            div { style: "font-size: 12px; color: {status_color}; margin-top: 4px; \
+                          display: flex; align-items: center; gap: 8px;",
+                span { "{status_label}" }
+                if let Some(url) = release_url {
+                    button {
+                        style: "appearance: none; background: transparent; border: none; \
+                                padding: 0; cursor: pointer; color: var(--btn-primary); \
+                                font-size: 12px; text-decoration: underline;",
+                        onclick: move |_| open_release_page(url.clone()),
+                        "Open release page"
+                    }
+                }
+            }
             div { style: "font-size: 12px; color: var(--text-secondary); margin-top: 4px;",
                 "Released under the GNU GPLv2-or-later. Source at "
                 a {

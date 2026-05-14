@@ -16,3 +16,4 @@ pub mod transcode_dialog;
 pub mod transcode_settings;
 pub mod upload_queue;
 pub mod upload_settings;
+pub mod version_banner;

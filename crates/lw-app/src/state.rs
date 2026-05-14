@@ -6,6 +6,7 @@ use lw_core::db::Database;
 use lw_core::error::ConfigError;
 use lw_core::models::{Project, Tenant, UploadTask, UserInfo};
 use lw_core::upload::{UploadEngine, UploadEvent};
+use lw_core::version_check::VersionStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -131,6 +132,11 @@ pub struct AppState {
     /// the new `ApiClient`'s base URL is read from `AppConfig` at init
     /// time, so the only way to switch hosts cleanly is a re-init.
     pub restart_token: Signal<u64>,
+    /// Result of the startup version check against GitHub. `None` means
+    /// the check hasn't completed yet, or it failed and we treat the
+    /// status as unknown — both are non-blocking. `Some(Unsupported {..})`
+    /// is the only state that gates rendering.
+    pub version_status: Signal<Option<VersionStatus>>,
 }
 
 /// Lightweight toast notification. Only one toast lives at a time — a
@@ -210,6 +216,7 @@ impl AppState {
             services: Signal::new(None),
             config: Signal::new(AppConfig::default()),
             restart_token: Signal::new(0),
+            version_status: Signal::new(None),
         }
     }
 

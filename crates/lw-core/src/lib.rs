@@ -10,5 +10,6 @@ pub mod models;
 pub mod storage;
 pub mod transcode;
 pub mod upload;
+pub mod version_check;
 pub mod video;
 pub mod watcher;

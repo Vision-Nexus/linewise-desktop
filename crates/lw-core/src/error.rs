@@ -142,6 +142,20 @@ pub enum ConfigError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum VersionCheckError {
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
+    #[error("Decode error: {0}")]
+    Decode(#[from] serde_json::Error),
+    #[error("Bad version string {input:?}: {source}")]
+    BadVersion {
+        input: String,
+        #[source]
+        source: semver::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("Auth error: {0}")]
     Auth(#[from] AuthError),

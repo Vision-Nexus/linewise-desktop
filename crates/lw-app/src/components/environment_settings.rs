@@ -35,10 +35,7 @@ pub fn EnvironmentSettingsPane() -> Element {
                 app_state.selected_project.set(None);
                 app_state.projects.set(Vec::new());
                 app_state.tenant_projects.set(Default::default());
-                app_state.show_toast(
-                    format!("Switching to {}…", target.label()),
-                    ToastKind::Info,
-                );
+                app_state.show_toast(format!("Switching to {}…", target.label()), ToastKind::Info);
                 app_state.request_restart();
             }
             Err(e) => {

@@ -1,9 +1,11 @@
 use crate::components::login::LoginPage;
 use crate::components::upload_queue::UploadQueue;
+use crate::components::version_banner::{VersionBlockedScreen, VersionUpdateBanner};
 use crate::state::{AppState, CoreServices};
 use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
 use dioxus::prelude::*;
 use lw_chat::{ChatConfig, ChatPanel};
+use lw_core::version_check::{self, VersionStatus};
 use std::sync::Arc;
 
 const TAILWIND_CSS: &str = include_str!("../tailwind.generated.css");
@@ -240,6 +242,18 @@ pub fn App() -> Element {
 
     let mut boot = use_signal(|| BootState::Initializing);
 
+    // Startup version check. Runs once at mount, in parallel with
+    // CoreServices::init(). Failure is non-blocking — a flaky GitHub
+    // shouldn't gate a working app, so any error is logged at warn! and
+    // version_status stays None (treated as "unknown" by the renderer).
+    let mut app_state_for_version = use_context::<AppState>();
+    use_future(move || async move {
+        match version_check::check_version(env!("CARGO_PKG_VERSION")).await {
+            Ok(status) => app_state_for_version.version_status.set(Some(status)),
+            Err(e) => tracing::warn!("Version check failed: {e}"),
+        }
+    });
+
     // Restart trigger: any leaf component (e.g. the environment switcher
     // in settings) can call `AppState::request_restart()`, which bumps
     // `restart_token`. We watch the token and flip `boot` back to
@@ -276,6 +290,17 @@ pub fn App() -> Element {
 
     let state = boot.read().clone();
 
+    // The version-check status is read here, separately from BootState,
+    // so that an `Unsupported` answer gates rendering regardless of how
+    // boot is going. CoreServices and the version check are intentionally
+    // independent — a transient block from a GitHub blip shouldn't feel
+    // sticky after a retry.
+    let app_state_for_block = use_context::<AppState>();
+    let is_blocked = matches!(
+        &*app_state_for_block.version_status.read(),
+        Some(VersionStatus::Unsupported { .. })
+    );
+
     rsx! {
         style { "{GLOBAL_CSS}" }
         style { "{TAILWIND_CSS}" }
@@ -289,25 +314,30 @@ pub fn App() -> Element {
         div {
             class: "flex flex-col h-screen w-screen overflow-hidden",
             crate::components::title_bar::TitleBar {}
+            VersionUpdateBanner {}
             crate::components::toast::ToastOverlay {}
             div {
                 class: "flex-1 min-h-0 overflow-hidden",
-                match state {
-                    BootState::Initializing => rsx! {
-                        div { class: "loading-screen",
-                            span { class: "spinner" }
-                            span { "Starting up..." }
-                        }
-                    },
-                    BootState::Failed(error) => rsx! {
-                        DbErrorScreen {
-                            error,
-                            on_retry: move |_| boot.set(BootState::Initializing),
-                        }
-                    },
-                    BootState::Ready(services) => rsx! {
-                        AuthedShell { services }
-                    },
+                if is_blocked {
+                    VersionBlockedScreen {}
+                } else {
+                    match state {
+                        BootState::Initializing => rsx! {
+                            div { class: "loading-screen",
+                                span { class: "spinner" }
+                                span { "Starting up..." }
+                            }
+                        },
+                        BootState::Failed(error) => rsx! {
+                            DbErrorScreen {
+                                error,
+                                on_retry: move |_| boot.set(BootState::Initializing),
+                            }
+                        },
+                        BootState::Ready(services) => rsx! {
+                            AuthedShell { services }
+                        },
+                    }
                 }
             }
         }
