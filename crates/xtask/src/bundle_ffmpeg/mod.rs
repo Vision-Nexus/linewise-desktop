@@ -112,30 +112,65 @@ pub(crate) enum SharedLibKind {
 }
 
 impl SharedLibKind {
-    fn matches(self, path: &Path, stem: &str) -> bool {
+    pub(crate) fn matches(self, path: &Path, stem: &str) -> bool {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             return false;
         };
         match self {
             Self::Dylib => {
-                // libavcodec.62.dylib — three dots total in the name (lib<x>.<n>.dylib).
-                if !name.starts_with(&format!("{stem}.")) || !name.ends_with(".dylib") {
-                    return false;
-                }
-                let middle = &name[stem.len() + 1..name.len() - ".dylib".len()];
-                !middle.contains('.') && !middle.is_empty()
+                // libavcodec.62.dylib — exactly one component between the
+                // stem and the .dylib extension. We strip the prefix and
+                // suffix with `strip_*` to avoid index math that would
+                // panic on the bare `libavcodec.dylib` symlink, where
+                // there's nothing between the two.
+                let after_stem = match name.strip_prefix(&format!("{stem}.")) {
+                    Some(s) => s,
+                    None => return false,
+                };
+                let middle = match after_stem.strip_suffix(".dylib") {
+                    Some(s) => s,
+                    None => return false,
+                };
+                !middle.is_empty() && !middle.contains('.')
             }
             Self::SoMajor => {
                 // libavcodec.so.62 — major-versioned symlink, real file is
                 // libavcodec.so.62.x.y. We pick the .so.<major> form because
                 // that's what LC_NEEDED records.
-                let prefix = format!("{stem}.so.");
-                if !name.starts_with(&prefix) {
+                let Some(tail) = name.strip_prefix(&format!("{stem}.so.")) else {
                     return false;
-                }
-                let tail = &name[prefix.len()..];
-                !tail.contains('.') && !tail.is_empty()
+                };
+                !tail.is_empty() && !tail.contains('.')
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dylib_matches_major_versioned_only() {
+        let kind = SharedLibKind::Dylib;
+        // Major-versioned: yes.
+        assert!(kind.matches(Path::new("libavcodec.62.dylib"), "libavcodec"));
+        // Bare symlink: no — this is the case that previously panicked.
+        assert!(!kind.matches(Path::new("libavcodec.dylib"), "libavcodec"));
+        // Fully-versioned: no — picking this would copy the wrong basename.
+        assert!(!kind.matches(Path::new("libavcodec.62.0.100.dylib"), "libavcodec"));
+        // Wrong stem.
+        assert!(!kind.matches(Path::new("libavformat.62.dylib"), "libavcodec"));
+        // Different extension.
+        assert!(!kind.matches(Path::new("libavcodec.62.so"), "libavcodec"));
+    }
+
+    #[test]
+    fn so_major_matches_major_versioned_only() {
+        let kind = SharedLibKind::SoMajor;
+        assert!(kind.matches(Path::new("libavcodec.so.62"), "libavcodec"));
+        assert!(!kind.matches(Path::new("libavcodec.so"), "libavcodec"));
+        assert!(!kind.matches(Path::new("libavcodec.so.62.0.100"), "libavcodec"));
+        assert!(!kind.matches(Path::new("libavformat.so.62"), "libavcodec"));
     }
 }
