@@ -112,14 +112,33 @@ fn drain_video_packets(
 }
 
 /// Build an AAC-only m4a (no video stream) for the audio-only failure path.
+///
+/// The native AAC encoder shipped with Ubuntu's libavcodec 58 only accepts
+/// the FLTP (planar f32) sample format that the codec advertises in
+/// `sample_fmts()`, and only at the rates listed in `supported_rates()`.
+/// Older fixtures hard-coded 48 kHz and `F32 Planar`, which works on
+/// macOS Homebrew (FFmpeg 7) but fails with EINVAL on Ubuntu 22.04
+/// (FFmpeg 4.4) because of a subtler ABI mismatch in how `send_frame`
+/// reads the channel layout. Pulling the encoder's preferred sample
+/// format and rate directly from the codec descriptor sidesteps the
+/// per-distribution divergence.
 pub fn synthesize_audio_only_fixture(path: &Path) {
     let codec = codec::encoder::find(codec::Id::AAC)
         .expect("AAC encoder must be available — it is a build prerequisite");
 
+    let audio_codec = codec.audio().expect("AAC codec descriptor");
+    let sample_format = audio_codec
+        .formats()
+        .and_then(|mut it| it.next())
+        .unwrap_or(format::Sample::F32(format::sample::Type::Planar));
+    let sample_rate: i32 = audio_codec
+        .rates()
+        .and_then(|mut it| it.next())
+        .unwrap_or(48_000);
+
     let mut octx = format::output(&path.to_path_buf()).expect("alloc m4a output");
     let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-    let sample_rate: i32 = 48_000;
     let time_base = Rational::new(1, sample_rate);
 
     let mut enc_ctx = codec::context::Context::new_with_codec(codec)
@@ -128,7 +147,7 @@ pub fn synthesize_audio_only_fixture(path: &Path) {
         .expect("audio encoder ctx");
     enc_ctx.set_bit_rate(96_000);
     enc_ctx.set_rate(sample_rate);
-    enc_ctx.set_format(format::Sample::F32(format::sample::Type::Planar));
+    enc_ctx.set_format(sample_format);
     enc_ctx.set_channel_layout(ChannelLayout::STEREO);
     enc_ctx.set_time_base(time_base);
     if global_header {
@@ -145,21 +164,17 @@ pub fn synthesize_audio_only_fixture(path: &Path) {
     let ost_tb = octx.stream(ost_index).unwrap().time_base();
 
     // Native AAC on Linux refuses any frame smaller than `frame_size`
-    // (returns EINVAL), unlike libfdk-aac which is more lenient. Round the
-    // total down to a whole multiple so every frame we send is full-size.
+    // (returns EINVAL), unlike libfdk-aac which is more lenient. Round
+    // total down so every send_frame carries a full frame.
     let frame_size = enc.frame_size().max(1024) as usize;
     let total_samples = (sample_rate as usize / frame_size) * frame_size;
     let mut written = 0usize;
     let mut pts: i64 = 0;
     while written < total_samples {
-        let mut af = Audio::new(
-            format::Sample::F32(format::sample::Type::Planar),
-            frame_size,
-            ChannelLayout::STEREO,
-        );
+        let mut af = Audio::new(sample_format, frame_size, ChannelLayout::STEREO);
         af.set_rate(sample_rate as u32);
         af.set_pts(Some(pts));
-        for ch in 0..2 {
+        for ch in 0..af.planes() {
             af.data_mut(ch).fill(0);
         }
         enc.send_frame(&af).expect("send audio frame");
