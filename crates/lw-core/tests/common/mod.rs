@@ -144,15 +144,17 @@ pub fn synthesize_audio_only_fixture(path: &Path) {
     octx.write_header().expect("m4a write_header");
     let ost_tb = octx.stream(ost_index).unwrap().time_base();
 
+    // Native AAC on Linux refuses any frame smaller than `frame_size`
+    // (returns EINVAL), unlike libfdk-aac which is more lenient. Round the
+    // total down to a whole multiple so every frame we send is full-size.
     let frame_size = enc.frame_size().max(1024) as usize;
-    let total_samples = sample_rate as usize;
+    let total_samples = (sample_rate as usize / frame_size) * frame_size;
     let mut written = 0usize;
     let mut pts: i64 = 0;
     while written < total_samples {
-        let n = (total_samples - written).min(frame_size);
         let mut af = Audio::new(
             format::Sample::F32(format::sample::Type::Planar),
-            n,
+            frame_size,
             ChannelLayout::STEREO,
         );
         af.set_rate(sample_rate as u32);
@@ -162,8 +164,8 @@ pub fn synthesize_audio_only_fixture(path: &Path) {
         }
         enc.send_frame(&af).expect("send audio frame");
         drain_audio_packets(&mut enc, &mut octx, ost_index, time_base, ost_tb);
-        pts += n as i64;
-        written += n;
+        pts += frame_size as i64;
+        written += frame_size;
     }
     enc.send_eof().ok();
     drain_audio_packets(&mut enc, &mut octx, ost_index, time_base, ost_tb);
