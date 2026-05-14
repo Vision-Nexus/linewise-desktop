@@ -148,20 +148,15 @@ jobs:
 
       - name: Bundle FFmpeg (macOS)
         if: runner.os == 'macOS'
-        run: |
-          chmod +x scripts/bundle-ffmpeg-macos.sh
-          CREATE_DMG=1 bash scripts/bundle-ffmpeg-macos.sh ${{ matrix.target }}
+        run: cargo xtask bundle-ffmpeg --target ${{ matrix.target }} --create-dmg
 
       - name: Bundle FFmpeg (Linux)
         if: runner.os == 'Linux'
-        run: |
-          chmod +x scripts/bundle-ffmpeg-linux.sh
-          bash scripts/bundle-ffmpeg-linux.sh ${{ matrix.target }}
+        run: cargo xtask bundle-ffmpeg --target ${{ matrix.target }}
 
       - name: Bundle FFmpeg (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File scripts/bundle-ffmpeg-windows.ps1
+        run: cargo xtask bundle-ffmpeg --target ${{ matrix.target }}
 
       # cargo-bundle's MSI path is broken for our setup (hyphenated bin name
       # + missing `--format msi` detection), so we ship the unpacked release

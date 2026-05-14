@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 
 /// Attribution file baked into the binary so the About pane can render
 /// it regardless of installer layout. The same file is also shipped
-/// under `licenses/` inside each installer (see `scripts/bundle-*`).
+/// under `licenses/` inside each installer (see `crates/xtask/`).
 const THIRD_PARTY_LICENSES: &str = include_str!("../../../../THIRD_PARTY_LICENSES.md");
 
 const PROJECT_URL: &str = "https://github.com/Vision-Nexus/linewise-desktop";
