@@ -58,6 +58,11 @@ tokio-stream = "0.1"
 # Markdown
 pulldown-cmark = "0.12"
 
+# Base64 — used for unverified JWT claim decoding (Firebase ID tokens
+# are RS256-signed by Firebase; the backend is the security boundary,
+# the desktop reads claims locally only to gate admin-only UI).
+base64 = "0.22"
+
 # UI
 dioxus = { version = "0.7", features = ["desktop"] }
 rfd = "0.17"

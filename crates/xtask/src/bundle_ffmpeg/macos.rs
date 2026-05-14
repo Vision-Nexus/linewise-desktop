@@ -156,7 +156,8 @@ fn bundle_dylib_recursive(
     }
 
     let dst = frameworks.join(&basename);
-    std::fs::copy(src, &dst).with_context(|| format!("copy {} → {}", src.display(), dst.display()))?;
+    std::fs::copy(src, &dst)
+        .with_context(|| format!("copy {} → {}", src.display(), dst.display()))?;
     make_writable(&dst)?;
     eprintln!("  Copied {basename} → Frameworks/");
 
@@ -276,11 +277,7 @@ fn add_rpath_if_missing(target: &Path, rpath: &str) -> Result<()> {
     // rpaths short of parsing `otool -l`, and a duplicate-add failure
     // is harmless.
     let _ = std::process::Command::new("install_name_tool")
-        .args([
-            "-add_rpath".as_ref(),
-            rpath.as_ref(),
-            target.as_os_str(),
-        ])
+        .args(["-add_rpath".as_ref(), rpath.as_ref(), target.as_os_str()])
         .status();
     Ok(())
 }

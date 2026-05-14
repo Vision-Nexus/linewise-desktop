@@ -21,10 +21,7 @@ const REQUIRED_DLL_PREFIXES: &[&str] = &[
 const OPTIONAL_DLL_PREFIXES: &[&str] = &["postproc-"];
 
 pub fn bundle(root: &Path, target: &str) -> Result<()> {
-    let release_dir = root
-        .join("target")
-        .join(target)
-        .join("release");
+    let release_dir = root.join("target").join(target).join("release");
     let exe = release_dir.join("linewise-desktop.exe");
     if !exe.is_file() {
         bail!("linewise-desktop.exe not found at {}", exe.display());
@@ -43,7 +40,10 @@ pub fn bundle(root: &Path, target: &str) -> Result<()> {
         std::fs::copy(&ffmpeg_exe, release_dir.join("ffmpeg.exe"))?;
         eprintln!("  Copied ffmpeg.exe");
     } else {
-        eprintln!("  Warning: ffmpeg.exe not found at {}", ffmpeg_exe.display());
+        eprintln!(
+            "  Warning: ffmpeg.exe not found at {}",
+            ffmpeg_exe.display()
+        );
     }
 
     ensure_dir(&release_dir)?;
@@ -57,8 +57,8 @@ pub fn bundle(root: &Path, target: &str) -> Result<()> {
 fn copy_dlls(src_dir: &Path, dst_dir: &Path, prefixes: &[&str], required: bool) -> Result<()> {
     for prefix in prefixes {
         let mut found = false;
-        for entry in std::fs::read_dir(src_dir)
-            .with_context(|| format!("read_dir {}", src_dir.display()))?
+        for entry in
+            std::fs::read_dir(src_dir).with_context(|| format!("read_dir {}", src_dir.display()))?
         {
             let entry = entry?;
             let name = entry.file_name();

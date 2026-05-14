@@ -24,10 +24,6 @@ const GOOGLE_OAUTH_CLIENT_ID: &str =
 const GOOGLE_OAUTH_CLIENT_SECRET: &str = "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";
 const MICROSOFT_OAUTH_CLIENT_ID: &str = "e83e590c-33fd-4361-8063-b93e95206a14";
 
-/// How long a toast stays visible before it auto-dismisses. Defined
-/// next to `show_toast` because the dismiss task lives on `AppState`.
-const TOAST_LIFETIME_MS: u64 = 2500;
-
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct CoreServices {
@@ -119,6 +115,12 @@ pub struct AppState {
     pub show_settings: Signal<bool>,
     pub toast: Signal<Option<Toast>>,
     pub services: Signal<Option<CoreServices>>,
+    /// Monotonic counter the root `App` watches; bump it from anywhere
+    /// in the tree to ask the bootstrap effect to rebuild
+    /// `CoreServices`. Used by the environment switcher in settings —
+    /// the new `ApiClient`'s base URL is read from `AppConfig` at init
+    /// time, so the only way to switch hosts cleanly is a re-init.
+    pub restart_token: Signal<u64>,
 }
 
 /// Lightweight toast notification. Only one toast lives at a time — a
@@ -196,17 +198,29 @@ impl AppState {
             show_settings: Signal::new(false),
             toast: Signal::new(None),
             services: Signal::new(None),
+            restart_token: Signal::new(0),
         }
     }
 
-    /// Publish a toast. Replaces any currently-visible toast and
-    /// schedules its auto-dismiss after `TOAST_LIFETIME_MS`. The id
-    /// guard inside the dismiss task means an older toast's timer
-    /// can't accidentally clear a newer replacement toast.
+    /// Ask the bootstrap effect to re-run `CoreServices::init()`. The
+    /// next signal read inside the boot future flips back to
+    /// `Initializing`, which rebuilds the `ApiClient` against whatever
+    /// environment is in `AppConfig` at that moment. Callers should
+    /// persist their config change first.
+    pub fn request_restart(&mut self) {
+        let next = self.restart_token.peek().wrapping_add(1);
+        self.restart_token.set(next);
+    }
+
+    /// Publish a toast. Replaces any currently-visible toast.
     ///
-    /// Must be called from a Dioxus scope (i.e. from a component body
-    /// or event handler) because the dismiss task is scheduled via
-    /// `dioxus::prelude::spawn`.
+    /// Auto-dismiss is owned by `ToastOverlay`, not this method. The
+    /// overlay sits at the root of the component tree and watches the
+    /// toast signal; it (re)schedules a dismiss task in its own scope
+    /// every time the toast id changes. Doing it here would tie the
+    /// dismiss task to the *caller's* scope, which would get cancelled
+    /// when components like the environment switcher trigger a remount
+    /// via `request_restart` — and the toast would stick.
     pub fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
         let next_id = self
             .toast
@@ -219,23 +233,6 @@ impl AppState {
             message: message.into(),
             kind,
         }));
-
-        let mut state = self.clone();
-        spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(TOAST_LIFETIME_MS)).await;
-            // Only clear if the currently-visible toast is still the
-            // one we just showed — a newer toast may have replaced it
-            // while we were sleeping.
-            let still_mine = state
-                .toast
-                .read()
-                .as_ref()
-                .map(|t| t.id == next_id)
-                .unwrap_or(false);
-            if still_mine {
-                state.toast.set(None);
-            }
-        });
     }
 
     /// Resolve a tenant id to its human-readable display name. Falls back to

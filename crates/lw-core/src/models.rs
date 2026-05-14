@@ -134,7 +134,10 @@ pub struct WhoAmIUser {
     pub tenant_infos: Option<Vec<Tenant>>,
 }
 
-/// Convenience type used in app state
+/// Convenience type used in app state. `system_roles` is decoded
+/// locally from the Firebase ID token (see `auth::claims`); the
+/// backend whoami response doesn't expose it directly. Empty for
+/// ordinary tenant users.
 #[derive(Debug, Clone)]
 pub struct UserInfo {
     pub uid: String,
@@ -142,10 +145,11 @@ pub struct UserInfo {
     pub display_name: Option<String>,
     pub photo_url: Option<String>,
     pub tenants: Vec<Tenant>,
+    pub system_roles: Vec<String>,
 }
 
 impl UserInfo {
-    pub fn from_whoami(resp: WhoAmIResponse) -> Option<Self> {
+    pub fn from_whoami(resp: WhoAmIResponse, system_roles: Vec<String>) -> Option<Self> {
         let user = resp.user?;
         let tenants = user.tenant_infos.unwrap_or_default();
         Some(Self {
@@ -154,7 +158,12 @@ impl UserInfo {
             display_name: resp.firebase.name,
             photo_url: resp.firebase.picture,
             tenants,
+            system_roles,
         })
+    }
+
+    pub fn is_system_user(&self) -> bool {
+        !self.system_roles.is_empty()
     }
 }
 

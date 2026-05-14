@@ -30,10 +30,7 @@ const SYSTEM_DENYLIST: &[&str] = &[
 ];
 
 pub fn bundle(root: &Path, target: &str) -> Result<()> {
-    let bundle_root = root
-        .join("target")
-        .join(target)
-        .join("release/bundle/deb");
+    let bundle_root = root.join("target").join(target).join("release/bundle/deb");
 
     let deb_file = std::fs::read_dir(&bundle_root)
         .with_context(|| format!("read_dir {}", bundle_root.display()))?
@@ -78,8 +75,14 @@ pub fn bundle(root: &Path, target: &str) -> Result<()> {
     eprintln!("Using FFmpeg libs from: {}", av_lib_dir.display());
 
     for stem in REQUIRED_LIBS {
-        let path = find_major_versioned(&av_lib_dir, stem, SharedLibKind::SoMajor)?
-            .with_context(|| format!("required library {stem}.so.* not under {}", av_lib_dir.display()))?;
+        let path = find_major_versioned(&av_lib_dir, stem, SharedLibKind::SoMajor)?.with_context(
+            || {
+                format!(
+                    "required library {stem}.so.* not under {}",
+                    av_lib_dir.display()
+                )
+            },
+        )?;
         bundle_so_recursive(&path, &lib_dir, &mut bundled)?;
     }
     for stem in OPTIONAL_LIBS {
@@ -137,11 +140,7 @@ pub fn bundle(root: &Path, target: &str) -> Result<()> {
         }
         run(
             "patchelf",
-            [
-                "--set-rpath".as_ref(),
-                "$ORIGIN".as_ref(),
-                path.as_os_str(),
-            ],
+            ["--set-rpath".as_ref(), "$ORIGIN".as_ref(), path.as_os_str()],
         )?;
     }
 
@@ -156,17 +155,13 @@ pub fn bundle(root: &Path, target: &str) -> Result<()> {
     Ok(())
 }
 
-fn bundle_so_recursive(
-    src: &Path,
-    lib_dir: &Path,
-    bundled: &mut HashSet<String>,
-) -> Result<()> {
+fn bundle_so_recursive(src: &Path, lib_dir: &Path, bundled: &mut HashSet<String>) -> Result<()> {
     // Resolve symlinks so we copy the real file. ldd reports the
     // symlink target anyway, but read_dir over a lib directory mixes
     // .so / .so.<major> / .so.<full> entries and the major-version
     // entry is often itself a symlink to the full-version one.
-    let real = std::fs::canonicalize(src)
-        .with_context(|| format!("canonicalize {}", src.display()))?;
+    let real =
+        std::fs::canonicalize(src).with_context(|| format!("canonicalize {}", src.display()))?;
     let basename = src
         .file_name()
         .and_then(|n| n.to_str())
@@ -177,9 +172,8 @@ fn bundle_so_recursive(
     }
 
     let dst = lib_dir.join(&basename);
-    std::fs::copy(&real, &dst).with_context(|| {
-        format!("copy {} → {}", real.display(), dst.display())
-    })?;
+    std::fs::copy(&real, &dst)
+        .with_context(|| format!("copy {} → {}", real.display(), dst.display()))?;
     eprintln!("  Copied {basename}");
 
     walk_and_bundle_deps(&dst, lib_dir, bundled)?;
@@ -228,11 +222,7 @@ fn parse_ldd_line(line: &str) -> Option<LddLine> {
         let soname = left.trim().to_owned();
         let resolved = right.split_whitespace().next();
         let resolved = resolved.and_then(|p| {
-            if p == "(0x"
-                || p.starts_with("(0x")
-                || p == "not"
-                || p.is_empty()
-            {
+            if p == "(0x" || p.starts_with("(0x") || p == "not" || p.is_empty() {
                 None
             } else {
                 Some(PathBuf::from(p))

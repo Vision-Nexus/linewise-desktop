@@ -20,11 +20,13 @@ async fn complete_sign_in<F>(
     F: Future<Output = Result<AuthTokens, AuthError>>,
 {
     match sign_in_future.await {
-        Ok(_tokens) => {
+        Ok(tokens) => {
             tracing::info!("{method} sign-in succeeded");
+            let system_roles =
+                lw_core::auth::claims::decode_unverified(&tokens.id_token).system_roles;
             match api.whoami().await {
                 Ok(resp) => {
-                    if let Some(info) = lw_core::models::UserInfo::from_whoami(resp) {
+                    if let Some(info) = lw_core::models::UserInfo::from_whoami(resp, system_roles) {
                         app_state.user_info.set(Some(info));
                         app_state.is_authenticated.set(true);
                     } else {

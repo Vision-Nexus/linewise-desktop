@@ -33,13 +33,29 @@ impl Environment {
         match self {
             Self::Dev => "https://api.dev.linewise.io",
             Self::Testing => "https://api.testing.linewise.io",
-            Self::Production => "https://api.app.linewise.io",
+            Self::Production => "https://api.product.linewise.io",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Dev => "Dev",
+            Self::Testing => "Testing",
+            Self::Production => "Production",
         }
     }
 }
 
+/// Release builds ship pointing at production; debug builds default to
+/// dev so contributors don't accidentally talk to the production
+/// backend. The persisted config.toml overrides both — system admins
+/// flip this via the in-app environment switcher.
 fn default_environment() -> Environment {
-    Environment::Dev
+    if cfg!(debug_assertions) {
+        Environment::Dev
+    } else {
+        Environment::Production
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

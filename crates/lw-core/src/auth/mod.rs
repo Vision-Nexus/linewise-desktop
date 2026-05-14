@@ -1,3 +1,4 @@
+pub mod claims;
 mod oauth;
 
 use crate::error::AuthError;

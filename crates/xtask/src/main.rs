@@ -7,7 +7,10 @@ mod cmd;
 mod generate_icons;
 
 #[derive(Parser)]
-#[command(name = "xtask", about = "Build and packaging tasks for linewise-desktop")]
+#[command(
+    name = "xtask",
+    about = "Build and packaging tasks for linewise-desktop"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -33,9 +36,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = workspace_root();
     match cli.cmd {
-        Cmd::BundleFfmpeg { target, create_dmg } => {
-            bundle_ffmpeg::run(&root, &target, create_dmg)
-        }
+        Cmd::BundleFfmpeg { target, create_dmg } => bundle_ffmpeg::run(&root, &target, create_dmg),
         Cmd::GenerateIcons => generate_icons::run(&root),
     }
 }

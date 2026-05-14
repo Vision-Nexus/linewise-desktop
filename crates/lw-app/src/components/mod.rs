@@ -1,3 +1,4 @@
+pub mod environment_settings;
 pub mod general_settings;
 pub mod login;
 pub mod progress;

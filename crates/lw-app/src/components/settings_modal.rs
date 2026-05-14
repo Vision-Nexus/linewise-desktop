@@ -1,3 +1,4 @@
+use crate::components::environment_settings::EnvironmentSettingsPane;
 use crate::components::general_settings::GeneralSettingsPane;
 use crate::components::transcode_settings::TranscodeSettingsPane;
 use crate::components::upload_settings::UploadSettingsPane;
@@ -41,6 +42,17 @@ pub fn SettingsModal(on_close: EventHandler<()>) -> Element {
                 // Account section
                 SectionHeader { label: "Account" }
                 AccountPane {}
+
+                // Environment section — only shown to system admins. The
+                // gate is `systemRoles` non-empty (any of admin/viewer/probe);
+                // viewer-only system users keep the affordance so they can
+                // redirect the desktop to non-prod for investigation
+                // without needing write privileges.
+                if is_system_user() {
+                    div { style: "height: 1px; background: var(--border); margin: 20px 0;" }
+                    SectionHeader { label: "Environment (system admin)" }
+                    EnvironmentSettingsPane {}
+                }
 
                 // Divider
                 div { style: "height: 1px; background: var(--border); margin: 20px 0;" }
@@ -115,6 +127,19 @@ fn SectionHeader(label: &'static str) -> Element {
             "{label}"
         }
     }
+}
+
+/// Read the signed-in user's system-role status from `AppState`.
+/// Defaults to `false` when no user is loaded yet (e.g. settings
+/// opened from a recovery screen) — better to hide the admin
+/// affordance than to flash it for a moment.
+fn is_system_user() -> bool {
+    use_context::<AppState>()
+        .user_info
+        .read()
+        .as_ref()
+        .map(|u| u.is_system_user())
+        .unwrap_or(false)
 }
 
 #[component]

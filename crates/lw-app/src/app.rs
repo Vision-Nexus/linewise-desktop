@@ -240,21 +240,38 @@ pub fn App() -> Element {
 
     let mut boot = use_signal(|| BootState::Initializing);
 
-    // Bootstrap effect — re-runs when `boot` is flipped back to
-    // `Initializing` by the recovery screen (Retry / Reset → retry).
-    use_future(move || async move {
-        // Short-circuit if we're already Ready / Failed — the effect ran
-        // for that phase and the user hasn't asked to retry yet.
+    // Restart trigger: any leaf component (e.g. the environment switcher
+    // in settings) can call `AppState::request_restart()`, which bumps
+    // `restart_token`. We watch the token and flip `boot` back to
+    // `Initializing` whenever it changes — but only when we're not
+    // already initializing, so the bootstrap effect below sees a real
+    // edge transition.
+    let app_state_restart = use_context::<AppState>();
+    use_effect(move || {
+        let token = *app_state_restart.restart_token.read();
+        if token > 0 && !matches!(&*boot.peek(), BootState::Initializing) {
+            boot.set(BootState::Initializing);
+        }
+    });
+
+    // Bootstrap effect — runs CoreServices::init() every time `boot`
+    // settles on `Initializing`. We can't use `use_future` here because
+    // it fires exactly once at mount; `use_effect` re-fires on every
+    // signal change it reads, which is what we need for retry and
+    // environment switching to actually re-init.
+    use_effect(move || {
         if !matches!(&*boot.read(), BootState::Initializing) {
             return;
         }
-        match CoreServices::init().await {
-            Ok(services) => boot.set(BootState::Ready(Arc::new(services))),
-            Err(e) => {
-                tracing::error!("Core services failed to initialize: {e}");
-                boot.set(BootState::Failed(e));
+        spawn(async move {
+            match CoreServices::init().await {
+                Ok(services) => boot.set(BootState::Ready(Arc::new(services))),
+                Err(e) => {
+                    tracing::error!("Core services failed to initialize: {e}");
+                    boot.set(BootState::Failed(e));
+                }
             }
-        }
+        });
     });
 
     let state = boot.read().clone();
@@ -322,7 +339,7 @@ fn AuthedShell(services: Arc<CoreServices>) -> Element {
                 if let Ok(token) = auth.get_id_token().await {
                     app_state.auth_token.set(token);
                 }
-                fetch_user_info(&api, &mut app_state).await;
+                fetch_user_info(&auth, &api, &mut app_state).await;
             }
             restoring.set(false);
         }
@@ -457,10 +474,21 @@ fn DbErrorScreen(error: String, on_retry: EventHandler<()>) -> Element {
     }
 }
 
-async fn fetch_user_info(api: &lw_core::api_client::ApiClient, app_state: &mut AppState) {
+async fn fetch_user_info(
+    auth: &lw_core::auth::AuthService,
+    api: &lw_core::api_client::ApiClient,
+    app_state: &mut AppState,
+) {
+    let system_roles = match auth.get_id_token().await {
+        Ok(token) => lw_core::auth::claims::decode_unverified(&token).system_roles,
+        Err(e) => {
+            tracing::warn!("Could not read id_token for claims: {e}");
+            Vec::new()
+        }
+    };
     match api.whoami().await {
         Ok(resp) => {
-            if let Some(info) = lw_core::models::UserInfo::from_whoami(resp) {
+            if let Some(info) = lw_core::models::UserInfo::from_whoami(resp, system_roles) {
                 // Set Sentry user context for error attribution
                 sentry::configure_scope(|scope| {
                     scope.set_user(Some(sentry::User {

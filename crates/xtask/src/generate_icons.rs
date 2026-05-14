@@ -101,13 +101,7 @@ fn build_icns_via_iconutil(svg: &Path, icons_dir: &Path) -> Result<()> {
     let icns_str = icns.to_string_lossy().into_owned();
     cmd::run(
         "iconutil",
-        [
-            "-c",
-            "icns",
-            iconset_str.as_str(),
-            "-o",
-            icns_str.as_str(),
-        ],
+        ["-c", "icns", iconset_str.as_str(), "-o", icns_str.as_str()],
     )?;
     std::fs::remove_dir_all(&iconset).ok();
     eprintln!("  Created icon.icns");
