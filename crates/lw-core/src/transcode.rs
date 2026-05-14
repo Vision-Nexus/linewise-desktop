@@ -38,10 +38,10 @@ use std::path::{Path, PathBuf};
 
 /// HLS segment target length, seconds. Matches production's 6-second shape
 /// from `video_process.py`.
-const SEGMENT_SECONDS: f64 = 6.0;
+pub(crate) const SEGMENT_SECONDS: f64 = 6.0;
 /// Every segment file starts with this prefix; production uses the same
 /// `media-hd` so sorted-glob-as-numeric-sort works with the `%010d` padding.
-const SEG_FILENAME_PREFIX: &str = "media-hd";
+pub(crate) const SEG_FILENAME_PREFIX: &str = "media-hd";
 const PLAYLIST_FILENAME: &str = "media-hd.m3u8";
 
 /// Result of a successful transcode operation.
@@ -187,7 +187,8 @@ pub fn transcode_video(
 
 /// Compute scratch directory (for HLS segments during encode) and the final
 /// output MP4 path.
-fn prepare_paths(input: &Path) -> Result<(PathBuf, PathBuf), TranscodeError> {
+#[doc(hidden)]
+pub fn prepare_paths(input: &Path) -> Result<(PathBuf, PathBuf), TranscodeError> {
     let base = std::env::temp_dir().join("linewise-transcode");
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     // Scratch dir is per-input-stem so two concurrent transcodes don't collide,
@@ -200,15 +201,17 @@ fn prepare_paths(input: &Path) -> Result<(PathBuf, PathBuf), TranscodeError> {
 
 // ── Resume detection ────────────────────────────────────────────────────────
 
+#[doc(hidden)]
 #[derive(Debug)]
-struct ResumePoint {
-    start_seg: u64,
-    resume_seconds: f64,
+pub struct ResumePoint {
+    pub start_seg: u64,
+    pub resume_seconds: f64,
 }
 
 /// Walk the scratch dir, drop the tail segment (may be truncated from a crash),
 /// and return how many segments survived plus the total video-time they cover.
-fn detect_resume_point(scratch_dir: &Path) -> Result<ResumePoint, TranscodeError> {
+#[doc(hidden)]
+pub fn detect_resume_point(scratch_dir: &Path) -> Result<ResumePoint, TranscodeError> {
     if !scratch_dir.exists() {
         return Ok(ResumePoint {
             start_seg: 0,
@@ -248,7 +251,8 @@ fn detect_resume_point(scratch_dir: &Path) -> Result<ResumePoint, TranscodeError
 
 // ── Stage 1: encode to HLS segments ─────────────────────────────────────────
 
-fn encode_to_hls(
+#[doc(hidden)]
+pub fn encode_to_hls(
     input_path: &Path,
     scratch_dir: &Path,
     info: &VideoInfo,
@@ -597,7 +601,8 @@ fn drain_video(
 
 // ── Stage 2: concat segments into MP4 ───────────────────────────────────────
 
-fn concat_to_mp4(scratch_dir: &Path, output_path: &Path) -> Result<(), TranscodeError> {
+#[doc(hidden)]
+pub fn concat_to_mp4(scratch_dir: &Path, output_path: &Path) -> Result<(), TranscodeError> {
     let mut segs: Vec<PathBuf> = fs::read_dir(scratch_dir)
         .map_err(TranscodeError::Io)?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -1109,8 +1114,9 @@ fn target_resolution(
 ///
 /// VAAPI is deliberately omitted — it needs an `AVHWFramesContext` upload step
 /// before `send_frame` that this pipeline doesn't set up yet.
-#[derive(Debug, Clone, Copy)]
-enum EncoderKind {
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderKind {
     Software,
     VideoToolbox,
     Nvenc,
@@ -1149,7 +1155,7 @@ impl EncoderKind {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     const HW_FAMILIES_H264: &'static [(&'static str, EncoderKind)] = &[];
 
-    fn hw_candidates(codec: &str) -> &'static [(&'static str, EncoderKind)] {
+    pub fn hw_candidates(codec: &str) -> &'static [(&'static str, EncoderKind)] {
         match codec {
             "hevc" | "h265" => Self::HW_FAMILIES_HEVC,
             "h264" => Self::HW_FAMILIES_H264,
@@ -1242,7 +1248,8 @@ fn encoder_opens(name: &str) -> bool {
     ctx.open_as(codec).is_ok()
 }
 
-fn find_first_available(
+#[doc(hidden)]
+pub fn find_first_available(
     candidates: &'static [(&'static str, EncoderKind)],
 ) -> Option<(&'static str, EncoderKind)> {
     // First pass: drop candidates the build doesn't even know about.
@@ -1265,7 +1272,8 @@ fn find_first_available(
 /// Pick an ffmpeg encoder. `hw_accel = "auto"` probes all HW families and
 /// falls back to software; `"none"` forces software; family names force that
 /// specific family and error if the ffmpeg build doesn't include it.
-fn resolve_encoder(
+#[doc(hidden)]
+pub fn resolve_encoder(
     config: &TranscodeConfig,
 ) -> Result<(&'static str, EncoderKind), TranscodeError> {
     let sw = || software_name(&config.codec).map(|n| (n, EncoderKind::Software));
@@ -1345,4 +1353,103 @@ fn encoder_options(kind: EncoderKind, config: &TranscodeConfig) -> Dictionary<'s
         }
     }
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lw-test-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    fn write_segment(dir: &Path, n: u64) {
+        let name = format!("{SEG_FILENAME_PREFIX}{n:010}.ts");
+        std::fs::write(dir.join(name), b"").expect("write segment fixture");
+    }
+
+    #[test]
+    fn resume_point_missing_dir() {
+        let missing = std::env::temp_dir().join(format!("lw-no-such-{}", uuid::Uuid::new_v4()));
+        let rp = detect_resume_point(&missing).expect("detect");
+        assert_eq!(rp.start_seg, 0);
+        assert_eq!(rp.resume_seconds, 0.0);
+    }
+
+    #[test]
+    fn resume_point_empty_dir() {
+        let dir = fresh_temp_dir("resume-empty");
+
+        let rp = detect_resume_point(&dir).expect("detect");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rp.start_seg, 0);
+        assert_eq!(rp.resume_seconds, 0.0);
+    }
+
+    #[test]
+    fn resume_point_drops_tail_and_ignores_unrelated() {
+        let dir = fresh_temp_dir("resume-tail");
+        for n in 0..5 {
+            write_segment(&dir, n);
+        }
+        // unrelated files should not be counted or removed
+        std::fs::write(dir.join("concat.txt"), b"placeholder").unwrap();
+        std::fs::write(dir.join("media-hd.m3u8"), b"placeholder").unwrap();
+
+        let rp = detect_resume_point(&dir).expect("detect");
+
+        // 5 segments → drop tail → 4 remain
+        assert_eq!(rp.start_seg, 4);
+        assert!((rp.resume_seconds - 4.0 * SEGMENT_SECONDS).abs() < 1e-9);
+        // tail removed
+        assert!(
+            !dir.join(format!("{SEG_FILENAME_PREFIX}0000000004.ts"))
+                .exists()
+        );
+        // unrelated files preserved
+        assert!(dir.join("concat.txt").exists());
+        assert!(dir.join("media-hd.m3u8").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resume_point_single_segment_drops_to_empty() {
+        let dir = fresh_temp_dir("resume-single");
+        write_segment(&dir, 0);
+
+        let rp = detect_resume_point(&dir).expect("detect");
+
+        assert_eq!(rp.start_seg, 0);
+        assert_eq!(rp.resume_seconds, 0.0);
+        assert!(
+            !dir.join(format!("{SEG_FILENAME_PREFIX}0000000000.ts"))
+                .exists()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concat_to_mp4_empty_scratch_returns_typed_error() {
+        let dir = fresh_temp_dir("concat-empty");
+        let out = dir.join("out.mp4");
+
+        let err = concat_to_mp4(&dir, &out).expect_err("must fail on empty scratch");
+
+        match err {
+            TranscodeError::EncodingFailed(msg) => {
+                assert!(
+                    msg.contains("No .ts segments to concat"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected EncodingFailed, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
