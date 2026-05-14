@@ -174,6 +174,10 @@ pub fn synthesize_audio_only_fixture(path: &Path) {
         let mut af = Audio::new(sample_format, frame_size, ChannelLayout::STEREO);
         af.set_rate(sample_rate as u32);
         af.set_pts(Some(pts));
+        // Native AAC (Ubuntu 22.04 / FFmpeg 4.4) reads channel_layout from
+        // the *frame*, not the encoder context — without this it returns
+        // EINVAL on send_frame. libfdk-aac on macOS doesn't care.
+        af.set_channel_layout(ChannelLayout::STEREO);
         for ch in 0..af.planes() {
             af.data_mut(ch).fill(0);
         }
