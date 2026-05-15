@@ -143,13 +143,19 @@ fn build_window() -> dioxus::desktop::WindowBuilder {
 }
 
 // Builds the app menu so the OS registers clipboard accelerators
-// (Ctrl/Cmd + C/V/X/A and Undo/Redo) for the WebView. Without this,
+// (Ctrl/Cmd + C/V/X and Undo/Redo) for the WebView. Without this,
 // `Config::with_decorations(false)` on Windows causes dioxus-desktop
 // to auto-force the menu to None (see dioxus-desktop config.rs), which
 // strips the muda accelerator table and leaves text inputs unable to
 // copy or paste. The submenu is invisible on Windows (no native frame
 // hosts a menu bar) but its accelerators still bind via
 // `TranslateAcceleratorW`. On macOS it appears as a standard Edit menu.
+//
+// `select_all` is intentionally omitted: muda's predefined item routes
+// Ctrl+A to "select all DOM content" (highlighting buttons, sidebars,
+// the whole window) regardless of focus, which is jarring. Without a
+// bound accelerator the WebView handles Ctrl+A natively — inside an
+// input it selects the input's text, elsewhere it does nothing.
 fn build_app_menu() -> Menu {
     let menu = Menu::new();
     let edit = Submenu::new("Edit", true);
@@ -160,8 +166,6 @@ fn build_app_menu() -> Menu {
         &PredefinedMenuItem::cut(None),
         &PredefinedMenuItem::copy(None),
         &PredefinedMenuItem::paste(None),
-        &PredefinedMenuItem::separator(),
-        &PredefinedMenuItem::select_all(None),
     ])
     .expect("failed to build edit submenu");
     menu.append(&edit).expect("failed to append edit submenu");
