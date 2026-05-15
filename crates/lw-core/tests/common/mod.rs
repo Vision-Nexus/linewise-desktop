@@ -9,7 +9,7 @@
 #![allow(dead_code, clippy::field_reassign_with_default)]
 
 use ffmpeg_next as ffmpeg;
-use ffmpeg_next::{ChannelLayout, Rational, codec, format, picture, util::frame::Audio};
+use ffmpeg_next::{Rational, codec, format, picture};
 use lw_core::config::TranscodeConfig;
 use lw_core::models::VideoInfo;
 use std::path::{Path, PathBuf};
@@ -113,96 +113,45 @@ fn drain_video_packets(
 
 /// Build an AAC-only m4a (no video stream) for the audio-only failure path.
 ///
-/// The native AAC encoder shipped with Ubuntu's libavcodec 58 only accepts
-/// the FLTP (planar f32) sample format that the codec advertises in
-/// `sample_fmts()`, and only at the rates listed in `supported_rates()`.
-/// Older fixtures hard-coded 48 kHz and `F32 Planar`, which works on
-/// macOS Homebrew (FFmpeg 7) but fails with EINVAL on Ubuntu 22.04
-/// (FFmpeg 4.4) because of a subtler ABI mismatch in how `send_frame`
-/// reads the channel layout. Pulling the encoder's preferred sample
-/// format and rate directly from the codec descriptor sidesteps the
-/// per-distribution divergence.
+/// We delegate to the `ffmpeg` CLI (already a build prerequisite for
+/// transcode tests, see `Cargo.toml` ffmpeg-next dep) instead of
+/// hand-rolling the encoder. Hand-rolled fixtures kept breaking across
+/// libavcodec versions: Ubuntu 22.04's FFmpeg 4.4 wanted FLTP planar
+/// f32 frames with `nb_samples == frame_size` exactly, FFmpeg 7 on
+/// Homebrew was lenient, FFmpeg 8 (which landed on the macos-14 runner
+/// image in May 2026) tightened up frame validation again and started
+/// returning EINVAL from `send_frame` for the same fixture code that
+/// worked the previous month. The CLI handles every version-specific
+/// quirk for us; the test only cares that the resulting file has an
+/// audio stream and no video stream.
 pub fn synthesize_audio_only_fixture(path: &Path) {
-    let codec = codec::encoder::find(codec::Id::AAC)
-        .expect("AAC encoder must be available — it is a build prerequisite");
-
-    let audio_codec = codec.audio().expect("AAC codec descriptor");
-    let sample_format = audio_codec
-        .formats()
-        .and_then(|mut it| it.next())
-        .unwrap_or(format::Sample::F32(format::sample::Type::Planar));
-    let sample_rate: i32 = audio_codec
-        .rates()
-        .and_then(|mut it| it.next())
-        .unwrap_or(48_000);
-
-    let mut octx = format::output(&path.to_path_buf()).expect("alloc m4a output");
-    let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
-
-    let time_base = Rational::new(1, sample_rate);
-
-    let mut enc_ctx = codec::context::Context::new_with_codec(codec)
-        .encoder()
-        .audio()
-        .expect("audio encoder ctx");
-    enc_ctx.set_bit_rate(96_000);
-    enc_ctx.set_rate(sample_rate);
-    enc_ctx.set_format(sample_format);
-    enc_ctx.set_channel_layout(ChannelLayout::STEREO);
-    enc_ctx.set_time_base(time_base);
-    if global_header {
-        enc_ctx.set_flags(codec::Flags::GLOBAL_HEADER);
-    }
-    let mut enc = enc_ctx.open_as(codec).expect("open aac encoder");
-
-    let mut ost = octx.add_stream(codec).expect("add audio stream");
-    ost.set_parameters(&enc);
-    ost.set_time_base(time_base);
-    let ost_index = ost.index();
-
-    octx.write_header().expect("m4a write_header");
-    let ost_tb = octx.stream(ost_index).unwrap().time_base();
-
-    // Native AAC on Linux refuses any frame smaller than `frame_size`
-    // (returns EINVAL), unlike libfdk-aac which is more lenient. Round
-    // total down so every send_frame carries a full frame.
-    let frame_size = enc.frame_size().max(1024) as usize;
-    let total_samples = (sample_rate as usize / frame_size) * frame_size;
-    let mut written = 0usize;
-    let mut pts: i64 = 0;
-    while written < total_samples {
-        let mut af = Audio::new(sample_format, frame_size, ChannelLayout::STEREO);
-        af.set_rate(sample_rate as u32);
-        af.set_pts(Some(pts));
-        af.set_channel_layout(ChannelLayout::STEREO);
-        for ch in 0..af.planes() {
-            af.data_mut(ch).fill(0);
-        }
-        enc.send_frame(&af).expect("send audio frame");
-        drain_audio_packets(&mut enc, &mut octx, ost_index, time_base, ost_tb);
-        pts += frame_size as i64;
-        written += frame_size;
-    }
-    enc.send_eof().ok();
-    drain_audio_packets(&mut enc, &mut octx, ost_index, time_base, ost_tb);
-
-    octx.write_trailer().expect("m4a write_trailer");
-}
-
-fn drain_audio_packets(
-    enc: &mut ffmpeg::encoder::Audio,
-    octx: &mut format::context::Output,
-    ost_index: usize,
-    in_tb: Rational,
-    out_tb: Rational,
-) {
-    let mut pkt = ffmpeg::Packet::empty();
-    while enc.receive_packet(&mut pkt).is_ok() {
-        pkt.set_stream(ost_index);
-        pkt.rescale_ts(in_tb, out_tb);
-        pkt.write_interleaved(octx)
-            .expect("write audio packet to fixture");
-    }
+    let path_str = path
+        .to_str()
+        .expect("audio fixture path must be valid UTF-8");
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-t",
+            "1",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            path_str,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("spawn ffmpeg CLI");
+    assert!(
+        status.success(),
+        "ffmpeg CLI failed to write audio-only fixture (exit: {status})"
+    );
 }
 
 pub fn probe_duration_secs(path: &Path) -> f64 {

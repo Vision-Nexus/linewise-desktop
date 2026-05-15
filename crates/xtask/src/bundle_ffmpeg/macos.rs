@@ -282,19 +282,25 @@ fn add_rpath_if_missing(target: &Path, rpath: &str) -> Result<()> {
     Ok(())
 }
 
+/// Mark a file user-writable so `install_name_tool` can rewrite its
+/// load commands. Homebrew dylibs land read-only after `cp`, and
+/// install_name_tool refuses to modify a read-only Mach-O. Unix-only
+/// because the macOS bundler never runs on a Windows build host —
+/// scoping the whole function keeps the clippy
+/// `permissions_set_readonly_false` lint from firing on a dead
+/// Windows branch.
+#[cfg(unix)]
 fn make_writable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path)?.permissions();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = perms.mode() | 0o200;
-        perms.set_mode(mode);
-    }
-    #[cfg(not(unix))]
-    {
-        perms.set_readonly(false);
-    }
+    let mode = perms.mode() | 0o200;
+    perms.set_mode(mode);
     std::fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_writable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
