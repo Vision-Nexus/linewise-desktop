@@ -67,7 +67,7 @@ pulldown-cmark = "0.12"
 base64 = "0.22"
 
 # UI
-dioxus = { version = "0.7", features = ["desktop"] }
+dioxus = { version = "0.7.9", features = ["desktop"] }
 rfd = "0.17"
 
 # OAuth (PKCE loopback flow for Google/Microsoft sign-in)

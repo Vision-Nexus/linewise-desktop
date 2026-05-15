@@ -171,6 +171,14 @@ impl UserInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadState {
     Staged,
+    /// Source video failed the acceptance-quality gate (bitrate, fps,
+    /// resolution, or device-fingerprint below the configured floor). The
+    /// row stays visible so the user can see *why* the file is unusable,
+    /// but it never advances to PENDING — the confirm-staged path skips it.
+    /// Distinct from `Failed`: a rejected file was refused before any
+    /// upload work happened, on grounds that won't change without picking
+    /// a different file.
+    Rejected,
     Pending,
     Validating,
     Transcoding,
@@ -187,6 +195,7 @@ impl UploadState {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Staged => "STAGED",
+            Self::Rejected => "REJECTED",
             Self::Pending => "PENDING",
             Self::Validating => "VALIDATING",
             Self::Transcoding => "TRANSCODING",
@@ -203,6 +212,7 @@ impl UploadState {
     pub fn parse(s: &str) -> Self {
         match s {
             "STAGED" => Self::Staged,
+            "REJECTED" => Self::Rejected,
             "PENDING" => Self::Pending,
             "VALIDATING" => Self::Validating,
             "TRANSCODING" => Self::Transcoding,
@@ -269,10 +279,31 @@ pub struct VideoInfo {
     pub audio_codec: String,
     pub duration_secs: f64,
     pub format: String,
+    /// Every readable container + per-stream tag from the source file,
+    /// in container-then-stream order. Per-stream keys are namespaced
+    /// like `video/handler_name`, `data/creation_time` so they don't
+    /// collide with the container-scope variant.
+    #[serde(default)]
+    pub metadata: Vec<(String, String)>,
+    /// Detected telemetry stream label (e.g. "DJI CAM metadata", "GoPro
+    /// telemetry (GPMF)") when the file carries one. We don't decode the
+    /// binary payload — just surface the fact that it's there.
+    #[serde(default)]
+    pub telemetry: Option<String>,
+}
+
+/// Acceptance verdict produced by the hard quality floor in `video.rs`.
+/// `Accepted` lets the file proceed to STAGED; `Rejected` carries the
+/// user-facing reasons and routes the task into the REJECTED state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Acceptance {
+    Accepted,
+    Rejected { reasons: Vec<String> },
 }
 
 #[derive(Debug, Clone)]
 pub struct VideoValidationResult {
     pub info: VideoInfo,
     pub warnings: Vec<String>,
+    pub acceptance: Acceptance,
 }

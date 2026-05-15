@@ -186,6 +186,8 @@ pub fn synthetic_video_info(duration_secs: f64) -> VideoInfo {
         audio_codec: String::new(),
         duration_secs,
         format: "mp4".into(),
+        metadata: Vec::new(),
+        telemetry: None,
     }
 }
 
@@ -199,6 +201,8 @@ pub fn audio_only_video_info(duration_secs: f64) -> VideoInfo {
         audio_codec: "aac".into(),
         duration_secs,
         format: "mov".into(),
+        metadata: Vec::new(),
+        telemetry: None,
     }
 }
 

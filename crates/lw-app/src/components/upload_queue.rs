@@ -382,10 +382,13 @@ pub fn UploadQueue() -> Element {
         "2px dashed transparent"
     };
 
-    // Split tasks into sections
+    // Split tasks into sections. REJECTED rows live alongside STAGED in
+    // the "Ready to Upload" section so the user sees them next to the
+    // files they *can* upload — but they render in red and the upload
+    // button at the top of the section ignores them via `staged_count`.
     let staged: Vec<_> = tasks
         .iter()
-        .filter(|t| t.state == UploadState::Staged)
+        .filter(|t| matches!(t.state, UploadState::Staged | UploadState::Rejected))
         .cloned()
         .collect();
     let transcoding: Vec<_> = tasks
@@ -613,20 +616,56 @@ fn StagedRow(
     // "Already matches targets" badge follows because it only makes
     // sense relative to a feature the user is using.
     let feature_enabled = transcode_config.enabled;
-    let show_transcode_toggle = feature_enabled && is_video && transcode_useful;
-    let show_already_ok_badge = feature_enabled && is_video && !transcode_useful;
+    let rejected = task.state == UploadState::Rejected;
+    let show_transcode_toggle = feature_enabled && is_video && transcode_useful && !rejected;
+    let show_already_ok_badge = feature_enabled && is_video && !transcode_useful && !rejected;
 
-    // Build video info summary line
-    let video_summary = task.video_info.as_ref().map(|info| {
+    // Build video info summary line and the matching popover groups.
+    // The summary line is the affordance the user hovers; the popover
+    // shows three groups stacked: the structural numbers (codec, res, fps,
+    // bitrate, audio, duration, container), the device-info group with
+    // a Telemetry row, and a flat dump of every readable container /
+    // stream tag for transparency.
+    let video_details = task.video_info.as_ref().map(|info| {
         let codec = info.codec.to_uppercase();
         let res = format!("{}x{}", info.width, info.height);
-        let fps = format!("{:.0}fps", info.fps);
+        let fps_text = format!("{:.0}fps", info.fps);
         let bitrate = if info.bitrate_kbps >= 1000 {
             format!("{:.0}Mbps", info.bitrate_kbps as f64 / 1000.0)
         } else {
             format!("{}kbps", info.bitrate_kbps)
         };
-        format!("{codec} · {res} · {fps} · {bitrate}")
+        let summary = format!("{codec} · {res} · {fps_text} · {bitrate}");
+        let mut structural: Vec<(String, String)> = Vec::new();
+        structural.push(("Codec".into(), info.codec.to_uppercase()));
+        structural.push(("Resolution".into(), res));
+        structural.push(("Frame rate".into(), format!("{:.2} fps", info.fps)));
+        structural.push(("Bitrate".into(), bitrate));
+        if !info.audio_codec.is_empty() {
+            structural.push(("Audio".into(), info.audio_codec.to_uppercase()));
+        }
+        structural.push(("Duration".into(), format_duration(info.duration_secs)));
+        structural.push(("Container".into(), info.format.clone()));
+
+        let mut device: Vec<(String, String)> = video::device_info_rows(info)
+            .into_iter()
+            .map(|(label, value)| {
+                let display = if value.is_empty() {
+                    "\u{2014}".to_string()
+                } else {
+                    value
+                };
+                (label.to_string(), display)
+            })
+            .collect();
+        device.push((
+            "Telemetry".into(),
+            info.telemetry.clone().unwrap_or_else(|| "\u{2014}".into()),
+        ));
+
+        let raw: Vec<(String, String)> = info.metadata.clone();
+
+        (summary, structural, device, raw)
     });
 
     let btn_style = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
@@ -643,33 +682,113 @@ fn StagedRow(
         "Transcode"
     };
 
+    let is_rejected = task.state == UploadState::Rejected;
+    let row_style = if is_rejected {
+        "padding: 10px 12px; border: 1px solid var(--error); border-radius: 6px; background: var(--error-bg); transition: background 0.15s, border-color 0.15s;"
+    } else {
+        "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg); transition: background 0.15s, border-color 0.15s;"
+    };
+    let warning_style = if is_rejected {
+        "font-size: 11px; color: var(--error); margin-top: 4px; padding: 3px 6px; background: var(--bg); border: 1px solid var(--error); border-radius: 3px;"
+    } else {
+        "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 3px;"
+    };
+
     rsx! {
         div {
             class: "staged-row fade-in",
-            style: "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg); transition: background 0.15s, border-color 0.15s;",
+            style: "{row_style}",
 
-            // Filename + size
+            // Filename + size, plus an inline REJECTED chip when applicable
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
                 div {
                     style: "flex: 1; min-width: 0;",
-                    div { style: "font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;", "{task.filename}" }
+                    div {
+                        style: "font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                        if is_rejected {
+                            span {
+                                style: "display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; padding: 1px 5px; margin-right: 6px; border-radius: 3px; background: var(--error); color: white; vertical-align: 1px;",
+                                "REJECTED"
+                            }
+                        }
+                        "{task.filename}"
+                    }
                 }
                 span { style: "font-size: 12px; color: var(--text-muted); flex-shrink: 0; margin-left: 8px;", "{format_size(task.size)}" }
             }
 
-            // Video info line
-            if let Some(summary) = &video_summary {
+            // Video info line + hover popover. Two-column layout when
+            // raw tags are present: left column stacks the structural
+            // numbers and the device-info group; right column is the raw
+            // container / stream dump. When raw is empty, the panel
+            // collapses to a single column.
+            if let Some((summary, structural, device, raw)) = &video_details {
                 div {
-                    style: "font-size: 11px; color: var(--text-secondary); margin-top: 4px;",
-                    "{summary}"
+                    class: "popover-host",
+                    style: "margin-top: 4px;",
+                    tabindex: "0",
+                    div {
+                        style: "font-size: 11px; color: var(--text-secondary); border-bottom: 1px dashed var(--border); display: inline-block;",
+                        "{summary}"
+                    }
+                    div {
+                        class: "popover-panel",
+                        style: if raw.is_empty() {
+                            "max-height: 360px; overflow-y: auto;".to_string()
+                        } else {
+                            "max-height: 360px; overflow-y: auto; display: grid; grid-template-columns: minmax(200px, 1fr) minmax(220px, 1fr); gap: 12px;".to_string()
+                        },
+                        div {
+                            style: "min-width: 0;",
+                            div {
+                                style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
+                                "Source metadata"
+                            }
+                            div {
+                                style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
+                                for (key, value) in structural.iter() {
+                                    div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                                    div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                                }
+                            }
+                            div {
+                                style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 10px; margin-bottom: 6px;",
+                                "Device"
+                            }
+                            div {
+                                style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
+                                for (key, value) in device.iter() {
+                                    div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                                    div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                                }
+                            }
+                        }
+                        if !raw.is_empty() {
+                            div {
+                                style: "min-width: 0;",
+                                div {
+                                    style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
+                                    "Raw tags"
+                                }
+                                div {
+                                    style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
+                                    for (key, value) in raw.iter() {
+                                        div { style: "color: var(--text-muted); white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{key}" }
+                                        div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
-            // Validation warnings
+            // Validation warnings (rendered red when the row is REJECTED so
+            // the rejection reasons read as the cause, not a side note).
             for warning in task.validation_warnings.iter() {
                 div {
-                    style: "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 3px;",
+                    style: "{warning_style}",
                     "{warning}"
                 }
             }
@@ -846,7 +965,7 @@ fn UploadTaskRow(
                                     "Clear"
                                 }
                             },
-                            UploadState::Staged => rsx! {},
+                            UploadState::Staged | UploadState::Rejected => rsx! {},
                         }
                     }
                 }
@@ -928,7 +1047,10 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
         UploadState::Verifying => "Verifying...".to_string(),
         UploadState::Paused => "Paused".to_string(),
         UploadState::Pending => "Pending...".to_string(),
-        UploadState::Staged | UploadState::Completed | UploadState::Failed => String::new(),
+        UploadState::Staged
+        | UploadState::Rejected
+        | UploadState::Completed
+        | UploadState::Failed => String::new(),
     }
 }
 
@@ -1022,5 +1144,18 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{bytes} B")
+    }
+}
+
+fn format_duration(secs: f64) -> String {
+    let secs = secs.max(0.0);
+    let total = secs.round() as u64;
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
     }
 }

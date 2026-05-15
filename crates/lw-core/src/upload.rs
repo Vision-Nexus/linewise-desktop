@@ -4,7 +4,9 @@ use crate::db::Database;
 use crate::dedup;
 use crate::desensitize;
 use crate::error::{DbError, UploadError, VideoValidationError};
-use crate::models::{CreateDocumentMeta, CreateDocumentRequest, UploadState, UploadTask};
+use crate::models::{
+    Acceptance, CreateDocumentMeta, CreateDocumentRequest, UploadState, UploadTask,
+};
 use crate::storage::{self, StorageBackend};
 use crate::{transcode, video};
 use std::path::{Path, PathBuf};
@@ -135,19 +137,36 @@ impl UploadEngine {
         // toast. The other variants (probe environment / codec we don't
         // understand / transient internal failure) degrade to a warning and
         // the task still stages without `video_info`.
-        let (video_info, validation_warnings) = if mime_type.starts_with("video/") {
+        //
+        // `Acceptance::Rejected` is a different shape from Unplayable: the
+        // file is technically readable but fails the hard quality / device
+        // floor in `video.rs`. We still stage it (so the user can see the
+        // row, the metadata popover, and the reasons) but in the REJECTED
+        // state — `confirm_staged` skips REJECTED rows, so the upload never
+        // happens.
+        let (video_info, validation_warnings, initial_state) = if mime_type.starts_with("video/") {
             match video::validate_video(path).await {
-                Ok(result) => (Some(result.info), result.warnings),
+                Ok(result) => {
+                    let mut warnings = result.warnings;
+                    let state = match result.acceptance {
+                        Acceptance::Accepted => UploadState::Staged,
+                        Acceptance::Rejected { reasons } => {
+                            warnings.extend(reasons);
+                            UploadState::Rejected
+                        }
+                    };
+                    (Some(result.info), warnings, state)
+                }
                 Err(VideoValidationError::Unplayable { reason }) => {
                     return Err(UploadError::VideoUnplayable { reason });
                 }
                 Err(e) => {
                     tracing::warn!("Video probe failed for {filename}: {e}");
-                    (None, Vec::new())
+                    (None, Vec::new(), UploadState::Staged)
                 }
             }
         } else {
-            (None, Vec::new())
+            (None, Vec::new(), UploadState::Staged)
         };
 
         let task = UploadTask {
@@ -161,7 +180,7 @@ impl UploadEngine {
             document_id: None,
             session_id: None,
             bytes_uploaded: 0,
-            state: UploadState::Staged,
+            state: initial_state,
             error_message: None,
             hash: None,
             validation_warnings,

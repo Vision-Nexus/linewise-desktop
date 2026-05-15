@@ -52,6 +52,14 @@ pub struct TranscodeResult {
     pub transcoded_size: u64,
 }
 
+/// Display-matrix side-data on the source video stream, copied verbatim.
+/// Nine 32-bit ints, the AV_PKT_DATA_DISPLAYMATRIX format used by GoPro,
+/// DJI, and iPhone-portrait clips to encode a 90° / 180° / 270° rotation
+/// without baking it into pixels. We treat it as opaque bytes — the helper
+/// reads it on the input and reapplies it to the final MP4 stream.
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayMatrix(pub [i32; 9]);
+
 /// Snapshot of what transcoding features are usable in the current process.
 /// Returned by [`probe_availability`] for the UI to render the settings pane.
 #[derive(Debug, Clone)]
@@ -151,6 +159,14 @@ pub fn transcode_video(
     let (scratch_dir, output_path) = prepare_paths(input_path)?;
     fs::create_dir_all(&scratch_dir).map_err(TranscodeError::Io)?;
 
+    // Read the source video stream's display-matrix once, before the HLS
+    // intermediate strips it. MPEG-TS doesn't carry display-matrix natively,
+    // so we hold the value in memory and reapply it on the final MP4 below.
+    let rotation = probe_display_matrix(input_path);
+    if rotation.is_some() {
+        tracing::info!("Source carries a display-matrix; will reapply it to the final MP4");
+    }
+
     let resume = detect_resume_point(&scratch_dir)?;
     if resume.start_seg > 0 {
         tracing::info!(
@@ -161,7 +177,7 @@ pub fn transcode_video(
     }
 
     encode_to_hls(input_path, &scratch_dir, info, config, &resume, on_progress)?;
-    concat_to_mp4(&scratch_dir, &output_path)?;
+    concat_to_mp4(&scratch_dir, &output_path, rotation)?;
 
     let transcoded_size = std::fs::metadata(&output_path)
         .map(|m| m.len())
@@ -602,7 +618,11 @@ fn drain_video(
 // ── Stage 2: concat segments into MP4 ───────────────────────────────────────
 
 #[doc(hidden)]
-pub fn concat_to_mp4(scratch_dir: &Path, output_path: &Path) -> Result<(), TranscodeError> {
+pub fn concat_to_mp4(
+    scratch_dir: &Path,
+    output_path: &Path,
+    rotation: Option<DisplayMatrix>,
+) -> Result<(), TranscodeError> {
     let mut segs: Vec<PathBuf> = fs::read_dir(scratch_dir)
         .map_err(TranscodeError::Io)?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -645,6 +665,7 @@ pub fn concat_to_mp4(scratch_dir: &Path, output_path: &Path) -> Result<(), Trans
         out_index: usize,
     }
     let mut mappings: std::collections::HashMap<usize, Mapping> = std::collections::HashMap::new();
+    let mut rotation_attached = false;
     for ist in ictx.streams() {
         let medium = ist.parameters().medium();
         if medium != media::Type::Video && medium != media::Type::Audio {
@@ -671,6 +692,13 @@ pub fn concat_to_mp4(scratch_dir: &Path, output_path: &Path) -> Result<(), Trans
         let ist_index = ist.index();
         let in_tb = ist.time_base();
         let out_index = ost.index();
+        if medium == media::Type::Video
+            && !rotation_attached
+            && let Some(matrix) = rotation
+        {
+            attach_display_matrix(&mut ost, matrix)?;
+            rotation_attached = true;
+        }
         ost.set_time_base(Rational::new(1, 90_000));
         mappings.insert(
             ist_index,
@@ -766,6 +794,85 @@ fn open_concat_input(concat_list: &Path) -> Result<format::context::Input, Trans
         }
         Ok(format::context::Input::wrap(ps))
     }
+}
+
+// ── Display-matrix side-data preservation ──────────────────────────────────
+
+/// Read the display-matrix side-data off the source video stream, if any.
+/// Walks the codecpar `coded_side_data` array directly because ffmpeg-next's
+/// `Stream::side_data()` returns a packet-side-data iterator that doesn't
+/// expose mutable access for forwarding to the output, and copying out the
+/// raw 36 bytes here keeps the read path self-contained.
+fn read_display_matrix(stream: &ffmpeg_next::Stream) -> Option<DisplayMatrix> {
+    // SAFETY: stream codecpar lives as long as the input format context;
+    // we read at most 36 bytes from a known-shape AVPacketSideData entry.
+    unsafe {
+        let mut params = stream.parameters();
+        let par = params.as_mut_ptr();
+        let count = (*par).nb_coded_side_data;
+        let head = (*par).coded_side_data;
+        if head.is_null() || count <= 0 {
+            return None;
+        }
+        for i in 0..count as isize {
+            let entry = head.offset(i);
+            if (*entry).type_ != sys::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX {
+                continue;
+            }
+            if (*entry).size < std::mem::size_of::<[i32; 9]>() || (*entry).data.is_null() {
+                return None;
+            }
+            let mut out = [0i32; 9];
+            std::ptr::copy_nonoverlapping((*entry).data as *const i32, out.as_mut_ptr(), 9);
+            return Some(DisplayMatrix(out));
+        }
+        None
+    }
+}
+
+/// Probe the source file for a video-stream display-matrix. Returns `None`
+/// for files without rotation metadata, files we can't open, or anything
+/// libav rejects — a missing matrix is the common case, not an error.
+pub fn probe_display_matrix(input_path: &Path) -> Option<DisplayMatrix> {
+    let ictx = format::input(input_path).ok()?;
+    let v_stream = ictx.streams().best(media::Type::Video)?;
+    read_display_matrix(&v_stream)
+}
+
+/// Attach a display-matrix entry to the output stream's codecpar
+/// `coded_side_data` array. Must be called before `write_header_with` —
+/// libavformat reads codecpar side-data exactly once at header time.
+fn attach_display_matrix(
+    stream: &mut ffmpeg_next::format::stream::StreamMut,
+    matrix: DisplayMatrix,
+) -> Result<(), TranscodeError> {
+    const SIZE: usize = std::mem::size_of::<[i32; 9]>();
+    // SAFETY: av_malloc/av_packet_side_data_add transfer ownership of the
+    // buffer to the side-data array, which is freed by avcodec_parameters_free
+    // when the output context is dropped. We bail and free locally on the
+    // single failure path before that hand-off.
+    unsafe {
+        let mut params = stream.parameters();
+        let par = params.as_mut_ptr();
+        let buf = sys::av_malloc(SIZE) as *mut i32;
+        if buf.is_null() {
+            return Err(enc_err("av_malloc(display-matrix) returned null"));
+        }
+        std::ptr::copy_nonoverlapping(matrix.0.as_ptr(), buf, 9);
+        let added = sys::av_packet_side_data_add(
+            &mut (*par).coded_side_data,
+            &mut (*par).nb_coded_side_data,
+            sys::AVPacketSideDataType::AV_PKT_DATA_DISPLAYMATRIX,
+            buf as *mut std::ffi::c_void,
+            SIZE,
+            0,
+        );
+        if added.is_null() {
+            sys::av_free(buf as *mut std::ffi::c_void);
+            return Err(enc_err("av_packet_side_data_add(display-matrix) failed"));
+        }
+    }
+    Ok(())
 }
 
 // ── Encoder selection ───────────────────────────────────────────────────────
@@ -1438,7 +1545,7 @@ mod tests {
         let dir = fresh_temp_dir("concat-empty");
         let out = dir.join("out.mp4");
 
-        let err = concat_to_mp4(&dir, &out).expect_err("must fail on empty scratch");
+        let err = concat_to_mp4(&dir, &out, None).expect_err("must fail on empty scratch");
 
         match err {
             TranscodeError::EncodingFailed(msg) => {
