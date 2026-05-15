@@ -9,6 +9,7 @@ pub mod styles;
 
 use std::borrow::Cow;
 
+use dioxus::desktop::muda::{Menu, PredefinedMenuItem, Submenu};
 use dioxus::desktop::{Config, WindowCloseBehaviour};
 use dioxus::prelude::*;
 use tracing_subscriber::EnvFilter;
@@ -89,7 +90,7 @@ fn main() {
 
     let cfg = Config::new()
         .with_close_behaviour(WindowCloseBehaviour::WindowHides)
-        .with_menu(None)
+        .with_menu(Some(build_app_menu()))
         .with_custom_protocol("localasset", |_webview_id, request| {
             let uri = request.uri().to_string();
             let path = request.uri().path();
@@ -139,4 +140,30 @@ fn build_window() -> dioxus::desktop::WindowBuilder {
         .with_decorations(false)
         .with_resizable(true)
         .with_inner_size(dioxus::desktop::LogicalSize::new(1200.0, 750.0))
+}
+
+// Builds the app menu so the OS registers clipboard accelerators
+// (Ctrl/Cmd + C/V/X/A and Undo/Redo) for the WebView. Without this,
+// `Config::with_decorations(false)` on Windows causes dioxus-desktop
+// to auto-force the menu to None (see dioxus-desktop config.rs), which
+// strips the muda accelerator table and leaves text inputs unable to
+// copy or paste. The submenu is invisible on Windows (no native frame
+// hosts a menu bar) but its accelerators still bind via
+// `TranslateAcceleratorW`. On macOS it appears as a standard Edit menu.
+fn build_app_menu() -> Menu {
+    let menu = Menu::new();
+    let edit = Submenu::new("Edit", true);
+    edit.append_items(&[
+        &PredefinedMenuItem::undo(None),
+        &PredefinedMenuItem::redo(None),
+        &PredefinedMenuItem::separator(),
+        &PredefinedMenuItem::cut(None),
+        &PredefinedMenuItem::copy(None),
+        &PredefinedMenuItem::paste(None),
+        &PredefinedMenuItem::separator(),
+        &PredefinedMenuItem::select_all(None),
+    ])
+    .expect("failed to build edit submenu");
+    menu.append(&edit).expect("failed to append edit submenu");
+    menu
 }
