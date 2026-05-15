@@ -234,7 +234,7 @@ impl Default for AppConfig {
                 environment: Environment::Dev,
             },
             upload: UploadConfig {
-                auto_clean: true,
+                auto_clean: false,
                 bandwidth_limit_mbps: 0,
                 max_concurrent_uploads: 3,
                 chunk_size_mb: 8,
