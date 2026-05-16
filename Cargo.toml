@@ -4,7 +4,7 @@ members = ["crates/lw-core", "crates/lw-chat", "crates/lw-app", "crates/xtask"]
 default-members = ["crates/lw-core", "crates/lw-chat", "crates/lw-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.10-test"
 edition = "2024"
 license = "GPL-2.0-or-later"
 authors = ["Linewise <dev@linewise.io>"]
