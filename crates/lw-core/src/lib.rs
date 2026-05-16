@@ -12,4 +12,5 @@ pub mod transcode;
 pub mod upload;
 pub mod version_check;
 pub mod video;
+pub mod video_rules;
 pub mod watcher;

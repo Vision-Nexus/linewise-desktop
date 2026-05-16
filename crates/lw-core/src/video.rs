@@ -1,103 +1,23 @@
 use crate::config::TranscodeConfig;
 use crate::error::VideoValidationError;
 use crate::models::{Acceptance, VideoInfo, VideoValidationResult};
+use crate::video_rules::{
+    Band, DeviceEncoderSignature, ProvenanceRules, Sub, TelemetryRules, VideoRules, render,
+};
 use std::path::Path;
+use std::sync::Arc;
 
-/// Expected video parameters with tolerance ranges (advisory, not blocking)
-const FPS_MIN: f64 = 20.0;
-const FPS_MAX: f64 = 40.0;
-const FPS_TARGET: f64 = 30.0;
-const RESOLUTION_MIN_HEIGHT: u32 = 720;
-const BITRATE_MIN_KBPS: u64 = 10_000;
-const BITRATE_MAX_KBPS: u64 = 35_000;
-const BITRATE_TARGET_KBPS: u64 = 30_000;
-
-/// Hard acceptance floor — clips that fail any of these go to the REJECTED
-/// state and never advance to upload. Distinct from the advisory ranges
-/// above: those produce yellow warnings, these produce a red row the user
-/// has to remove or re-shoot.
-///
-///   - bitrate at least 8 Mbps;
-///   - fps in [20, 70];
-///   - pixel count in [1920×1080, 3840×2160]. Inclusive on both ends, so
-///     canonical 1080p (and the portrait-orientation 1080×1920 form, which
-///     has the same pixel count) passes; canonical 4K UHD also passes.
-///     Anything below 1080p or above 4K UHD is rejected.
-const ACCEPT_BITRATE_MIN_KBPS: u64 = 8_000;
-const ACCEPT_FPS_MIN: f64 = 20.0;
-const ACCEPT_FPS_MAX: f64 = 70.0;
-const ACCEPT_PIXELS_MIN: u64 = 1920 * 1080;
-const ACCEPT_PIXELS_MAX: u64 = 3840 * 2160;
-
-/// Link to guide users on how to change camera settings
-pub const CAMERA_SETTINGS_GUIDE: &str = "https://docs.linewise.io/camera-settings";
-
-/// Container / stream metadata keys whose presence is the strongest evidence
-/// the file is camera-original. iPhones and most action cameras write at
-/// least one of these; a third-party transcode (HandBrake, ffmpeg, NLE
-/// export) drops them. Match is case-insensitive on the key.
-const CAMERA_FINGERPRINT_KEYS: &[&str] = &[
-    "make",
-    "model",
-    "com.apple.quicktime.make",
-    "com.apple.quicktime.model",
-    "com.android.manufacturer",
-    "com.android.model",
-];
-
-/// Metadata keys that hold the encoder / authoring-tool name. We read these
-/// to classify *why* the camera fingerprint is missing — was it stripped by
-/// a known re-encode tool, or just absent for unknown reasons?
-const ENCODER_KEYS: &[&str] = &["encoder", "com.apple.quicktime.software"];
-
-/// Substrings (case-insensitive, leading whitespace trimmed) that, when seen
-/// in an encoder tag, identify a re-encode pass by a non-camera tool.
-const REENCODE_SIGNATURES: &[&str] = &[
-    "lavf",
-    "lavc",
-    "handbrake",
-    "apple compressor",
-    "compressor",
-    "adobe premiere",
-    "final cut",
-    "davinci resolve",
-    "ffmpeg",
-    "libx264",
-    "libx265",
-];
-
-/// Substrings that, when seen in an encoder tag, identify a *camera* (not a
-/// re-encode tool). DJI / GoPro / Insta360 / Sony etc. write their model
-/// name into the `encoder` field rather than into `make`/`model`, so an
-/// "encoder = DJI Osmo Nano" file is camera-original even though it has no
-/// `make` key. Match is case-insensitive after trimming.
-///
-/// `(needle, vendor_label)` — the second element is the canonical vendor
-/// name we surface in the device popover row when the encoder string is
-/// the only fingerprint we have. Keep it in sync with what cameras
-/// actually write; this is a recognition list, not an enumeration.
-const DEVICE_ENCODER_SIGNATURES: &[(&str, &str)] = &[
-    ("dji", "DJI"),
-    ("gopro", "GoPro"),
-    ("insta360", "Insta360"),
-    ("sony", "Sony"),
-    ("canon", "Canon"),
-    ("nikon", "Nikon"),
-    ("panasonic", "Panasonic"),
-    ("blackmagic", "Blackmagic Design"),
-    ("hero", "GoPro"),
-    ("osmo", "DJI"),
-];
-
-/// Container codec_tag values we recognize as per-frame telemetry streams.
-/// FFmpeg sees them as `media::Type::Data` with a four-CC tag; we don't
-/// decode the binary payload, only detect that the stream exists.
-const TELEMETRY_TAGS: &[(&[u8; 4], &str)] = &[
-    (b"djmd", "DJI CAM metadata"),
-    (b"dbgi", "DJI debug info"),
-    (b"gpmd", "GoPro telemetry (GPMF)"),
-    (b"mett", "ISO timed metadata"),
-];
+/// Render a bitrate as a short, human-readable string. ≥1000 kbps becomes
+/// `54.3Mbps` (one decimal); below 1000 stays in `kbps`. Used for both the
+/// popover summary line and the validation warnings, so the units the user
+/// sees match across surfaces.
+pub fn format_bitrate(kbps: u64) -> String {
+    if kbps >= 1000 {
+        format!("{:.1}Mbps", kbps as f64 / 1000.0)
+    } else {
+        format!("{kbps}kbps")
+    }
+}
 
 /// Verdict on where a clip came from. Drives the metadata-loss warning.
 /// Private to this module — only the resulting warning string crosses the
@@ -114,30 +34,33 @@ enum Provenance {
     Stripped,
 }
 
-fn classify_provenance(ictx: &ffmpeg_next::format::context::Input) -> Provenance {
+fn classify_provenance(
+    ictx: &ffmpeg_next::format::context::Input,
+    rules: &ProvenanceRules,
+) -> Provenance {
     let container = ictx.metadata();
     // Stream metadata can carry encoder info on a per-stream level (most
     // common for MOV's `com.apple.quicktime.software`), so eagerly copy
     // any matching key into an owned String. We can't return a `&str`
     // borrowed from the stream's DictionaryRef because the underlying
     // Stream wrapper goes out of scope at the end of `.map(...)`.
-    let stream_lookup = |keys: &[&str]| -> Option<String> {
+    let stream_lookup = |keys: &[String]| -> Option<String> {
         let stream = ictx.streams().best(ffmpeg_next::media::Type::Video)?;
         let dict = stream.metadata();
         keys.iter().find_map(|k| dict.get(k).map(str::to_owned))
     };
-    let any_present = |keys: &[&str]| -> bool {
+    let any_present = |keys: &[String]| -> bool {
         keys.iter().any(|k| container.get(k).is_some()) || stream_lookup(keys).is_some()
     };
-    let first_value = |keys: &[&str]| -> Option<String> {
+    let first_value = |keys: &[String]| -> Option<String> {
         keys.iter()
             .find_map(|k| container.get(k).map(str::to_owned))
             .or_else(|| stream_lookup(keys))
     };
 
-    let camera_present = any_present(CAMERA_FINGERPRINT_KEYS);
-    let encoder_tag = first_value(ENCODER_KEYS);
-    classify_from_signals(camera_present, encoder_tag.as_deref())
+    let camera_present = any_present(&rules.camera_fingerprint_keys);
+    let encoder_tag = first_value(&rules.encoder_keys);
+    classify_from_signals(camera_present, encoder_tag.as_deref(), rules)
 }
 
 /// Pure decision helper. Splits the I/O (reading dict keys from an ffmpeg
@@ -150,7 +73,11 @@ fn classify_provenance(ictx: &ffmpeg_next::format::context::Input) -> Provenance
 /// camera vendor still flags `CameraOriginal` (DJI / GoPro / Insta360 etc.
 /// all write their model into `encoder` rather than into `make`). Only
 /// when neither pattern matches do we fall through to `Stripped`.
-fn classify_from_signals(camera_present: bool, encoder_tag: Option<&str>) -> Provenance {
+fn classify_from_signals(
+    camera_present: bool,
+    encoder_tag: Option<&str>,
+    rules: &ProvenanceRules,
+) -> Provenance {
     if camera_present {
         return Provenance::CameraOriginal;
     }
@@ -158,13 +85,18 @@ fn classify_from_signals(camera_present: bool, encoder_tag: Option<&str>) -> Pro
         return Provenance::Stripped;
     };
     let needle = tool.trim().to_ascii_lowercase();
-    if REENCODE_SIGNATURES.iter().any(|sig| needle.contains(sig)) {
+    if rules
+        .reencode_signatures
+        .iter()
+        .any(|sig| needle.contains(sig.as_str()))
+    {
         Provenance::Reencoded {
             tool: tool.trim().to_string(),
         }
-    } else if DEVICE_ENCODER_SIGNATURES
+    } else if rules
+        .device_encoder_signatures
         .iter()
-        .any(|(sig, _)| needle.contains(sig))
+        .any(|sig| needle.contains(sig.needle.as_str()))
     {
         Provenance::CameraOriginal
     } else {
@@ -180,36 +112,56 @@ fn classify_from_signals(camera_present: bool, encoder_tag: Option<&str>) -> Pro
 /// rule: no recognizable device fingerprint means the file was almost
 /// certainly re-encoded by another tool, which we refuse to ingest because
 /// the original camera evidence is gone.
-fn classify_acceptance(info: &VideoInfo, provenance: &Provenance) -> Acceptance {
+fn classify_acceptance(
+    info: &VideoInfo,
+    provenance: &Provenance,
+    rules: &VideoRules,
+) -> Acceptance {
     let mut reasons: Vec<String> = Vec::new();
 
-    // Bitrate floor. `0` means we couldn't read a bitrate at all — don't
-    // block on missing data; the warning band already mentions it.
-    if info.bitrate_kbps > 0 && info.bitrate_kbps < ACCEPT_BITRATE_MIN_KBPS {
-        reasons.push(format!(
-            "Bitrate {}kbps is below the {}Mbps acceptance floor",
+    // Bitrate. `0` means we couldn't read a bitrate at all — don't block
+    // on missing data; the warning band already mentions it.
+    if info.bitrate_kbps > 0
+        && let Some(side) = trip(&rules.numeric.bitrate_kbps.accept, info.bitrate_kbps)
+    {
+        reasons.push(render_bitrate_band(
+            &rules.numeric.bitrate_kbps.accept,
+            rules.numeric.bitrate_kbps.target,
             info.bitrate_kbps,
-            ACCEPT_BITRATE_MIN_KBPS / 1000,
+            side,
         ));
     }
 
-    // Fps must be strictly inside the (min, max) band as written.
-    // `fps == 0.0` again means "couldn't read" — skip rather than block.
-    if info.fps > 0.0 && (info.fps < ACCEPT_FPS_MIN || info.fps > ACCEPT_FPS_MAX) {
-        reasons.push(format!(
-            "Frame rate {:.1}fps is outside the {}–{}fps acceptance band",
-            info.fps, ACCEPT_FPS_MIN as u32, ACCEPT_FPS_MAX as u32,
+    // Fps. `0.0` again means "couldn't read" — skip rather than block.
+    if info.fps > 0.0
+        && let Some(side) = trip(&rules.numeric.fps.accept, info.fps)
+    {
+        reasons.push(render_fps_band(
+            &rules.numeric.fps.accept,
+            rules.numeric.fps.target,
+            info.fps,
+            side,
         ));
     }
 
-    // Pixel count: in [1080p, 4K UHD]. Inclusive on both ends so 1920×1080
-    // and 3840×2160 (and their portrait twins) all pass.
+    // Pixel count: between accept.pixels_min and accept.pixels_max,
+    // inclusive.
     let pixels = u64::from(info.width) * u64::from(info.height);
-    if pixels > 0 && !(ACCEPT_PIXELS_MIN..=ACCEPT_PIXELS_MAX).contains(&pixels) {
-        reasons.push(format!(
-            "Resolution {}x{} is outside the 1080p–4K acceptance band",
-            info.width, info.height,
-        ));
+    if pixels > 0 {
+        let accept = &rules.numeric.resolution.accept;
+        if !(accept.pixels_min..=accept.pixels_max).contains(&pixels) {
+            let side = if pixels < accept.pixels_min {
+                Bound::Below
+            } else {
+                Bound::Above
+            };
+            reasons.push(render_resolution_accept(
+                accept,
+                info.width,
+                info.height,
+                side,
+            ));
+        }
     }
 
     // Provenance: anything that isn't camera-original is rejected.
@@ -219,15 +171,13 @@ fn classify_acceptance(info: &VideoInfo, provenance: &Provenance) -> Acceptance 
     match provenance {
         Provenance::CameraOriginal => {}
         Provenance::Reencoded { tool } => {
-            reasons.push(format!(
-                "Source was re-encoded by {tool}; original camera fingerprint is gone"
+            reasons.push(render(
+                &rules.provenance.messages.reencoded,
+                &[("tool", Sub::Str(tool.clone()))],
             ));
         }
         Provenance::Stripped => {
-            reasons.push(
-                "Device metadata is missing — the file was likely re-encoded by another tool"
-                    .to_string(),
-            );
+            reasons.push(rules.provenance.messages.stripped.clone());
         }
     }
 
@@ -236,6 +186,117 @@ fn classify_acceptance(info: &VideoInfo, provenance: &Provenance) -> Acceptance 
     } else {
         Acceptance::Rejected { reasons }
     }
+}
+
+/// Which side of a band a numeric value tripped — `Below` means it fell
+/// past `min`, `Above` means it exceeded `max`. The `as_str` rendering
+/// is what `{bound}` resolves to in a rule message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    Below,
+    Above,
+}
+
+impl Bound {
+    fn as_str(self) -> &'static str {
+        match self {
+            Bound::Below => "below",
+            Bound::Above => "above",
+        }
+    }
+}
+
+/// Test whether `value` lies outside the band. Returns the side that
+/// tripped, or `None` when both edges are unset (open-open band) or
+/// the value is inside the band.
+fn trip<T: PartialOrd + Copy>(band: &Band<T>, value: T) -> Option<Bound> {
+    if let Some(min) = band.min
+        && value < min
+    {
+        return Some(Bound::Below);
+    }
+    if let Some(max) = band.max
+        && value > max
+    {
+        return Some(Bound::Above);
+    }
+    None
+}
+
+/// Render an fps band's message. Templates can reference
+/// `{fps[:.N]}`, `{min[:.N]}`, `{max[:.N]}`, `{target[:.N]}`, `{bound}`.
+/// `{min}` / `{max}` fall back to `0.0` when the corresponding edge is
+/// absent — a rule file that uses them must have set both.
+fn render_fps_band(band: &Band<f64>, target: f64, fps: f64, bound: Bound) -> String {
+    let min_v = band.min.unwrap_or(0.0);
+    let max_v = band.max.unwrap_or(0.0);
+    render(
+        &band.message,
+        &[
+            ("fps", Sub::Float(fps)),
+            ("min", Sub::Float(min_v)),
+            ("max", Sub::Float(max_v)),
+            ("target", Sub::Float(target)),
+            ("bound", Sub::Str(bound.as_str().to_owned())),
+        ],
+    )
+}
+
+/// Render a bitrate band's message. User-facing units are megabits, so
+/// we expose `{min_mbps}` / `{max_mbps}` / `{target_mbps}` (integer
+/// division of the kbps values) alongside `{bitrate}` (the
+/// already-formatted current value) and `{bound}`.
+fn render_bitrate_band(
+    band: &Band<u64>,
+    target_kbps: u64,
+    bitrate_kbps: u64,
+    bound: Bound,
+) -> String {
+    let min_v = band.min.unwrap_or(0);
+    let max_v = band.max.unwrap_or(0);
+    render(
+        &band.message,
+        &[
+            ("bitrate", Sub::Str(format_bitrate(bitrate_kbps))),
+            ("min_mbps", Sub::Str((min_v / 1000).to_string())),
+            ("max_mbps", Sub::Str((max_v / 1000).to_string())),
+            ("target_mbps", Sub::Str((target_kbps / 1000).to_string())),
+            ("bound", Sub::Str(bound.as_str().to_owned())),
+        ],
+    )
+}
+
+fn render_resolution_recommend(
+    rule: &crate::video_rules::ResolutionRecommend,
+    width: u32,
+    height: u32,
+) -> String {
+    render(
+        &rule.message,
+        &[
+            ("width", Sub::Str(width.to_string())),
+            ("height", Sub::Str(height.to_string())),
+            ("min_height", Sub::Str(rule.min_height.to_string())),
+        ],
+    )
+}
+
+fn render_resolution_accept(
+    rule: &crate::video_rules::ResolutionAccept,
+    width: u32,
+    height: u32,
+    bound: Bound,
+) -> String {
+    render(
+        &rule.message,
+        &[
+            ("width", Sub::Str(width.to_string())),
+            ("height", Sub::Str(height.to_string())),
+            ("pixels_min", Sub::Str(rule.pixels_min.to_string())),
+            ("pixels_max", Sub::Str(rule.pixels_max.to_string())),
+            ("bound", Sub::Str(bound.as_str().to_owned())),
+        ],
+    )
 }
 
 /// Normalize the device-info group into labelled rows. Multiple raw keys
@@ -249,7 +310,10 @@ fn classify_acceptance(info: &VideoInfo, provenance: &Provenance) -> Acceptance 
 /// a known camera vendor (DJI / GoPro / etc.), we split the encoder tag
 /// into a vendor + remainder pair so the device row reads "DJI / Osmo
 /// Nano" instead of leaving Make and Model empty.
-pub fn device_info_rows(info: &VideoInfo) -> Vec<(&'static str, String)> {
+pub fn device_info_rows(
+    info: &VideoInfo,
+    signatures: &[DeviceEncoderSignature],
+) -> Vec<(&'static str, String)> {
     let lookup = |keys: &[&str]| -> Option<String> {
         keys.iter().find_map(|k| {
             info.metadata
@@ -282,18 +346,18 @@ pub fn device_info_rows(info: &VideoInfo) -> Vec<(&'static str, String)> {
     // leave the rows empty.
     if make.is_empty() && model.is_empty() && !software.is_empty() {
         let needle = software.trim().to_ascii_lowercase();
-        if let Some((_, vendor)) = DEVICE_ENCODER_SIGNATURES
+        if let Some(sig) = signatures
             .iter()
-            .find(|(sig, _)| needle.contains(sig))
+            .find(|sig| needle.contains(sig.needle.as_str()))
         {
-            make = (*vendor).to_string();
+            make = sig.vendor_label.clone();
             // Strip vendor tokens from the encoder string; what's left is
             // the model. If nothing's left (encoder was just the vendor
             // name), fall back to the full encoder so the row shows
             // something.
             let remainder = software
                 .split_whitespace()
-                .filter(|w| !w.eq_ignore_ascii_case(vendor))
+                .filter(|w| !w.eq_ignore_ascii_case(&sig.vendor_label))
                 .collect::<Vec<_>>()
                 .join(" ");
             model = if remainder.is_empty() {
@@ -351,12 +415,15 @@ fn collect_popover_metadata(ictx: &ffmpeg_next::format::context::Input) -> Vec<(
 /// Walk the input streams looking for known telemetry data streams. A
 /// match returns the human-readable label we surface in the popover; we
 /// don't decode the binary payload, only detect that it's there.
-pub fn detect_telemetry(info_streams: &[(ffmpeg_next::media::Type, [u8; 4])]) -> Option<String> {
+pub fn detect_telemetry(
+    info_streams: &[(ffmpeg_next::media::Type, [u8; 4])],
+    rules: &TelemetryRules,
+) -> Option<String> {
     info_streams.iter().find_map(|(medium, tag)| match medium {
-        ffmpeg_next::media::Type::Data => TELEMETRY_TAGS
-            .iter()
-            .find(|(needle, _)| needle == &tag)
-            .map(|(_, label)| label.to_string()),
+        ffmpeg_next::media::Type::Data => rules.tags.iter().find_map(|t| match t.fourcc_bytes() {
+            Some(bytes) if bytes == *tag => Some(t.label.clone()),
+            _ => None,
+        }),
         _ => None,
     })
 }
@@ -379,41 +446,44 @@ fn collect_data_streams(
 /// Heuristic: does this clip *look like* it should carry telemetry? Used
 /// to decide whether to warn when telemetry is missing — we don't want to
 /// nag iPhone users about a missing GPMF stream.
-fn looks_like_action_camera(info: &VideoInfo) -> bool {
+fn looks_like_action_camera(info: &VideoInfo, rules: &TelemetryRules) -> bool {
     let has_action_keyword = |s: &str| {
         let n = s.to_ascii_lowercase();
-        n.contains("dji")
-            || n.contains("gopro")
-            || n.contains("hero")
-            || n.contains("osmo")
-            || n.contains("insta360")
+        rules
+            .action_camera_keywords
+            .iter()
+            .any(|kw| n.contains(kw.as_str()))
     };
     info.metadata.iter().any(|(_, v)| has_action_keyword(v))
 }
 
-fn provenance_warning(p: &Provenance) -> Option<String> {
+fn provenance_warning(p: &Provenance, rules: &ProvenanceRules) -> Option<String> {
     match p {
         Provenance::CameraOriginal => None,
-        Provenance::Reencoded { tool } => Some(format!(
-            "This clip was re-encoded by {tool}; the original camera fingerprint is gone."
+        Provenance::Reencoded { tool } => Some(render(
+            &rules.messages.reencoded_warning,
+            &[("tool", Sub::Str(tool.clone()))],
         )),
-        Provenance::Stripped => Some(
-            "This clip's device metadata is missing — it may have been re-encoded or transcoded by another tool."
-                .to_string(),
-        ),
+        Provenance::Stripped => Some(rules.messages.stripped_warning.clone()),
     }
 }
 
 /// Probe a video file using ffmpeg-next and validate against target parameters
-pub async fn validate_video(path: &Path) -> Result<VideoValidationResult, VideoValidationError> {
+pub async fn validate_video(
+    path: &Path,
+    rules: Arc<VideoRules>,
+) -> Result<VideoValidationResult, VideoValidationError> {
     let path = path.to_path_buf();
 
-    tokio::task::spawn_blocking(move || probe_and_validate(&path))
+    tokio::task::spawn_blocking(move || probe_and_validate(&path, &rules))
         .await
         .map_err(|e| VideoValidationError::ProbeFailed(e.to_string()))?
 }
 
-fn probe_and_validate(path: &Path) -> Result<VideoValidationResult, VideoValidationError> {
+fn probe_and_validate(
+    path: &Path,
+    rules: &VideoRules,
+) -> Result<VideoValidationResult, VideoValidationError> {
     // Treat the three structural failure points below as `Unplayable`. They
     // fire when the container has no usable timeline — most often a missing
     // `moov` atom from a power-cut MP4/MOV recording, but also truncated
@@ -481,7 +551,7 @@ fn probe_and_validate(path: &Path) -> Result<VideoValidationResult, VideoValidat
         .unwrap_or_default();
 
     let metadata = collect_popover_metadata(&ictx);
-    let telemetry = detect_telemetry(&collect_data_streams(&ictx));
+    let telemetry = detect_telemetry(&collect_data_streams(&ictx), &rules.telemetry);
 
     let info = VideoInfo {
         width,
@@ -498,41 +568,48 @@ fn probe_and_validate(path: &Path) -> Result<VideoValidationResult, VideoValidat
 
     let mut warnings = Vec::new();
 
-    // FPS: acceptable range 20-40, target 30
-    if fps > 0.0 && !(FPS_MIN..=FPS_MAX).contains(&fps) {
-        warnings.push(format!(
-            "Frame rate {fps:.1}fps is outside recommended range ({FPS_MIN:.0}-{FPS_MAX:.0}fps, target {FPS_TARGET:.0}fps)"
+    // Soft fps band.
+    if info.fps > 0.0
+        && let Some(side) = trip(&rules.numeric.fps.recommend, info.fps)
+    {
+        warnings.push(render_fps_band(
+            &rules.numeric.fps.recommend,
+            rules.numeric.fps.target,
+            info.fps,
+            side,
         ));
     }
 
-    // Resolution: warn if below 720p
-    if height > 0 && height < RESOLUTION_MIN_HEIGHT {
-        warnings.push(format!(
-            "Resolution {width}x{height} is below minimum recommended ({RESOLUTION_MIN_HEIGHT}p)"
-        ));
+    // Soft resolution floor (height).
+    let recommend = &rules.numeric.resolution.recommend;
+    if height > 0 && height < recommend.min_height {
+        warnings.push(render_resolution_recommend(recommend, width, height));
     }
 
-    // Bitrate: acceptable range 10M-35M
-    if bitrate_kbps > 0 && !(BITRATE_MIN_KBPS..=BITRATE_MAX_KBPS).contains(&bitrate_kbps) {
-        warnings.push(format!(
-            "Bitrate {bitrate_kbps}kbps is outside recommended range ({}-{}Mbps, target {}Mbps)",
-            BITRATE_MIN_KBPS / 1000,
-            BITRATE_MAX_KBPS / 1000,
-            BITRATE_TARGET_KBPS / 1000,
+    // Soft bitrate band.
+    if bitrate_kbps > 0
+        && let Some(side) = trip(&rules.numeric.bitrate_kbps.recommend, bitrate_kbps)
+    {
+        warnings.push(render_bitrate_band(
+            &rules.numeric.bitrate_kbps.recommend,
+            rules.numeric.bitrate_kbps.target,
+            bitrate_kbps,
+            side,
         ));
     }
 
     if !warnings.is_empty() {
-        warnings.push(format!(
-            "See how to adjust your camera settings: {CAMERA_SETTINGS_GUIDE}"
+        warnings.push(render(
+            &rules.camera_settings_guide_footer,
+            &[("url", Sub::Str(rules.camera_settings_guide_url.clone()))],
         ));
     }
 
     // Provenance check rides the same warnings vector but sits *after* the
     // camera-settings link footer, since the link doesn't apply — the user
     // can't fix re-encoding by changing a camera setting.
-    let provenance = classify_provenance(&ictx);
-    if let Some(msg) = provenance_warning(&provenance) {
+    let provenance = classify_provenance(&ictx, &rules.provenance);
+    if let Some(msg) = provenance_warning(&provenance, &rules.provenance) {
         warnings.push(msg);
     }
 
@@ -541,15 +618,11 @@ fn probe_and_validate(path: &Path) -> Result<VideoValidationResult, VideoValidat
     // (djmd / gpmd) that downstream evidence-handling relies on; an
     // action-camera clip without one is usually the output of a re-encode
     // that stripped the data stream while preserving the encoder tag.
-    if info.telemetry.is_none() && looks_like_action_camera(&info) {
-        warnings.push(
-            "This clip looks like action-camera footage but carries no telemetry stream — \
-             gimbal / GPS / IMU samples will not be available downstream."
-                .to_string(),
-        );
+    if info.telemetry.is_none() && looks_like_action_camera(&info, &rules.telemetry) {
+        warnings.push(rules.telemetry.missing_telemetry_warning.clone());
     }
 
-    let acceptance = classify_acceptance(&info, &provenance);
+    let acceptance = classify_acceptance(&info, &provenance, rules);
 
     Ok(VideoValidationResult {
         info,
@@ -574,6 +647,10 @@ pub fn transcode_would_help(info: &VideoInfo, cfg: &TranscodeConfig) -> bool {
 mod tests {
     use super::*;
 
+    fn rules() -> Arc<VideoRules> {
+        VideoRules::embedded()
+    }
+
     /// Writes a minimal ISO-BMFF file containing only an `ftyp` box — no
     /// `moov`, no `mdat`. This is the shape of a power-cut MP4/MOV: the
     /// header arrives, but the trailing `moov` (which holds the index)
@@ -597,7 +674,7 @@ mod tests {
             std::env::temp_dir().join(format!("lw-test-no-moov-{}.mp4", uuid::Uuid::new_v4()));
         write_moovless_mp4(&path);
 
-        let result = validate_video(&path).await;
+        let result = validate_video(&path, rules()).await;
 
         let _ = std::fs::remove_file(&path);
 
@@ -673,16 +750,18 @@ mod tests {
 
     #[test]
     fn provenance_camera_original_when_make_present() {
+        let r = rules();
         // iPhone-style: `make=Apple` is present alongside an encoder tag
         // that would otherwise look like a re-encode (Apple writes
         // `com.apple.quicktime.software`). Camera fingerprint wins.
-        let v = classify_from_signals(true, Some("HandBrake 1.6.1"));
+        let v = classify_from_signals(true, Some("HandBrake 1.6.1"), &r.provenance);
         assert_eq!(v, Provenance::CameraOriginal);
     }
 
     #[test]
     fn provenance_reencoded_when_known_signature() {
-        let v = classify_from_signals(false, Some("Lavf60.16.100"));
+        let r = rules();
+        let v = classify_from_signals(false, Some("Lavf60.16.100"), &r.provenance);
         match v {
             Provenance::Reencoded { tool } => assert_eq!(tool, "Lavf60.16.100"),
             other => panic!("expected Reencoded, got {other:?}"),
@@ -691,7 +770,8 @@ mod tests {
 
     #[test]
     fn provenance_reencoded_case_insensitive_and_trimmed() {
-        let v = classify_from_signals(false, Some("  HandBrake 1.6.1 "));
+        let r = rules();
+        let v = classify_from_signals(false, Some("  HandBrake 1.6.1 "), &r.provenance);
         match v {
             Provenance::Reencoded { tool } => assert_eq!(tool, "HandBrake 1.6.1"),
             other => panic!("expected Reencoded, got {other:?}"),
@@ -700,15 +780,17 @@ mod tests {
 
     #[test]
     fn provenance_stripped_when_no_metadata() {
-        let v = classify_from_signals(false, None);
+        let r = rules();
+        let v = classify_from_signals(false, None, &r.provenance);
         assert_eq!(v, Provenance::Stripped);
     }
 
     #[test]
     fn provenance_stripped_when_encoder_unknown() {
+        let r = rules();
         // An encoder string we don't recognize. We can't claim
         // "re-encoded by X", but the camera fingerprint is still gone.
-        let v = classify_from_signals(false, Some("MysteryToolPro 9.9"));
+        let v = classify_from_signals(false, Some("MysteryToolPro 9.9"), &r.provenance);
         assert_eq!(v, Provenance::Stripped);
     }
 
@@ -729,18 +811,22 @@ mod tests {
 
     #[test]
     fn acceptance_clean_1440p_30fps_15mbps_passes() {
+        let r = rules();
         let v = classify_acceptance(
             &full_info(2560, 1440, 30.0, 15_000),
             &Provenance::CameraOriginal,
+            &r,
         );
         assert_eq!(v, Acceptance::Accepted);
     }
 
     #[test]
     fn acceptance_blocks_below_bitrate_floor() {
+        let r = rules();
         let v = classify_acceptance(
             &full_info(2560, 1440, 30.0, 6_000),
             &Provenance::CameraOriginal,
+            &r,
         );
         match v {
             Acceptance::Rejected { reasons } => {
@@ -751,91 +837,141 @@ mod tests {
     }
 
     #[test]
+    fn acceptance_blocks_above_bitrate_ceiling() {
+        // New ceiling: 50 Mbps. 60 Mbps must reject.
+        let r = rules();
+        let v = classify_acceptance(
+            &full_info(2560, 1440, 30.0, 60_000),
+            &Provenance::CameraOriginal,
+            &r,
+        );
+        match v {
+            Acceptance::Rejected { reasons } => {
+                assert!(reasons.iter().any(|r| r.contains("above")), "{reasons:?}");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acceptance_passes_above_ceiling_when_max_absent() {
+        // Contract: a custom rule file that omits `accept.max` on the
+        // bitrate band leaves the ceiling unenforced. An otherwise-clean
+        // 100 Mbps clip must pass without that rule.
+        let mut r = (*rules()).clone();
+        r.numeric.bitrate_kbps.accept.max = None;
+        let r = Arc::new(r);
+        let v = classify_acceptance(
+            &full_info(2560, 1440, 30.0, 100_000),
+            &Provenance::CameraOriginal,
+            &r,
+        );
+        assert_eq!(v, Acceptance::Accepted);
+    }
+
+    #[test]
     fn acceptance_blocks_below_fps_floor() {
+        let r = rules();
         let v = classify_acceptance(
             &full_info(2560, 1440, 18.0, 15_000),
             &Provenance::CameraOriginal,
+            &r,
         );
         assert!(matches!(v, Acceptance::Rejected { .. }));
     }
 
     #[test]
     fn acceptance_blocks_above_fps_ceiling() {
+        let r = rules();
         let v = classify_acceptance(
             &full_info(2560, 1440, 120.0, 15_000),
             &Provenance::CameraOriginal,
+            &r,
         );
         assert!(matches!(v, Acceptance::Rejected { .. }));
     }
 
     #[test]
     fn acceptance_accepts_exactly_1080p() {
+        let r = rules();
         // 1920×1080 lies on the lower bound and is accepted (inclusive).
         let v = classify_acceptance(
             &full_info(1920, 1080, 30.0, 15_000),
             &Provenance::CameraOriginal,
+            &r,
         );
         assert_eq!(v, Acceptance::Accepted);
     }
 
     #[test]
     fn acceptance_accepts_portrait_1080p() {
+        let r = rules();
         // 1080×1920 has the same pixel count as 1920×1080, so the
         // pixel-count rule treats it identically. Rotation lives in
         // side-data, not in the dimensions stored on the stream.
         let v = classify_acceptance(
             &full_info(1080, 1920, 30.0, 15_000),
             &Provenance::CameraOriginal,
+            &r,
         );
         assert_eq!(v, Acceptance::Accepted);
     }
 
     #[test]
     fn acceptance_accepts_exactly_4k() {
+        let r = rules();
         // 3840×2160 lies on the upper bound and is accepted (inclusive).
         let v = classify_acceptance(
             &full_info(3840, 2160, 30.0, 15_000),
             &Provenance::CameraOriginal,
+            &r,
         );
         assert_eq!(v, Acceptance::Accepted);
     }
 
     #[test]
     fn acceptance_rejects_below_1080p() {
+        let r = rules();
         let v = classify_acceptance(
             &full_info(1280, 720, 30.0, 15_000),
             &Provenance::CameraOriginal,
+            &r,
         );
         assert!(matches!(v, Acceptance::Rejected { .. }));
     }
 
     #[test]
     fn acceptance_rejects_above_4k() {
+        let r = rules();
         // 8K, 7680×4320 — well past the 4K ceiling.
         let v = classify_acceptance(
             &full_info(7680, 4320, 30.0, 15_000),
             &Provenance::CameraOriginal,
+            &r,
         );
         assert!(matches!(v, Acceptance::Rejected { .. }));
     }
 
     #[test]
     fn acceptance_skips_when_unreadable() {
+        let r = rules();
         // bitrate=0, fps=0, dimensions=0 — probe couldn't read structural
         // fields. We don't block on missing data; the unplayable path
         // already errored out earlier if the file is truly broken.
-        let v = classify_acceptance(&full_info(0, 0, 0.0, 0), &Provenance::CameraOriginal);
+        let v = classify_acceptance(&full_info(0, 0, 0.0, 0), &Provenance::CameraOriginal, &r);
         assert_eq!(v, Acceptance::Accepted);
     }
 
     #[test]
     fn acceptance_blocks_reencoded_clip() {
+        let r = rules();
         // Otherwise-clean clip, but the source was re-encoded — reject.
         let v = classify_acceptance(
             &full_info(2560, 1440, 30.0, 15_000),
             &Provenance::Reencoded {
                 tool: "HandBrake 1.6.1".into(),
             },
+            &r,
         );
         match v {
             Acceptance::Rejected { reasons } => {
@@ -850,7 +986,12 @@ mod tests {
 
     #[test]
     fn acceptance_blocks_stripped_clip() {
-        let v = classify_acceptance(&full_info(2560, 1440, 30.0, 15_000), &Provenance::Stripped);
+        let r = rules();
+        let v = classify_acceptance(
+            &full_info(2560, 1440, 30.0, 15_000),
+            &Provenance::Stripped,
+            &r,
+        );
         match v {
             Acceptance::Rejected { reasons } => {
                 assert!(
@@ -864,24 +1005,27 @@ mod tests {
 
     #[test]
     fn provenance_dji_encoder_is_camera_original() {
+        let r = rules();
         // The exact case the user reported: encoder=DJI Osmo Nano with no
         // make/model keys. Should classify as camera-original.
-        let v = classify_from_signals(false, Some("DJI Osmo Nano"));
+        let v = classify_from_signals(false, Some("DJI Osmo Nano"), &r.provenance);
         assert_eq!(v, Provenance::CameraOriginal);
     }
 
     #[test]
     fn provenance_gopro_encoder_is_camera_original() {
-        let v = classify_from_signals(false, Some("GoPro HERO12"));
+        let r = rules();
+        let v = classify_from_signals(false, Some("GoPro HERO12"), &r.provenance);
         assert_eq!(v, Provenance::CameraOriginal);
     }
 
     #[test]
     fn device_info_splits_dji_encoder() {
+        let r = rules();
         let mut info = full_info(2560, 1440, 30.0, 15_000);
         info.metadata
             .push(("encoder".into(), "DJI Osmo Nano".into()));
-        let rows = device_info_rows(&info);
+        let rows = device_info_rows(&info, &r.provenance.device_encoder_signatures);
         let make = rows.iter().find(|(k, _)| *k == "Make").unwrap().1.clone();
         let model = rows.iter().find(|(k, _)| *k == "Model").unwrap().1.clone();
         assert_eq!(make, "DJI");
@@ -890,6 +1034,7 @@ mod tests {
 
     #[test]
     fn device_info_keeps_existing_make_when_present() {
+        let r = rules();
         // When `make` and `model` are present, the encoder split must not
         // overwrite them — the explicit camera tags win.
         let mut info = full_info(2560, 1440, 30.0, 15_000);
@@ -899,7 +1044,7 @@ mod tests {
             .push(("com.apple.quicktime.model".into(), "iPhone 13 Pro".into()));
         info.metadata
             .push(("com.apple.quicktime.software".into(), "15.0.1".into()));
-        let rows = device_info_rows(&info);
+        let rows = device_info_rows(&info, &r.provenance.device_encoder_signatures);
         let make = rows.iter().find(|(k, _)| *k == "Make").unwrap().1.clone();
         let model = rows.iter().find(|(k, _)| *k == "Model").unwrap().1.clone();
         assert_eq!(make, "Apple");
@@ -908,17 +1053,21 @@ mod tests {
 
     #[test]
     fn provenance_warning_message_shape() {
-        assert!(provenance_warning(&Provenance::CameraOriginal).is_none());
+        let r = rules();
+        assert!(provenance_warning(&Provenance::CameraOriginal, &r.provenance).is_none());
 
-        let msg = provenance_warning(&Provenance::Reencoded {
-            tool: "HandBrake 1.6.1".into(),
-        })
+        let msg = provenance_warning(
+            &Provenance::Reencoded {
+                tool: "HandBrake 1.6.1".into(),
+            },
+            &r.provenance,
+        )
         .expect("Reencoded must produce a warning");
         assert!(msg.contains("re-encoded"));
         assert!(msg.contains("HandBrake 1.6.1"));
 
-        let msg =
-            provenance_warning(&Provenance::Stripped).expect("Stripped must produce a warning");
+        let msg = provenance_warning(&Provenance::Stripped, &r.provenance)
+            .expect("Stripped must produce a warning");
         assert!(msg.contains("device metadata is missing"));
     }
 }

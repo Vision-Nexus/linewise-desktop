@@ -8,6 +8,7 @@ use crate::models::{
     Acceptance, CreateDocumentMeta, CreateDocumentRequest, UploadState, UploadTask,
 };
 use crate::storage::{self, StorageBackend};
+use crate::video_rules::VideoRules;
 use crate::{transcode, video};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -68,6 +69,11 @@ pub struct UploadEngine {
     auto_clean: AtomicBool,
     strip_metadata: bool,
     transcode_config: TranscodeConfig,
+    /// Acceptance / advisory thresholds and message templates for video
+    /// validation. Loaded once at startup by
+    /// [`crate::video_rules::VideoRules::load_for_startup`] and threaded
+    /// into every `validate_video` call. Cheap to clone via Arc.
+    video_rules: Arc<VideoRules>,
     chunk_size: u64,
     upload_semaphore: Arc<Semaphore>,
 }
@@ -82,6 +88,7 @@ impl UploadEngine {
         auto_clean: bool,
         strip_metadata: bool,
         transcode_config: TranscodeConfig,
+        video_rules: Arc<VideoRules>,
         chunk_size_mb: u32,
         max_concurrent: u32,
     ) -> Self {
@@ -93,9 +100,16 @@ impl UploadEngine {
             auto_clean: AtomicBool::new(auto_clean),
             strip_metadata,
             transcode_config,
+            video_rules,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
         }
+    }
+
+    /// Read-only handle to the rule set. UI components that render
+    /// metadata popovers (e.g. device-info rows) need it too.
+    pub fn video_rules(&self) -> Arc<VideoRules> {
+        Arc::clone(&self.video_rules)
     }
 
     /// Update the auto-clean flag at runtime. Takes effect on the next
@@ -145,7 +159,7 @@ impl UploadEngine {
         // state — `confirm_staged` skips REJECTED rows, so the upload never
         // happens.
         let (video_info, validation_warnings, initial_state) = if mime_type.starts_with("video/") {
-            match video::validate_video(path).await {
+            match video::validate_video(path, Arc::clone(&self.video_rules)).await {
                 Ok(result) => {
                     let mut warnings = result.warnings;
                     let state = match result.acceptance {
@@ -288,7 +302,7 @@ impl UploadEngine {
             task.video_info.clone()
         } else if task.mime_type.starts_with("video/") {
             self.update_state(task, UploadState::Validating).await;
-            match video::validate_video(path).await {
+            match video::validate_video(path, Arc::clone(&self.video_rules)).await {
                 Ok(result) => {
                     if !result.warnings.is_empty() {
                         task.validation_warnings = result.warnings.clone();

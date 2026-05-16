@@ -9,8 +9,10 @@ use lw_core::error::UploadError;
 use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload::UploadEvent;
 use lw_core::video;
+use lw_core::video_rules::DeviceEncoderSignature;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Formats a staging error into a user-facing toast string. Expected
 /// rejections (the user picked a file we can't accept) get a "Cannot
@@ -135,6 +137,19 @@ pub fn UploadQueue() -> Element {
         .filter(|t| t.state == UploadState::Staged)
         .count();
     let _active_count = tasks.iter().filter(|t| t.state.is_active()).count();
+
+    // Device-encoder signature list lives on the network-loaded video
+    // rules document, already wrapped in Arc inside ProvenanceRules so
+    // each StagedRow prop clone is a refcount bump rather than a fresh
+    // Vec allocation — the queue can carry dozens of rows and re-renders
+    // on every keystroke that changes a sibling signal.
+    let device_encoder_signatures: Arc<Vec<DeviceEncoderSignature>> = Arc::clone(
+        &services
+            .upload_engine
+            .video_rules()
+            .provenance
+            .device_encoder_signatures,
+    );
 
     // Human-readable label for the Add Files button, e.g. "Add Files to
     // Acme / Website". Only rendered when `can_upload`, so both reads are
@@ -471,6 +486,7 @@ pub fn UploadQueue() -> Element {
                                 key: "{task.id}",
                                 task: task.clone(),
                                 transcode_config: app_state.config.read().transcode.clone(),
+                                device_encoder_signatures: device_encoder_signatures.clone(),
                                 on_remove: on_remove.clone(),
                                 on_transcode_click,
                             }
@@ -489,6 +505,7 @@ pub fn UploadQueue() -> Element {
                                 key: "{task.id}",
                                 task: task.clone(),
                                 transcode_config: app_state.config.read().transcode.clone(),
+                                device_encoder_signatures: device_encoder_signatures.clone(),
                                 on_remove: on_remove.clone(),
                                 on_transcode_click,
                             }
@@ -614,6 +631,7 @@ fn SectionHeader(title: String, count: usize) -> Element {
 fn StagedRow(
     task: UploadTask,
     transcode_config: TranscodeConfig,
+    device_encoder_signatures: Arc<Vec<DeviceEncoderSignature>>,
     on_remove: EventHandler<String>,
     on_transcode_click: EventHandler<String>,
 ) -> Element {
@@ -649,11 +667,7 @@ fn StagedRow(
         let codec = info.codec.to_uppercase();
         let res = format!("{}x{}", info.width, info.height);
         let fps_text = format!("{:.0}fps", info.fps);
-        let bitrate = if info.bitrate_kbps >= 1000 {
-            format!("{:.0}Mbps", info.bitrate_kbps as f64 / 1000.0)
-        } else {
-            format!("{}kbps", info.bitrate_kbps)
-        };
+        let bitrate = video::format_bitrate(info.bitrate_kbps);
         let summary = format!("{codec} · {res} · {fps_text} · {bitrate}");
         let mut structural: Vec<(String, String)> = Vec::new();
         structural.push(("Codec".into(), info.codec.to_uppercase()));
@@ -666,17 +680,18 @@ fn StagedRow(
         structural.push(("Duration".into(), format_duration(info.duration_secs)));
         structural.push(("Container".into(), info.format.clone()));
 
-        let mut device: Vec<(String, String)> = video::device_info_rows(info)
-            .into_iter()
-            .map(|(label, value)| {
-                let display = if value.is_empty() {
-                    "\u{2014}".to_string()
-                } else {
-                    value
-                };
-                (label.to_string(), display)
-            })
-            .collect();
+        let mut device: Vec<(String, String)> =
+            video::device_info_rows(info, device_encoder_signatures.as_slice())
+                .into_iter()
+                .map(|(label, value)| {
+                    let display = if value.is_empty() {
+                        "\u{2014}".to_string()
+                    } else {
+                        value
+                    };
+                    (label.to_string(), display)
+                })
+                .collect();
         device.push((
             "Telemetry".into(),
             info.telemetry.clone().unwrap_or_else(|| "\u{2014}".into()),

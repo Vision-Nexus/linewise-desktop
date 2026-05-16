@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "numeric": {
+    "fps": {
+      "target": 30.0,
+      "recommend": {
+        "min": 29.0,
+        "max": 61.0,
+        "message": "Frame rate {fps:.1}fps is {bound} the recommended {min:.0}-{max:.0}fps band (target {target:.0}fps)"
+      },
+      "accept": {
+        "min": 20.0,
+        "max": 70.0,
+        "message": "Frame rate {fps:.1}fps is {bound} the {min:.0}-{max:.0}fps acceptance band"
+      }
+    },
+    "bitrate_kbps": {
+      "target": 12000,
+      "recommend": {
+        "min": 10000,
+        "max": 20000,
+        "message": "Bitrate {bitrate} is {bound} the recommended {min_mbps}-{max_mbps}Mbps band (target {target_mbps}Mbps)"
+      },
+      "accept": {
+        "min": 8000,
+        "max": 50000,
+        "message": "Bitrate {bitrate} is {bound} the {min_mbps}-{max_mbps}Mbps acceptance band"
+      }
+    },
+    "resolution": {
+      "recommend": {
+        "min_height": 720,
+        "message": "Resolution {width}x{height} is below the {min_height}p recommended minimum"
+      },
+      "accept": {
+        "pixels_min": 2073600,
+        "pixels_max": 8294400,
+        "message": "Resolution {width}x{height} is {bound} the 1080p-4K acceptance band"
+      }
+    }
+  },
+  "provenance": {
+    "camera_fingerprint_keys": [
+      "make",
+      "model",
+      "com.apple.quicktime.make",
+      "com.apple.quicktime.model",
+      "com.android.manufacturer",
+      "com.android.model"
+    ],
+    "encoder_keys": ["encoder", "com.apple.quicktime.software"],
+    "reencode_signatures": [
+      "lavf",
+      "lavc",
+      "handbrake",
+      "apple compressor",
+      "compressor",
+      "adobe premiere",
+      "final cut",
+      "davinci resolve",
+      "ffmpeg",
+      "libx264",
+      "libx265"
+    ],
+    "device_encoder_signatures": [
+      { "needle": "dji",        "vendor_label": "DJI" },
+      { "needle": "gopro",      "vendor_label": "GoPro" },
+      { "needle": "insta360",   "vendor_label": "Insta360" },
+      { "needle": "sony",       "vendor_label": "Sony" },
+      { "needle": "canon",      "vendor_label": "Canon" },
+      { "needle": "nikon",      "vendor_label": "Nikon" },
+      { "needle": "panasonic",  "vendor_label": "Panasonic" },
+      { "needle": "blackmagic", "vendor_label": "Blackmagic Design" },
+      { "needle": "hero",       "vendor_label": "GoPro" },
+      { "needle": "osmo",       "vendor_label": "DJI" }
+    ],
+    "messages": {
+      "reencoded": "Source was re-encoded by {tool}; original camera fingerprint is gone",
+      "stripped": "Device metadata is missing — the file was likely re-encoded by another tool",
+      "reencoded_warning": "This clip was re-encoded by {tool}; the original camera fingerprint is gone.",
+      "stripped_warning": "This clip's device metadata is missing — it may have been re-encoded or transcoded by another tool."
+    }
+  },
+  "telemetry": {
+    "tags": [
+      { "fourcc": "djmd", "label": "DJI CAM metadata" },
+      { "fourcc": "dbgi", "label": "DJI debug info" },
+      { "fourcc": "gpmd", "label": "GoPro telemetry (GPMF)" },
+      { "fourcc": "mett", "label": "ISO timed metadata" }
+    ],
+    "action_camera_keywords": ["dji", "gopro", "hero", "osmo", "insta360"],
+    "missing_telemetry_warning": "This clip looks like action-camera footage but carries no telemetry stream — gimbal / GPS / IMU samples will not be available downstream."
+  },
+  "camera_settings_guide_url": "https://docs.linewise.io/camera-settings",
+  "camera_settings_guide_footer": "See how to adjust your camera settings: {url}"
+}

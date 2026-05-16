@@ -13,7 +13,9 @@
 use lw_core::config::TranscodeConfig;
 use lw_core::transcode;
 use lw_core::video;
+use lw_core::video_rules::VideoRules;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// ~2.7 MB h264/mp4 sample, 5 seconds. samplelib.com publishes a stable
 /// set of MP4 fixtures at predictable URLs; if the host ever rotates,
@@ -82,7 +84,10 @@ async fn test_transcode_real_file() {
     ffmpeg_next::init().expect("ffmpeg init");
     let path: &Path = &path;
 
-    let result = video::validate_video(path).await.expect("probe failed");
+    let rules: Arc<VideoRules> = VideoRules::embedded();
+    let result = video::validate_video(path, rules)
+        .await
+        .expect("probe failed");
     let info = &result.info;
     eprintln!(
         "Input: {} {}x{} {:.0}fps {}kbps {:.1}s",
