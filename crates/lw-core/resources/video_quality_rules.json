@@ -92,6 +92,6 @@
     "action_camera_keywords": ["dji", "gopro", "hero", "osmo", "insta360"],
     "missing_telemetry_warning": "This clip looks like action-camera footage but carries no telemetry stream — gimbal / GPS / IMU samples will not be available downstream."
   },
-  "camera_settings_guide_url": "https://docs.linewise.io/camera-settings",
+  "camera_settings_guide_url": "https://vl.linewise.io/camera-settings",
   "camera_settings_guide_footer": "See how to adjust your camera settings: {url}"
 }
