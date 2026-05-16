@@ -19,6 +19,10 @@ base64 = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 blake3 = { workspace = true }
+md-5 = { workspace = true }
+async-stream = { workspace = true }
+futures-core = { workspace = true }
+tokio-stream = { workspace = true }
 dirs = { workspace = true }
 keyring = { workspace = true }
 backon = { workspace = true }

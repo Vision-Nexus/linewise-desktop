@@ -27,11 +27,13 @@ struct UploadRow {
     state: Option<String>,
     error_message: Option<String>,
     hash: Option<String>,
+    source_md5: Option<String>,
     validation_warnings: Option<String>,
     retry_count: Option<i64>,
     video_info: Option<String>,
     transcode: i64,
     transcoded_size: Option<i64>,
+    force_upload: i64,
 }
 
 impl From<UploadRow> for UploadTask {
@@ -53,6 +55,7 @@ impl From<UploadRow> for UploadTask {
             state: UploadState::parse(r.state.as_deref().unwrap_or("PENDING")),
             error_message: r.error_message,
             hash: r.hash,
+            source_md5: r.source_md5,
             validation_warnings: warnings,
             retry_count: r.retry_count.unwrap_or(0) as u32,
             transcode: r.transcode != 0,
@@ -61,6 +64,7 @@ impl From<UploadRow> for UploadTask {
                 .video_info
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok()),
+            force_upload: r.force_upload != 0,
         }
     }
 }
@@ -135,9 +139,10 @@ impl Database {
         let size = task.size as i64;
         let state = task.state.as_str();
         let transcode = i64::from(task.transcode);
+        let force_upload = i64::from(task.force_upload);
         sqlx::query!(
-            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, validation_warnings, video_info, transcode)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, source_md5, validation_warnings, video_info, transcode, force_upload)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             task.id,
             task.local_path,
             task.filename,
@@ -147,9 +152,11 @@ impl Database {
             task.project_id,
             state,
             task.hash,
+            task.source_md5,
             warnings_json,
             video_info_json,
             transcode,
+            force_upload,
         )
         .execute(&self.pool)
         .await?;
@@ -253,10 +260,93 @@ impl Database {
         Ok(())
     }
 
+    /// Persist the source-file MD5 once it has been computed at staging
+    /// time. Separated from [`insert_upload_task`] so a task that was
+    /// inserted before the hash pass finishes can be updated in place
+    /// without re-writing every column.
+    pub async fn update_upload_source_md5(
+        &self,
+        id: &str,
+        source_md5: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE upload_queue SET source_md5 = ?, updated_at = datetime('now') WHERE id = ?",
+            source_md5,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Persist BLAKE3 + MD5 in a single write once the hash stream
+    /// has finished. Used by the staging-time hash worker — separate
+    /// writes would race with `update_upload_state` flipping the row
+    /// to `Staged` / `Rejected`.
+    pub async fn update_upload_hashes(
+        &self,
+        id: &str,
+        blake3_hex: &str,
+        md5_hex: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE upload_queue SET hash = ?, source_md5 = ?, updated_at = datetime('now') WHERE id = ?",
+            blake3_hex,
+            md5_hex,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Settle the staging-time hash worker in one UPDATE: state +
+    /// warnings + cleared error message. Used at the terminal
+    /// `Staged` / `Rejected` transition so the row never sits in an
+    /// intermediate "warnings written, state still HASHING" window
+    /// that the UI could observe between two separate writes.
+    pub async fn update_upload_state_and_warnings(
+        &self,
+        id: &str,
+        state: UploadState,
+        warnings: &[String],
+    ) -> Result<(), DbError> {
+        let state_str = state.as_str();
+        let json = serde_json::to_string(warnings)?;
+        sqlx::query!(
+            "UPDATE upload_queue SET state = ?, validation_warnings = ?, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+            state_str,
+            json,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Flip the super-admin override on a task and reset it to PENDING
+    /// (clearing any prior error message). Used by the "Force upload"
+    /// button on rejected rows. The state move to PENDING is what
+    /// re-enters the row into the upload pipeline; the flag is what
+    /// makes `process_task` skip the dedup short-circuit.
+    pub async fn force_upload_task(&self, id: &str) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE upload_queue SET force_upload = 1, state = 'PENDING', error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn reset_stale_uploads(&self) -> Result<u64, DbError> {
+        // HASHING is included because the in-memory hash worker dies
+        // with the process; the row would otherwise sit forever with
+        // no Staged/Rejected verdict. The user can re-add the file
+        // and it'll get a fresh hash run.
         let result = sqlx::query!(
             "UPDATE upload_queue SET state = 'FAILED', error_message = 'Interrupted by app restart', updated_at = datetime('now')
-             WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'PENDING')",
+             WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'PENDING', 'HASHING')",
         )
         .execute(&self.pool)
         .await?;
@@ -269,7 +359,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size
+                    hash, source_md5, validation_warnings, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
              WHERE state = 'FAILED'
                AND retry_count < 10
@@ -291,7 +381,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size
+                    hash, source_md5, validation_warnings, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -304,7 +394,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size
+                    hash, source_md5, validation_warnings, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
              WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
              ORDER BY created_at ASC",
@@ -319,7 +409,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size
+                    hash, source_md5, validation_warnings, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue ORDER BY created_at DESC LIMIT 100",
         )
         .fetch_all(&self.pool)

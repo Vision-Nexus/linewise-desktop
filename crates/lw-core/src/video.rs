@@ -144,6 +144,18 @@ fn classify_acceptance(
         ));
     }
 
+    // Duration. `0.0` means we couldn't read a length — don't block.
+    if info.duration_secs > 0.0
+        && let Some(side) = trip(&rules.numeric.duration_seconds.accept, info.duration_secs)
+    {
+        reasons.push(render_duration_band(
+            &rules.numeric.duration_seconds.accept,
+            rules.numeric.duration_seconds.target,
+            info.duration_secs,
+            side,
+        ));
+    }
+
     // Pixel count: same band semantics as fps and bitrate. Both edges
     // inclusive — equal-on-edge passes — so a clip exactly at 720p
     // (the floor) is still acceptable.
@@ -238,6 +250,25 @@ fn render_fps_band(band: &Band<f64>, target: f64, fps: f64, bound: Bound) -> Str
         &band.message,
         &[
             ("fps", Sub::Float(fps)),
+            ("min", Sub::Float(min_v)),
+            ("max", Sub::Float(max_v)),
+            ("target", Sub::Float(target)),
+            ("bound", Sub::Str(bound.as_str().to_owned())),
+        ],
+    )
+}
+
+/// Render a duration band's message. Templates can reference
+/// `{duration[:.N]}`, `{min[:.N]}`, `{max[:.N]}`, `{target[:.N]}`,
+/// `{bound}`. `duration_secs` is the value in seconds, the same unit
+/// the JSON ranges are written in.
+fn render_duration_band(band: &Band<f64>, target: f64, duration_secs: f64, bound: Bound) -> String {
+    let min_v = band.min.unwrap_or(0.0);
+    let max_v = band.max.unwrap_or(0.0);
+    render(
+        &band.message,
+        &[
+            ("duration", Sub::Float(duration_secs)),
             ("min", Sub::Float(min_v)),
             ("max", Sub::Float(max_v)),
             ("target", Sub::Float(target)),
@@ -596,6 +627,18 @@ fn probe_and_validate(
         ));
     }
 
+    // Soft duration band.
+    if duration_secs > 0.0
+        && let Some(side) = trip(&rules.numeric.duration_seconds.recommend, duration_secs)
+    {
+        warnings.push(render_duration_band(
+            &rules.numeric.duration_seconds.recommend,
+            rules.numeric.duration_seconds.target,
+            duration_secs,
+            side,
+        ));
+    }
+
     if !warnings.is_empty() {
         warnings.push(render(
             &rules.camera_settings_guide_footer,
@@ -793,6 +836,16 @@ mod tests {
     }
 
     fn full_info(width: u32, height: u32, fps: f64, bitrate_kbps: u64) -> VideoInfo {
+        full_info_dur(width, height, fps, bitrate_kbps, 60.0)
+    }
+
+    fn full_info_dur(
+        width: u32,
+        height: u32,
+        fps: f64,
+        bitrate_kbps: u64,
+        duration_secs: f64,
+    ) -> VideoInfo {
         VideoInfo {
             width,
             height,
@@ -800,7 +853,7 @@ mod tests {
             bitrate_kbps,
             codec: "h264".into(),
             audio_codec: "aac".into(),
-            duration_secs: 60.0,
+            duration_secs,
             format: "mp4".into(),
             metadata: Vec::new(),
             telemetry: None,
@@ -849,6 +902,69 @@ mod tests {
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn acceptance_blocks_below_duration_floor() {
+        // Default accept floor: 10s. A 5s clip must reject.
+        let r = rules();
+        let v = classify_acceptance(
+            &full_info_dur(1920, 1080, 30.0, 15_000, 5.0),
+            &Provenance::CameraOriginal,
+            &r,
+        );
+        match v {
+            Acceptance::Rejected { reasons } => {
+                assert!(
+                    reasons.iter().any(|r| r.contains("Duration")),
+                    "{reasons:?}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acceptance_blocks_above_duration_ceiling() {
+        // Default accept ceiling: 3600s (1 hour). 90 min must reject.
+        let r = rules();
+        let v = classify_acceptance(
+            &full_info_dur(1920, 1080, 30.0, 15_000, 5400.0),
+            &Provenance::CameraOriginal,
+            &r,
+        );
+        match v {
+            Acceptance::Rejected { reasons } => {
+                assert!(reasons.iter().any(|r| r.contains("above")), "{reasons:?}");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acceptance_accepts_duration_at_floor_and_ceiling() {
+        // 10s and 3600s both sit on band edges; equal-on-edge passes.
+        let r = rules();
+        for d in [10.0_f64, 3600.0_f64] {
+            let v = classify_acceptance(
+                &full_info_dur(1920, 1080, 30.0, 15_000, d),
+                &Provenance::CameraOriginal,
+                &r,
+            );
+            assert_eq!(v, Acceptance::Accepted, "d={d}");
+        }
+    }
+
+    #[test]
+    fn acceptance_skips_duration_when_unreadable() {
+        // duration_secs == 0.0 → "couldn't read", don't block.
+        let r = rules();
+        let v = classify_acceptance(
+            &full_info_dur(1920, 1080, 30.0, 15_000, 0.0),
+            &Provenance::CameraOriginal,
+            &r,
+        );
+        assert_eq!(v, Acceptance::Accepted);
     }
 
     #[test]

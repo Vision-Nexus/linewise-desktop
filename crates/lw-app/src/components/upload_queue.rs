@@ -31,6 +31,7 @@ fn stage_error_toast(path: &Path, err: &UploadError) -> String {
     match err {
         UploadError::VideoUnplayable { .. }
         | UploadError::Duplicate { .. }
+        | UploadError::DuplicateOnServer { .. }
         | UploadError::FileTooLarge { .. }
         | UploadError::FileNotFound(_)
         | UploadError::Cancelled => format!("Cannot upload \"{filename}\": {err}"),
@@ -90,6 +91,11 @@ pub fn UploadQueue() -> Element {
     // task before the first Progress event arrives.
     let mut transcode_progress: Signal<HashMap<String, f32>> = use_signal(HashMap::new);
     let mut upload_progress: Signal<HashMap<String, (u64, u64)>> = use_signal(HashMap::new);
+    // Hashing progress for rows in the `Hashing` state. The pair is
+    // `(bytes_hashed, total_bytes)`; the UI renders a determinate
+    // progress bar driven by the BLAKE3+MD5 stream emitted from
+    // `UploadEngine::stage_file`.
+    let mut hash_progress: Signal<HashMap<String, (u64, u64)>> = use_signal(HashMap::new);
 
     // Poll upload events
     let app_state_events = app_state.clone();
@@ -107,6 +113,7 @@ pub fn UploadQueue() -> Element {
                     &mut app_state,
                     &mut transcode_progress,
                     &mut upload_progress,
+                    &mut hash_progress,
                     event,
                 );
             }
@@ -297,6 +304,33 @@ pub fn UploadQueue() -> Element {
         });
     };
 
+    // Force upload (super-admin bypass) for a Rejected row. Flips the
+    // task's `force_upload` flag, transitions it to PENDING in the DB,
+    // and spawns the upload worker — which sees the flag in Stage 1 and
+    // skips the local-DB dedup short-circuit. The acceptance gate is
+    // not re-run on this path either, so a quality-rejected row also
+    // proceeds. The UI gates this affordance on
+    // `UserInfo::is_super_admin`, but the engine method itself is not
+    // role-checked: the desktop is the only caller and the backend
+    // does its own permission checks at create-document / upload time.
+    let engine_for_force = services.upload_engine.clone();
+    let mut app_state_force = app_state.clone();
+    let on_force_upload = move |task_id: String| {
+        let engine = engine_for_force.clone();
+        let mut tasks = app_state_force.upload_tasks.write();
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.state = UploadState::Pending;
+            task.error_message = None;
+            task.force_upload = true;
+        }
+        drop(tasks);
+        spawn(async move {
+            if let Err(e) = engine.force_upload(&task_id).await {
+                e.log(format_args!("Force-upload spawn for {task_id}"));
+            }
+        });
+    };
+
     // Pause an active upload
     let db_for_pause = services.db.clone();
     let mut app_state_pause = app_state.clone();
@@ -431,6 +465,11 @@ pub fn UploadQueue() -> Element {
         "transparent"
     };
 
+    let hashing: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.state == UploadState::Hashing)
+        .cloned()
+        .collect();
     let staged: Vec<_> = tasks
         .iter()
         .filter(|t| t.state == UploadState::Staged)
@@ -512,6 +551,20 @@ pub fn UploadQueue() -> Element {
                 }
             } else {
                 // Staged files (step 1)
+                if !hashing.is_empty() {
+                    SectionHeader { title: "Hashing", count: hashing.len() }
+                    div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
+                        for task in hashing.iter() {
+                            HashingRow {
+                                key: "{task.id}",
+                                task: task.clone(),
+                                hash_progress,
+                                on_remove: on_remove.clone(),
+                            }
+                        }
+                    }
+                }
+
                 if !staged.is_empty() {
                     SectionHeader { title: "Ready to Upload", count: staged.len() }
                     div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
@@ -523,6 +576,7 @@ pub fn UploadQueue() -> Element {
                                 device_encoder_signatures: device_encoder_signatures.clone(),
                                 on_remove: on_remove.clone(),
                                 on_transcode_click,
+                                on_force_upload: None,
                             }
                         }
                     }
@@ -542,6 +596,7 @@ pub fn UploadQueue() -> Element {
                                 device_encoder_signatures: device_encoder_signatures.clone(),
                                 on_remove: on_remove.clone(),
                                 on_transcode_click,
+                                on_force_upload: Some(EventHandler::new(on_force_upload.clone())),
                             }
                         }
                     }
@@ -661,6 +716,77 @@ fn SectionHeader(title: String, count: usize) -> Element {
     }
 }
 
+/// One row in the "Hashing" section: a freshly-added file whose
+/// BLAKE3+MD5 stream is in flight. Renders a determinate progress
+/// bar (driven by `HashProgress` events) plus a Remove affordance.
+/// We let the user remove a row mid-hash — the worker writes to
+/// SQLite at completion, so a removed row's terminal write becomes
+/// a no-op when the row no longer exists.
+#[component]
+fn HashingRow(
+    task: UploadTask,
+    hash_progress: Signal<HashMap<String, (u64, u64)>>,
+    on_remove: EventHandler<String>,
+) -> Element {
+    let task_id = task.id.clone();
+    let (bytes_hashed, total_bytes) = hash_progress
+        .read()
+        .get(&task.id)
+        .copied()
+        .unwrap_or((0, task.size.max(1)));
+    let pct = if total_bytes > 0 {
+        ((bytes_hashed as f64 / total_bytes as f64) * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    let label = format!(
+        "Hashing — {} / {} ({:.0}%)",
+        format_size(bytes_hashed),
+        format_size(total_bytes),
+        pct,
+    );
+
+    rsx! {
+        div {
+            class: "staged-row fade-in",
+            style: "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg);",
+            div {
+                style: "display: flex; justify-content: space-between; align-items: center;",
+                span {
+                    style: "font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;",
+                    "{task.filename}"
+                }
+                span {
+                    style: "font-size: 12px; color: var(--text-muted); flex-shrink: 0; margin-left: 8px;",
+                    "{format_size(task.size)}"
+                }
+            }
+            div {
+                style: "margin-top: 6px;",
+                Progress {
+                    value: pct,
+                    max: 100.0,
+                    "aria-label": "Hash progress",
+                    ProgressIndicator {}
+                }
+            }
+            div {
+                style: "font-size: 11px; margin-top: 2px; color: var(--text-muted);",
+                "{label}"
+            }
+            div {
+                style: "display: flex; justify-content: flex-end; margin-top: 6px;",
+                button {
+                    class: "btn-danger-sm",
+                    style: "{styles::BTN_DANGER_SM}",
+                    onclick: move |_| on_remove.call(task_id.clone()),
+                    "Remove"
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn StagedRow(
     task: UploadTask,
@@ -668,10 +794,22 @@ fn StagedRow(
     device_encoder_signatures: Arc<Vec<DeviceEncoderSignature>>,
     on_remove: EventHandler<String>,
     on_transcode_click: EventHandler<String>,
+    /// Super-admin override hook. `Some` only on rows in the
+    /// `Rejected` section; the regular Staged section passes `None`.
+    /// Even when present, the button only renders for users whose
+    /// `system_roles` contain `admin` (see `UserInfo::is_super_admin`).
+    on_force_upload: Option<EventHandler<String>>,
 ) -> Element {
     let task_id = task.id.clone();
+    let force_id = task.id.clone();
     let transcode_id = task.id.clone();
     let is_video = task.mime_type.starts_with("video/");
+    let is_super_admin = use_context::<AppState>()
+        .user_info
+        .read()
+        .as_ref()
+        .map(|u| u.is_super_admin())
+        .unwrap_or(false);
     let transcode_on = task.transcode;
     // Upscale guard: only show the transcode toggle when transcoding would
     // actually shrink this clip. Non-video files never get the toggle; for
@@ -878,6 +1016,15 @@ fn StagedRow(
                         "{transcode_label}"
                     }
                 }
+                if let (true, Some(handler)) = (is_super_admin && is_rejected, on_force_upload) {
+                    button {
+                        class: "btn-warning-sm",
+                        style: "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; background: var(--warning); color: white; border: 1px solid var(--warning);",
+                        title: "Bypass dedup and quality checks for this file. Visible to super-admins only.",
+                        onclick: move |_| handler.call(force_id.clone()),
+                        "Force upload"
+                    }
+                }
                 button {
                     class: "btn-danger-sm",
                     style: "{styles::BTN_DANGER_SM}",
@@ -1033,7 +1180,7 @@ fn UploadTaskRow(
                                     "Clear"
                                 }
                             },
-                            UploadState::Staged | UploadState::Rejected => rsx! {},
+                            UploadState::Staged | UploadState::Rejected | UploadState::Hashing => rsx! {},
                         }
                     }
                 }
@@ -1115,7 +1262,8 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
         UploadState::Verifying => "Verifying...".to_string(),
         UploadState::Paused => "Paused".to_string(),
         UploadState::Pending => "Pending...".to_string(),
-        UploadState::Staged
+        UploadState::Hashing
+        | UploadState::Staged
         | UploadState::Rejected
         | UploadState::Completed
         | UploadState::Failed => String::new(),
@@ -1126,6 +1274,7 @@ fn handle_upload_event(
     app_state: &mut AppState,
     transcode_progress: &mut Signal<HashMap<String, f32>>,
     upload_progress: &mut Signal<HashMap<String, (u64, u64)>>,
+    hash_progress: &mut Signal<HashMap<String, (u64, u64)>>,
     event: UploadEvent,
 ) {
     match event {
@@ -1133,6 +1282,12 @@ fn handle_upload_event(
             app_state.upload_tasks.write().push(*task);
         }
         UploadEvent::StateChanged { task_id, state } => {
+            // Drop any in-flight hash bar once the row leaves Hashing —
+            // otherwise a freshly-Staged row keeps a stale 100% bar
+            // entry until the next add/drop.
+            if state != UploadState::Hashing {
+                hash_progress.write().remove(&task_id);
+            }
             update_task(app_state, &task_id, |t| t.state = state);
         }
         UploadEvent::Progress {
@@ -1149,6 +1304,15 @@ fn handle_upload_event(
             let entry = guard.entry(task_id).or_insert((0, total_bytes));
             entry.0 = entry.0.max(bytes_uploaded);
             entry.1 = total_bytes;
+        }
+        UploadEvent::HashProgress {
+            task_id,
+            bytes_hashed,
+            total_bytes,
+        } => {
+            hash_progress
+                .write()
+                .insert(task_id, (bytes_hashed, total_bytes));
         }
         UploadEvent::ValidationWarnings { task_id, warnings } => {
             update_task(app_state, &task_id, |t| t.validation_warnings = warnings);
@@ -1168,6 +1332,7 @@ fn handle_upload_event(
         UploadEvent::DuplicateDetected { task_id, .. } => {
             upload_progress.write().remove(&task_id);
             transcode_progress.write().remove(&task_id);
+            hash_progress.write().remove(&task_id);
             update_task(app_state, &task_id, |t| {
                 t.state = UploadState::Failed;
                 t.error_message = Some("Duplicate file detected".to_string());
@@ -1176,11 +1341,13 @@ fn handle_upload_event(
         UploadEvent::Completed { task_id } => {
             upload_progress.write().remove(&task_id);
             transcode_progress.write().remove(&task_id);
+            hash_progress.write().remove(&task_id);
             update_task(app_state, &task_id, |t| t.state = UploadState::Completed);
         }
         UploadEvent::Failed { task_id, error } => {
             upload_progress.write().remove(&task_id);
             transcode_progress.write().remove(&task_id);
+            hash_progress.write().remove(&task_id);
             update_task(app_state, &task_id, |t| {
                 t.state = UploadState::Failed;
                 t.error_message = Some(error);

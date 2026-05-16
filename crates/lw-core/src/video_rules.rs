@@ -34,7 +34,15 @@ pub struct VideoRules {
 pub struct NumericRules {
     pub fps: FpsRules,
     pub bitrate_kbps: BitrateRules,
+    pub duration_seconds: DurationRules,
     pub resolution: ResolutionRules,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DurationRules {
+    pub target: f64,
+    pub recommend: Band<f64>,
+    pub accept: Band<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

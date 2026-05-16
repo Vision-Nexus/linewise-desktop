@@ -27,6 +27,19 @@
         "message": "Bitrate {bitrate} is {bound} the {min_mbps}-{max_mbps}Mbps acceptance band"
       }
     },
+    "duration_seconds": {
+      "target": 60,
+      "recommend": {
+        "min": 15,
+        "max": 3600,
+        "message": "Duration {duration:.1}s is {bound} the recommended {min:.0}-{max:.0}s band"
+      },
+      "accept": {
+        "min": 10,
+        "max": 36000,
+        "message": "Duration {duration:.1}s is {bound} the {min:.0}-{max:.0}s acceptance band"
+      }
+    },
     "resolution": {
       "recommend": {
         "min": 2073600,

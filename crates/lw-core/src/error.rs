@@ -42,6 +42,18 @@ pub enum UploadError {
     },
     #[error("Duplicate detected: document {existing_id}")]
     Duplicate { existing_id: String },
+    /// Cross-tenant dedup check rejected this file. Either the calling
+    /// tenant already holds a document with the same source-file MD5
+    /// (in a project the user can read), or the same user uploaded
+    /// this file in another tenant they belong to. Distinct from
+    /// [`Self::Duplicate`], which is the local SQLite hash cache hit.
+    #[error(
+        "Already uploaded: {tenant_match_count} in this tenant, {user_other_tenant_count} in other tenants you belong to"
+    )]
+    DuplicateOnServer {
+        tenant_match_count: usize,
+        user_other_tenant_count: u64,
+    },
     #[error("Video is unplayable: {reason}")]
     VideoUnplayable { reason: String },
     #[error("Upload cancelled")]
@@ -65,6 +77,7 @@ impl UploadError {
     pub fn is_expected(&self) -> bool {
         match self {
             UploadError::Duplicate { .. }
+            | UploadError::DuplicateOnServer { .. }
             | UploadError::Cancelled
             | UploadError::VideoUnplayable { .. } => true,
             UploadError::FileNotFound(_)

@@ -2,7 +2,8 @@ use crate::auth::AuthService;
 use crate::config::Environment;
 use crate::error::UploadError;
 use crate::models::{
-    CreateDocumentRequest, DocumentResponse, PresignedUrlResponse, Project, WhoAmIResponse,
+    CreateDocumentRequest, DedupCheckRequest, DedupCheckResponse, DocumentResponse,
+    PresignedUrlResponse, Project, WhoAmIResponse,
 };
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use std::sync::Arc;
@@ -152,6 +153,37 @@ impl ApiClient {
                 self.base_url, tenant, project_id, document_id
             ))
             .headers(headers)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(UploadError::Api {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+
+        Ok(resp.json().await?)
+    }
+
+    /// POST /api/org/{tenant}/dedup-checks
+    ///
+    /// Batch query against the cross-tenant MD5 dedup registry. Each
+    /// hash is a 32-char lowercase hex string. The server caps the
+    /// batch at 100 (returns 400 above that) and at minimum 1
+    /// (returns 400 on empty). Results are not guaranteed to come
+    /// back in request order — callers must correlate by `md5_hash`.
+    pub async fn check_dedup(
+        &self,
+        tenant: &str,
+        md5_hashes: &[String],
+    ) -> Result<DedupCheckResponse, UploadError> {
+        let headers = self.auth_headers().await?;
+        let resp = self
+            .client
+            .post(format!("{}/api/org/{}/dedup-checks", self.base_url, tenant))
+            .headers(headers)
+            .json(&DedupCheckRequest { md5_hashes })
             .send()
             .await?;
 

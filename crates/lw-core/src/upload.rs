@@ -37,6 +37,15 @@ pub enum UploadEvent {
         bytes_uploaded: u64,
         total_bytes: u64,
     },
+    /// Hashing progress for a row in the `Hashing` state. Coalesced
+    /// to ~1 MiB granularity by the hasher; the UI shows a determinate
+    /// progress bar and switches the row out of "Hashing" once
+    /// `StateChanged → Staged | Rejected` arrives.
+    HashProgress {
+        task_id: String,
+        bytes_hashed: u64,
+        total_bytes: u64,
+    },
     ValidationWarnings {
         task_id: String,
         warnings: Vec<String>,
@@ -132,9 +141,23 @@ impl UploadEngine {
     }
 
     /// Stage a file for review (step 1 of two-step upload).
-    /// File is added to the list but NOT uploaded yet.
+    ///
+    /// Two-phase: this function returns synchronously after probing
+    /// the video and inserting the row in the `Hashing` state, and
+    /// spawns a background worker that streams BLAKE3+MD5 hashes,
+    /// emits `HashProgress` events, runs the cross-tenant dedup
+    /// check, and finally transitions the row to `Staged` or
+    /// `Rejected`. Computing the hash exactly once is critical —
+    /// videos are commonly tens of GB; the previous implementation
+    /// blocked the file-pick UI on the hash and made re-staging from
+    /// a re-add re-read every byte.
+    ///
+    /// Quality-`Rejected` rows still go through hashing: a
+    /// super-admin "Force upload" bypass turns them into a normal
+    /// pipeline run, and that run wants the MD5 already on the row
+    /// so the `create_document` call carries `originalMd5`.
     pub async fn stage_file(
-        &self,
+        self: &Arc<Self>,
         path: &Path,
         tenant_id: &str,
         project_id: &str,
@@ -160,35 +183,38 @@ impl UploadEngine {
         // understand / transient internal failure) degrade to a warning and
         // the task still stages without `video_info`.
         //
-        // `Acceptance::Rejected` is a different shape from Unplayable: the
-        // file is technically readable but fails the hard quality / device
-        // floor in `video.rs`. We still stage it (so the user can see the
-        // row, the metadata popover, and the reasons) but in the REJECTED
-        // state — `confirm_staged` skips REJECTED rows, so the upload never
-        // happens.
-        let (video_info, validation_warnings, initial_state) = if mime_type.starts_with("video/") {
+        // `Acceptance::Rejected` is captured as a `pending_rejection`
+        // verdict that the hash worker applies after hashing completes —
+        // we still hash the file so a super-admin Force-upload bypass has
+        // an MD5 to send, and the row spends the hashing window in the
+        // `Hashing` state instead of flickering Rejected → Hashing → Rejected.
+        enum PostHashVerdict {
+            Stage,
+            Reject(Vec<String>),
+            // Quality-Rejected: hash, then route to Rejected with these reasons.
+        }
+        let (video_info, validation_warnings, post_hash) = if mime_type.starts_with("video/") {
             match video::validate_video(path, Arc::clone(&self.video_rules)).await {
-                Ok(result) => {
-                    let mut warnings = result.warnings;
-                    let state = match result.acceptance {
-                        Acceptance::Accepted => UploadState::Staged,
-                        Acceptance::Rejected { reasons } => {
-                            warnings.extend(reasons);
-                            UploadState::Rejected
-                        }
-                    };
-                    (Some(result.info), warnings, state)
-                }
+                Ok(result) => match result.acceptance {
+                    Acceptance::Accepted => {
+                        (Some(result.info), result.warnings, PostHashVerdict::Stage)
+                    }
+                    Acceptance::Rejected { reasons } => (
+                        Some(result.info),
+                        result.warnings,
+                        PostHashVerdict::Reject(reasons),
+                    ),
+                },
                 Err(VideoValidationError::Unplayable { reason }) => {
                     return Err(UploadError::VideoUnplayable { reason });
                 }
                 Err(e) => {
                     tracing::warn!("Video probe failed for {filename}: {e}");
-                    (None, Vec::new(), UploadState::Staged)
+                    (None, Vec::new(), PostHashVerdict::Stage)
                 }
             }
         } else {
-            (None, Vec::new(), UploadState::Staged)
+            (None, Vec::new(), PostHashVerdict::Stage)
         };
 
         let task = UploadTask {
@@ -202,14 +228,16 @@ impl UploadEngine {
             document_id: None,
             session_id: None,
             bytes_uploaded: 0,
-            state: initial_state,
+            state: UploadState::Hashing,
             error_message: None,
             hash: None,
+            source_md5: None,
             validation_warnings,
             retry_count: 0,
             transcode: false,
             transcoded_size: None,
             video_info,
+            force_upload: false,
         };
 
         self.db.insert_upload_task(&task).await?;
@@ -217,7 +245,249 @@ impl UploadEngine {
             .event_tx
             .send(UploadEvent::TaskAdded(Box::new(task.clone())));
 
+        let engine = Arc::clone(self);
+        let task_id = task.id.clone();
+        let path_buf = path.to_path_buf();
+        let tenant_id = tenant_id.to_string();
+        let initial_warnings = task.validation_warnings.clone();
+        tokio::spawn(async move {
+            let final_state = match post_hash {
+                PostHashVerdict::Stage => {
+                    engine
+                        .run_hash_and_dedup(
+                            &task_id,
+                            &path_buf,
+                            &tenant_id,
+                            initial_warnings.clone(),
+                        )
+                        .await
+                }
+                PostHashVerdict::Reject(reasons) => {
+                    let mut warnings = initial_warnings;
+                    warnings.extend(reasons);
+                    engine.run_hash_only(&task_id, &path_buf, warnings).await
+                }
+            };
+            tracing::debug!(task_id = %task_id, ?final_state, "stage_file worker finished");
+        });
+
         Ok(task)
+    }
+
+    /// Drive the hash stream for a `Hashing` row, then run the
+    /// cross-tenant dedup check, and end in `Staged` or `Rejected`.
+    /// Returns the terminal state for logging only — all persistence
+    /// and UI events happen inside.
+    async fn run_hash_and_dedup(
+        self: &Arc<Self>,
+        task_id: &str,
+        path: &Path,
+        tenant_id: &str,
+        existing_warnings: Vec<String>,
+    ) -> UploadState {
+        let hashes = match self.consume_hash_stream(task_id, path).await {
+            Ok(h) => h,
+            Err(_) => return self.fail_hashing(task_id).await,
+        };
+
+        let mut warnings = existing_warnings;
+        let final_state = match self
+            .dedup_reject_reason(tenant_id, &hashes.md5_hex, task_id)
+            .await
+        {
+            Some(reason) => {
+                warnings.push(reason);
+                UploadState::Rejected
+            }
+            None => UploadState::Staged,
+        };
+
+        let _ = self
+            .db
+            .update_upload_state_and_warnings(task_id, final_state.clone(), &warnings)
+            .await;
+        if !warnings.is_empty() {
+            let _ = self.event_tx.send(UploadEvent::ValidationWarnings {
+                task_id: task_id.to_string(),
+                warnings,
+            });
+        }
+        let _ = self.event_tx.send(UploadEvent::StateChanged {
+            task_id: task_id.to_string(),
+            state: final_state.clone(),
+        });
+        final_state
+    }
+
+    /// Hash a quality-rejected row so the MD5 is on disk for a future
+    /// Force-upload bypass, then settle the row into `Rejected` with
+    /// the quality reasons. We skip the dedup check here — a row the
+    /// user can't upload as-is doesn't need the cross-tenant verdict.
+    async fn run_hash_only(
+        self: &Arc<Self>,
+        task_id: &str,
+        path: &Path,
+        warnings: Vec<String>,
+    ) -> UploadState {
+        if self.consume_hash_stream(task_id, path).await.is_err() {
+            return self.fail_hashing(task_id).await;
+        }
+        let _ = self
+            .db
+            .update_upload_state_and_warnings(task_id, UploadState::Rejected, &warnings)
+            .await;
+        let _ = self.event_tx.send(UploadEvent::ValidationWarnings {
+            task_id: task_id.to_string(),
+            warnings,
+        });
+        let _ = self.event_tx.send(UploadEvent::StateChanged {
+            task_id: task_id.to_string(),
+            state: UploadState::Rejected,
+        });
+        UploadState::Rejected
+    }
+
+    /// Pump the hash stream into UI events + persisted hashes. The
+    /// single drain path used both by the staging-time worker and by
+    /// `process_task`'s legacy-row fallback. Errors are surfaced as
+    /// `UploadError::Io` so a caller in the upload pipeline can `?`
+    /// them; the staging worker maps `Err` to a `Failed` state via
+    /// [`fail_hashing`]. `HashProgress` events fire unconditionally —
+    /// a row that isn't in the `Hashing` state has its stale entry
+    /// cleared by the next `StateChanged` in the UI's event handler.
+    async fn consume_hash_stream(
+        &self,
+        task_id: &str,
+        path: &Path,
+    ) -> Result<dedup::FileHashes, UploadError> {
+        use tokio_stream::StreamExt;
+
+        let mut stream = Box::pin(dedup::hash_file_blake3_and_md5_stream(path));
+        while let Some(event) = stream.next().await {
+            match event {
+                dedup::HashEvent::Progress {
+                    bytes_so_far,
+                    total_bytes,
+                } => {
+                    let _ = self.event_tx.send(UploadEvent::HashProgress {
+                        task_id: task_id.to_string(),
+                        bytes_hashed: bytes_so_far,
+                        total_bytes,
+                    });
+                }
+                dedup::HashEvent::Done(hashes) => {
+                    let _ = self
+                        .db
+                        .update_upload_hashes(task_id, &hashes.blake3_hex, &hashes.md5_hex)
+                        .await;
+                    return Ok(hashes);
+                }
+                dedup::HashEvent::Error(e) => {
+                    tracing::warn!(task_id, "hash stream error: {e}");
+                    return Err(UploadError::Io(std::io::Error::other(e)));
+                }
+            }
+        }
+        Err(UploadError::Io(std::io::Error::other(
+            "hash stream ended without Done",
+        )))
+    }
+
+    /// Mark a row Failed when its hash stream errored. Surfaced to
+    /// the UI so the user can re-add the file rather than wonder
+    /// why the row is stuck on "Hashing" forever.
+    async fn fail_hashing(self: &Arc<Self>, task_id: &str) -> UploadState {
+        let msg = "Failed to read file for hashing";
+        let _ = self
+            .db
+            .update_upload_state(task_id, UploadState::Failed, Some(msg))
+            .await;
+        let _ = self.event_tx.send(UploadEvent::Failed {
+            task_id: task_id.to_string(),
+            error: msg.to_string(),
+        });
+        UploadState::Failed
+    }
+
+    /// Ask the cross-tenant dedup registry whether this MD5 is already
+    /// known. Returns `Some(reason)` if the row should be rejected,
+    /// `None` otherwise. A network / API failure swallows the error
+    /// and returns `None` so a transient outage doesn't block staging
+    /// — the worst case is the user uploads a duplicate, which is the
+    /// pre-feature behaviour.
+    async fn dedup_reject_reason(
+        &self,
+        tenant_id: &str,
+        md5_hex: &str,
+        filename: &str,
+    ) -> Option<String> {
+        let resp = match self
+            .api
+            .check_dedup(tenant_id, std::slice::from_ref(&md5_hex.to_string()))
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!("Dedup check failed for {filename}: {e}");
+                return None;
+            }
+        };
+        let result = resp.results.into_iter().find(|r| r.md5_hash == md5_hex)?;
+        let tenant_match_count = result.tenant_matches.len();
+        let user_other_tenant_count = result.user_other_tenant_count;
+        if tenant_match_count == 0 && user_other_tenant_count == 0 {
+            return None;
+        }
+        if tenant_match_count > 0 {
+            let plural = if tenant_match_count == 1 { "" } else { "s" };
+            Some(format!(
+                "Already uploaded in this tenant ({tenant_match_count} document{plural})",
+            ))
+        } else {
+            Some("You uploaded this file in another tenant".to_string())
+        }
+    }
+
+    /// Super-admin override: flip `force_upload` on a `Rejected` task,
+    /// reset it to `Pending`, and spawn the upload worker. The worker
+    /// reads `task.force_upload` in Stage 1 and skips the local-DB
+    /// dedup short-circuit, so a re-staged duplicate row proceeds
+    /// instead of bouncing again. Quality-rejected rows take the same
+    /// path: `process_task` doesn't re-run the acceptance gate, so the
+    /// only effect of `Rejected → Pending` is that the pipeline runs.
+    pub async fn force_upload(self: &Arc<Self>, task_id: &str) -> Result<(), UploadError> {
+        self.db.force_upload_task(task_id).await?;
+        let _ = self.event_tx.send(UploadEvent::StateChanged {
+            task_id: task_id.to_string(),
+            state: UploadState::Pending,
+        });
+
+        let pending = self.db.get_pending_uploads().await?;
+        let Some(mut task) = pending.into_iter().find(|t| t.id == task_id) else {
+            tracing::warn!("force_upload: task {task_id} not found in PENDING set");
+            return Ok(());
+        };
+
+        let engine = Arc::clone(self);
+        let sem = Arc::clone(&self.upload_semaphore);
+        tokio::spawn(async move {
+            let _permit = sem.acquire().await.expect("semaphore closed");
+            match engine.process_task(&mut task).await {
+                Ok(()) => tracing::info!("Force-upload completed: {}", task.filename),
+                Err(e) => {
+                    e.log(format_args!("Force-upload of {}", task.filename));
+                    let _ = engine
+                        .db
+                        .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                        .await;
+                    let _ = engine.event_tx.send(UploadEvent::Failed {
+                        task_id: task.id,
+                        error: e.to_string(),
+                    });
+                }
+            }
+        });
+        Ok(())
     }
 
     /// Confirm staged files for upload (step 2 of two-step upload).
@@ -285,12 +555,25 @@ impl UploadEngine {
         let path_buf = std::path::PathBuf::from(&task.local_path);
         let path = path_buf.as_path();
 
-        // Stage 1: Dedup check (skip if already hashed)
+        // Stage 1: Dedup check (skip if already hashed). Staging now
+        // pre-computes both BLAKE3 and MD5, so on the happy path we
+        // already have `task.hash` set; this branch only runs for
+        // legacy rows staged before the dual-hash pass landed.
+        //
+        // The `force_upload` flag suppresses both the local-DB
+        // short-circuit and (implicitly) the staging-time dedup gate
+        // that would have already routed this row to `Rejected` —
+        // a force-upload row reaches `process_task` only because a
+        // super-admin clicked the bypass, so re-asserting the gate
+        // here would defeat the affordance.
         if task.hash.is_none() {
-            let hash = dedup::hash_file(path).await?;
-            task.hash = Some(hash.clone());
+            let hashes = self.consume_hash_stream(&task.id, path).await?;
+            task.hash = Some(hashes.blake3_hex.clone());
+            task.source_md5 = Some(hashes.md5_hex);
 
-            if let Ok(Some(existing_id)) = self.db.find_by_hash(&hash).await {
+            if !task.force_upload
+                && let Ok(Some(existing_id)) = self.db.find_by_hash(&hashes.blake3_hex).await
+            {
                 let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
                     task_id: task.id.clone(),
                     existing_document_id: existing_id.clone(),
@@ -298,7 +581,12 @@ impl UploadEngine {
                 return Err(UploadError::Duplicate { existing_id });
             }
         }
-        let hash = task.hash.clone().unwrap_or_default();
+        // Set unconditionally above: either the row arrived from `Hashing`
+        // with `task.hash` populated by `consume_hash_stream`, or the
+        // legacy fallback in this function just wrote it. An empty hash
+        // here would silently match the wrong row in `find_by_hash` /
+        // `insert_file_hash`, so fail loudly instead.
+        let hash = task.hash.clone().expect("hash set in Stage 1");
 
         // Stage 2: Video validation (skip if already probed at staging time).
         // The `Unplayable` branch is defense-in-depth — the staging path
@@ -410,6 +698,11 @@ impl UploadEngine {
                         },
                         model_name: None,
                         folder: None,
+                        // Top-level on the request, NOT inside metadata —
+                        // the backend persists this to a dedicated column
+                        // with an immutability trigger; placing it under
+                        // `metadata` would silently drop the value.
+                        original_md5: task.source_md5.clone(),
                     },
                 )
                 .await?;

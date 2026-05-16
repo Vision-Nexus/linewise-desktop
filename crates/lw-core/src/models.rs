@@ -70,6 +70,16 @@ pub struct CreateDocumentRequest {
     pub model_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    /// Source-file MD5 (32 lowercase hex chars), pre-transcode. Lives at
+    /// the top level — NOT inside `metadata`. The backend persists this
+    /// to a dedicated `documents.original_md5` column with a regex CHECK
+    /// and a `BEFORE UPDATE` immutability trigger; a `BEFORE INSERT`
+    /// trigger on the registry mirrors it into `public.document_file_hashes`
+    /// so future dedup-checks can match. Putting it inside `metadata`
+    /// silently drops the value because `DocumentMeta` does not declare
+    /// the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_md5: Option<String>,
 }
 
 /// Metadata for CreateDocumentRequest — matches DocumentMeta fields
@@ -80,6 +90,45 @@ pub struct CreateDocumentMeta {
     pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<i64>,
+}
+
+/// Request body for `POST /api/org/{tenant}/dedup-checks` — batch up
+/// to 100 source-file MD5s. The backend rejects empty arrays and
+/// arrays longer than 100 with a typed 400.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupCheckRequest<'a> {
+    pub md5_hashes: &'a [String],
+}
+
+/// One match row inside the calling tenant for a queried hash. The
+/// list is filtered by the caller's project access — matches in
+/// projects the user cannot read are omitted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupCheckMatch {
+    pub document_id: String,
+    pub project_id: String,
+    pub document_created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupCheckResult {
+    pub md5_hash: String,
+    /// Documents in the calling tenant carrying this hash, restricted
+    /// to projects the caller can read.
+    pub tenant_matches: Vec<DedupCheckMatch>,
+    /// Distinct documents the same calling user uploaded with this
+    /// hash in other tenants they belong to. A count, not a list —
+    /// other tenants' project structure is intentionally not exposed.
+    pub user_other_tenant_count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupCheckResponse {
+    pub results: Vec<DedupCheckResult>,
 }
 
 /// Mirrors backend PresignedUrlResponse (GCSModels.scala)
@@ -165,11 +214,30 @@ impl UserInfo {
     pub fn is_system_user(&self) -> bool {
         !self.system_roles.is_empty()
     }
+
+    /// True only for the `admin` system role. The other system roles
+    /// (`viewer`, `probe`) can read system data but should not see
+    /// destructive affordances like the dedup bypass that lets a
+    /// rejected upload proceed anyway.
+    pub fn is_super_admin(&self) -> bool {
+        self.system_roles.iter().any(|r| r == "admin")
+    }
 }
 
 /// Upload task state persisted in SQLite
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadState {
+    /// Row was just inserted from a file pick / drop. The video probe
+    /// has run (synchronously, fast) so `video_info` and quality
+    /// reasons are present, but BLAKE3+MD5 hashing and the
+    /// cross-tenant dedup check are still in flight on a background
+    /// task. The UI shows a progress bar driven by `HashProgress`
+    /// events; the row transitions to `Staged` or `Rejected` when the
+    /// background work finishes. We carry this as its own state — not
+    /// a sub-state of `Staged` — because a hashing row must not
+    /// appear in the "Ready to Upload" count: confirming staged tasks
+    /// before their hash lands would skip the dedup gate entirely.
+    Hashing,
     Staged,
     /// Source video failed the acceptance-quality gate (bitrate, fps,
     /// resolution, or device-fingerprint below the configured floor). The
@@ -194,6 +262,7 @@ pub enum UploadState {
 impl UploadState {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Hashing => "HASHING",
             Self::Staged => "STAGED",
             Self::Rejected => "REJECTED",
             Self::Pending => "PENDING",
@@ -211,6 +280,7 @@ impl UploadState {
 
     pub fn parse(s: &str) -> Self {
         match s {
+            "HASHING" => Self::Hashing,
             "STAGED" => Self::Staged,
             "REJECTED" => Self::Rejected,
             "PENDING" => Self::Pending,
@@ -257,6 +327,12 @@ pub struct UploadTask {
     pub state: UploadState,
     pub error_message: Option<String>,
     pub hash: Option<String>,
+    /// MD5 of the source file (pre-transcode), 32 lowercase hex
+    /// chars. Computed alongside [`hash`] in a single I/O pass at
+    /// staging time. Sent to the backend in two places: `originalMd5`
+    /// on document creation, and the `dedup-checks` request body.
+    /// `None` on rows staged before this field existed.
+    pub source_md5: Option<String>,
     pub validation_warnings: Vec<String>,
     pub retry_count: u32,
     /// User opted in to transcode this file before upload
@@ -266,6 +342,13 @@ pub struct UploadTask {
     pub transcoded_size: Option<u64>,
     /// Video probe info (populated at staging time for video files)
     pub video_info: Option<VideoInfo>,
+    /// Super-admin override: when true, the upload engine skips both
+    /// the cross-tenant dedup gate and the local-DB duplicate
+    /// short-circuit on this task. Persisted so a re-staged row keeps
+    /// its bypass across an app restart. Set only by the "Force upload"
+    /// affordance in the UI, which is itself gated on
+    /// [`UserInfo::is_super_admin`].
+    pub force_upload: bool,
 }
 
 /// Video probe result
