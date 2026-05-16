@@ -927,10 +927,11 @@ mod tests {
 
     #[test]
     fn acceptance_blocks_above_duration_ceiling() {
-        // Default accept ceiling: 3600s (1 hour). 90 min must reject.
+        // Default accept ceiling: 36000s (10 hours). 36001s must reject —
+        // the band is inclusive on the upper edge so we go one second past.
         let r = rules();
         let v = classify_acceptance(
-            &full_info_dur(1920, 1080, 30.0, 15_000, 5400.0),
+            &full_info_dur(1920, 1080, 30.0, 15_000, 36001.0),
             &Provenance::CameraOriginal,
             &r,
         );
