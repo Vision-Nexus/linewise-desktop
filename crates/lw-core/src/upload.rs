@@ -16,6 +16,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Semaphore, mpsc};
 use uuid::Uuid;
 
+/// Classify a file path as video by sniffing its MIME type from the
+/// extension. Lifted out of `stage_file` so the UI can pre-filter
+/// dropped files at drag-and-drop time without re-implementing the
+/// mime_guess lookup.
+pub fn looks_like_video(path: &Path) -> bool {
+    mime_guess::from_path(path).first_or_octet_stream().type_() == mime_guess::mime::VIDEO
+}
+
 /// Events emitted by the upload engine to the UI
 #[derive(Debug, Clone)]
 pub enum UploadEvent {

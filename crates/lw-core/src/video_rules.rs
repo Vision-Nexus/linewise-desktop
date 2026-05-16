@@ -53,21 +53,12 @@ pub struct BitrateRules {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResolutionRules {
-    pub recommend: ResolutionRecommend,
-    pub accept: ResolutionAccept,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ResolutionRecommend {
-    pub min_height: u32,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ResolutionAccept {
-    pub pixels_min: u64,
-    pub pixels_max: u64,
-    pub message: String,
+    /// Soft-warning band over pixel count (`width * height`). A
+    /// zero-width band (`min == max`) captures "nudge the user toward
+    /// this exact target", e.g. exactly 1080p.
+    pub recommend: Band<u64>,
+    /// Hard-rejection band over pixel count.
+    pub accept: Band<u64>,
 }
 
 /// One band of a numeric dimension (fps, bitrate, etc.). Either edge can

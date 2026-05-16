@@ -144,24 +144,19 @@ fn classify_acceptance(
         ));
     }
 
-    // Pixel count: between accept.pixels_min and accept.pixels_max,
-    // inclusive.
+    // Pixel count: same band semantics as fps and bitrate. Both edges
+    // inclusive — equal-on-edge passes — so a clip exactly at 720p
+    // (the floor) is still acceptable.
     let pixels = u64::from(info.width) * u64::from(info.height);
-    if pixels > 0 {
-        let accept = &rules.numeric.resolution.accept;
-        if !(accept.pixels_min..=accept.pixels_max).contains(&pixels) {
-            let side = if pixels < accept.pixels_min {
-                Bound::Below
-            } else {
-                Bound::Above
-            };
-            reasons.push(render_resolution_accept(
-                accept,
-                info.width,
-                info.height,
-                side,
-            ));
-        }
+    if pixels > 0
+        && let Some(side) = trip(&rules.numeric.resolution.accept, pixels)
+    {
+        reasons.push(render_resolution_band(
+            &rules.numeric.resolution.accept,
+            info.width,
+            info.height,
+            side,
+        ));
     }
 
     // Provenance: anything that isn't camera-original is rejected.
@@ -207,8 +202,17 @@ impl Bound {
 }
 
 /// Test whether `value` lies outside the band. Returns the side that
-/// tripped, or `None` when both edges are unset (open-open band) or
-/// the value is inside the band.
+/// tripped, or `None` when both edges are unset (open-open band) or the
+/// value sits inside the band, edges included.
+///
+/// Boundary behaviour: a value *equal* to `min` or `max` is treated as
+/// inside the band. The gate is inclusive on both edges. Authors
+/// picture `accept.min = 8000` as "less than 8 Mbps is unacceptable,
+/// 8 Mbps exactly is fine".
+///
+/// Zero-width bands (`min == max == X`) are useful as a recommendation
+/// target — every value except `X` trips, with the side picked by
+/// which direction `value` falls relative to `X`.
 fn trip<T: PartialOrd + Copy>(band: &Band<T>, value: T) -> Option<Bound> {
     if let Some(min) = band.min
         && value < min
@@ -266,34 +270,19 @@ fn render_bitrate_band(
     )
 }
 
-fn render_resolution_recommend(
-    rule: &crate::video_rules::ResolutionRecommend,
-    width: u32,
-    height: u32,
-) -> String {
+/// Render a resolution band's message. Templates can reference
+/// `{width}`, `{height}`, `{min}`, `{max}`, `{bound}`. `{min}` / `{max}`
+/// are the pixel-count edges; `0` if absent.
+fn render_resolution_band(band: &Band<u64>, width: u32, height: u32, bound: Bound) -> String {
+    let min_v = band.min.unwrap_or(0);
+    let max_v = band.max.unwrap_or(0);
     render(
-        &rule.message,
+        &band.message,
         &[
             ("width", Sub::Str(width.to_string())),
             ("height", Sub::Str(height.to_string())),
-            ("min_height", Sub::Str(rule.min_height.to_string())),
-        ],
-    )
-}
-
-fn render_resolution_accept(
-    rule: &crate::video_rules::ResolutionAccept,
-    width: u32,
-    height: u32,
-    bound: Bound,
-) -> String {
-    render(
-        &rule.message,
-        &[
-            ("width", Sub::Str(width.to_string())),
-            ("height", Sub::Str(height.to_string())),
-            ("pixels_min", Sub::Str(rule.pixels_min.to_string())),
-            ("pixels_max", Sub::Str(rule.pixels_max.to_string())),
+            ("min", Sub::Str(min_v.to_string())),
+            ("max", Sub::Str(max_v.to_string())),
             ("bound", Sub::Str(bound.as_str().to_owned())),
         ],
     )
@@ -580,10 +569,19 @@ fn probe_and_validate(
         ));
     }
 
-    // Soft resolution floor (height).
-    let recommend = &rules.numeric.resolution.recommend;
-    if height > 0 && height < recommend.min_height {
-        warnings.push(render_resolution_recommend(recommend, width, height));
+    // Soft resolution band. Same machinery as the accept band; a
+    // zero-width recommend (`min == max`) effectively says "we want
+    // exactly this resolution" and warns on any deviation.
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > 0
+        && let Some(side) = trip(&rules.numeric.resolution.recommend, pixels)
+    {
+        warnings.push(render_resolution_band(
+            &rules.numeric.resolution.recommend,
+            width,
+            height,
+            side,
+        ));
     }
 
     // Soft bitrate band.
@@ -892,9 +890,35 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_accepts_exactly_1080p() {
+    fn acceptance_accepts_exactly_720p_floor() {
+        // 1280×720 sits on the lower bound of the accept band
+        // (720p–1440p, inclusive). Equal-on-edge passes.
         let r = rules();
-        // 1920×1080 lies on the lower bound and is accepted (inclusive).
+        let v = classify_acceptance(
+            &full_info(1280, 720, 30.0, 15_000),
+            &Provenance::CameraOriginal,
+            &r,
+        );
+        assert_eq!(v, Acceptance::Accepted);
+    }
+
+    #[test]
+    fn acceptance_accepts_exactly_1440p_ceiling() {
+        // 2560×1440 sits on the upper bound. Equal-on-edge passes.
+        let r = rules();
+        let v = classify_acceptance(
+            &full_info(2560, 1440, 30.0, 15_000),
+            &Provenance::CameraOriginal,
+            &r,
+        );
+        assert_eq!(v, Acceptance::Accepted);
+    }
+
+    #[test]
+    fn acceptance_accepts_exactly_1080p_inside_band() {
+        // 1920×1080 lies strictly between 720p and 1440p in pixel
+        // count, so it passes the accept band.
+        let r = rules();
         let v = classify_acceptance(
             &full_info(1920, 1080, 30.0, 15_000),
             &Provenance::CameraOriginal,
@@ -905,10 +929,10 @@ mod tests {
 
     #[test]
     fn acceptance_accepts_portrait_1080p() {
-        let r = rules();
         // 1080×1920 has the same pixel count as 1920×1080, so the
         // pixel-count rule treats it identically. Rotation lives in
         // side-data, not in the dimensions stored on the stream.
+        let r = rules();
         let v = classify_acceptance(
             &full_info(1080, 1920, 30.0, 15_000),
             &Provenance::CameraOriginal,
@@ -918,22 +942,11 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_accepts_exactly_4k() {
+    fn acceptance_rejects_above_1440p_ceiling() {
+        // 4K (3840×2160) is above the new 1440p ceiling.
         let r = rules();
-        // 3840×2160 lies on the upper bound and is accepted (inclusive).
         let v = classify_acceptance(
             &full_info(3840, 2160, 30.0, 15_000),
-            &Provenance::CameraOriginal,
-            &r,
-        );
-        assert_eq!(v, Acceptance::Accepted);
-    }
-
-    #[test]
-    fn acceptance_rejects_below_1080p() {
-        let r = rules();
-        let v = classify_acceptance(
-            &full_info(1280, 720, 30.0, 15_000),
             &Provenance::CameraOriginal,
             &r,
         );
@@ -941,9 +954,21 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_rejects_above_4k() {
+    fn acceptance_rejects_below_720p() {
+        // SD 480p sits below the 720p floor.
         let r = rules();
-        // 8K, 7680×4320 — well past the 4K ceiling.
+        let v = classify_acceptance(
+            &full_info(854, 480, 30.0, 15_000),
+            &Provenance::CameraOriginal,
+            &r,
+        );
+        assert!(matches!(v, Acceptance::Rejected { .. }));
+    }
+
+    #[test]
+    fn acceptance_rejects_above_1440p() {
+        // 8K (7680×4320) is well past the 1440p ceiling.
+        let r = rules();
         let v = classify_acceptance(
             &full_info(7680, 4320, 30.0, 15_000),
             &Provenance::CameraOriginal,

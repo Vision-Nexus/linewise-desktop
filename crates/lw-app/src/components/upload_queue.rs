@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 use lw_core::config::TranscodeConfig;
 use lw_core::error::UploadError;
 use lw_core::models::{UploadState, UploadTask};
-use lw_core::upload::UploadEvent;
+use lw_core::upload::{self, UploadEvent};
 use lw_core::video;
 use lw_core::video_rules::DeviceEncoderSignature;
 use std::collections::HashMap;
@@ -376,13 +376,38 @@ pub fn UploadQueue() -> Element {
             .map(|p| p.id.clone())
             .unwrap_or_default();
         let mut app_state_for_toast = app_state_drop.clone();
-        let files = evt.files();
+
+        // Split the drop into video and non-video files at the drop
+        // site. Non-videos are reported once via a toast count rather
+        // than per-file, so a folder full of stray .DS_Store / .txt
+        // doesn't spam the user.
+        let mut to_stage: Vec<PathBuf> = Vec::new();
+        let mut skipped: u32 = 0;
+        for file in evt.files() {
+            let path = file.path();
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            if upload::looks_like_video(&path) {
+                to_stage.push(path);
+            } else {
+                skipped += 1;
+            }
+        }
+
+        if skipped > 0 {
+            let label = if skipped == 1 { "file" } else { "files" };
+            app_state_for_toast.show_toast(
+                format!("Skipped {skipped} non-video {label}"),
+                ToastKind::Info,
+            );
+        }
+        if to_stage.is_empty() {
+            return;
+        }
+
         spawn(async move {
-            for file in files {
-                let path = file.path();
-                if path.as_os_str().is_empty() {
-                    continue;
-                }
+            for path in to_stage {
                 if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
                     e.log("Stage dropped file");
                     app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
@@ -391,10 +416,19 @@ pub fn UploadQueue() -> Element {
         });
     };
 
-    let drop_border = if *is_dragging.read() && can_upload {
-        "2px dashed var(--border-focus)"
+    // While a drag is in progress over the queue panel, thicken the
+    // dashed border and tint the background so the drop target reads
+    // as active. Both cues fade out via the panel's `transition` rule.
+    let dragging_active = *is_dragging.read() && can_upload;
+    let drop_border = if dragging_active {
+        "3px dashed var(--border-focus)"
     } else {
         "2px dashed transparent"
+    };
+    let drop_background = if dragging_active {
+        "var(--bg-tertiary)"
+    } else {
+        "transparent"
     };
 
     let staged: Vec<_> = tasks
@@ -425,7 +459,7 @@ pub fn UploadQueue() -> Element {
 
     rsx! {
         div {
-            style: "padding: 16px; border: {drop_border}; border-radius: 8px; min-height: 300px; transition: border 0.2s;",
+            style: "padding: 16px; border: {drop_border}; border-radius: 8px; min-height: 300px; background: {drop_background}; transition: border 0.15s, background 0.15s;",
             ondragover: move |evt| { evt.prevent_default(); is_dragging.set(true); },
             ondragleave: move |_| is_dragging.set(false),
             ondrop: on_drop,

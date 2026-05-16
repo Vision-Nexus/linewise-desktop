@@ -29,13 +29,14 @@
     },
     "resolution": {
       "recommend": {
-        "min_height": 720,
-        "message": "Resolution {width}x{height} is below the {min_height}p recommended minimum"
+        "min": 2073600,
+        "max": 2073600,
+        "message": "Resolution {width}x{height} is {bound} the recommended 1080p target"
       },
       "accept": {
-        "pixels_min": 2073600,
-        "pixels_max": 8294400,
-        "message": "Resolution {width}x{height} is {bound} the 1080p-4K acceptance band"
+        "min": 921600,
+        "max": 3686400,
+        "message": "Resolution {width}x{height} is {bound} the 720p-1440p acceptance band"
       }
     }
   },
