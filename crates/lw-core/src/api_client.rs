@@ -305,12 +305,19 @@ impl ApiClient {
 }
 
 /// Map a `reqwest::Error` from `quality_check` to either
-/// `QualityCheckOffline` (connect / timeout — server unreachable) or
-/// the generic `Network` variant. The classifier matters because the
-/// hard cutover means an offline launch can't run a local rule check
-/// any more, and the UI wants to render that dedicated message.
+/// `QualityCheckOffline` (server unreachable from the client side) or the
+/// generic `Network` variant. The classifier matters because the hard cutover
+/// means an offline launch can't run a local rule check any more, and the UI
+/// wants to render that dedicated message.
+///
+/// Offline covers everything that fails *before* an HTTP response arrives:
+/// connect failures (DNS, refused, network unreachable, TLS handshake — all
+/// classified as `is_connect()` by reqwest's connector), TCP/TLS timeouts,
+/// and request-builder failures (URL parse, header build). A response with a
+/// non-2xx status is *not* offline — that surfaces as `UploadError::Api` from
+/// the response-handling path, never reaches this classifier.
 fn quality_check_send_error(err: reqwest::Error) -> UploadError {
-    if err.is_connect() || err.is_timeout() {
+    if err.is_connect() || err.is_timeout() || err.is_request() {
         UploadError::QualityCheckOffline { source: err }
     } else {
         UploadError::Network(err)

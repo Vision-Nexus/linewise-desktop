@@ -30,7 +30,9 @@ const HEAD_LEN: usize = 16;
 
 /// Offset of the second MPEG-TS sync byte that confirms a transport
 /// stream. Standard 188-byte packet alignment.
-const MPEGTS_SECOND_SYNC: u64 = 188;
+const MPEGTS_PACKET_SIZE: u64 = 188;
+const MPEGTS_SECOND_SYNC: u64 = MPEGTS_PACKET_SIZE;
+const MPEGTS_THIRD_SYNC: u64 = MPEGTS_PACKET_SIZE * 2;
 
 /// EBML header — Matroska and WebM share the prefix.
 const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
@@ -157,10 +159,23 @@ fn match_head(head: &[u8]) -> Option<ContainerKind> {
     None
 }
 
-/// Seek to byte 188 and confirm a second 0x47 sync byte. Files shorter
-/// than 189 bytes can't confirm and return `false`.
+/// Confirm MPEG-TS by checking for sync bytes at packet offsets 188 and 376.
+/// Two extra confirmations (rather than one) cuts the false-positive rate from
+/// `1/256` to `1/65536` for arbitrary binary inputs that happen to start with
+/// `0x47`. Short files that can't reach offset 376 return `false` — the
+/// detector falls through to `Unknown` rather than guessing.
 fn confirm_mpegts(file: &mut File) -> Result<bool, std::io::Error> {
-    if file.seek(SeekFrom::Start(MPEGTS_SECOND_SYNC)).is_err() {
+    sync_byte_at(file, MPEGTS_SECOND_SYNC).and_then(|ok| {
+        if ok {
+            sync_byte_at(file, MPEGTS_THIRD_SYNC)
+        } else {
+            Ok(false)
+        }
+    })
+}
+
+fn sync_byte_at(file: &mut File, offset: u64) -> Result<bool, std::io::Error> {
+    if file.seek(SeekFrom::Start(offset)).is_err() {
         return Ok(false);
     }
     let mut byte = [0u8; 1];
@@ -278,17 +293,29 @@ mod tests {
     }
 
     #[test]
-    fn mpegts_two_sync_bytes_188_apart_is_recognized() {
-        // Build a 200-byte file: 0x47 at offset 0, filler, 0x47 at offset 188.
-        let mut bytes = vec![0u8; 200];
+    fn mpegts_three_sync_bytes_packet_aligned_is_recognized() {
+        // Build a 400-byte file with sync bytes at offsets 0, 188, 376.
+        let mut bytes = vec![0u8; 400];
         bytes[0] = MPEGTS_SYNC;
         bytes[MPEGTS_SECOND_SYNC as usize] = MPEGTS_SYNC;
+        bytes[MPEGTS_THIRD_SYNC as usize] = MPEGTS_SYNC;
         assert_eq!(detect_bytes("mpegts", &bytes), ContainerKind::MpegTs);
     }
 
     #[test]
+    fn mpegts_only_two_sync_bytes_is_unknown() {
+        // Two-of-three is not enough — keeps the false-positive rate low for
+        // arbitrary binary inputs that happen to start with 0x47.
+        let mut bytes = vec![0u8; 400];
+        bytes[0] = MPEGTS_SYNC;
+        bytes[MPEGTS_SECOND_SYNC as usize] = MPEGTS_SYNC;
+        // No sync at MPEGTS_THIRD_SYNC.
+        assert_eq!(detect_bytes("mpegts-2of3", &bytes), ContainerKind::Unknown);
+    }
+
+    #[test]
     fn mpegts_single_sync_without_second_is_unknown() {
-        let mut bytes = vec![0u8; 200];
+        let mut bytes = vec![0u8; 400];
         bytes[0] = MPEGTS_SYNC;
         // No second sync byte at 188.
         assert_eq!(
@@ -299,7 +326,8 @@ mod tests {
 
     #[test]
     fn mpegts_too_short_to_confirm_is_unknown() {
-        // Starts with 0x47 but file is shorter than 189 bytes — can't confirm.
+        // Starts with 0x47 but file is shorter than 377 bytes — can't confirm
+        // the third sync.
         let bytes = vec![MPEGTS_SYNC; 50];
         assert_eq!(detect_bytes("mpegts-short", &bytes), ContainerKind::Unknown);
     }
