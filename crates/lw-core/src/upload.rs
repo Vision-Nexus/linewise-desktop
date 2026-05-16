@@ -1,5 +1,6 @@
 use crate::api_client::ApiClient;
 use crate::config::TranscodeConfig;
+use crate::container_kind::{self, ContainerKind};
 use crate::db::Database;
 use crate::dedup;
 use crate::desensitize;
@@ -8,8 +9,9 @@ use crate::models::{
     Acceptance, CreateDocumentMeta, CreateDocumentRequest, UploadState, UploadTask,
 };
 use crate::storage::{self, StorageBackend};
-use crate::video_rules::VideoRules;
-use crate::{transcode, video};
+use crate::transcode;
+use crate::video;
+use crate::video_head;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +24,16 @@ use uuid::Uuid;
 /// mime_guess lookup.
 pub fn looks_like_video(path: &Path) -> bool {
     mime_guess::from_path(path).first_or_octet_stream().type_() == mime_guess::mime::VIDEO
+}
+
+/// Deferred verdict emitted by the staging-time quality check. The hash
+/// worker reads this after BLAKE3+MD5 finishes and routes the row to
+/// `Staged` or `Rejected` accordingly. We hash quality-rejected rows
+/// anyway so a super-admin Force-upload bypass has the MD5 ready to
+/// send to `create_document` / `dedup-checks`.
+enum PostHashVerdict {
+    Stage,
+    Reject(Vec<String>),
 }
 
 /// Events emitted by the upload engine to the UI
@@ -91,11 +103,6 @@ pub struct UploadEngine {
     auto_clean: AtomicBool,
     strip_metadata: bool,
     transcode_config: TranscodeConfig,
-    /// Acceptance / advisory thresholds and message templates for video
-    /// validation. Loaded once at startup by
-    /// [`crate::video_rules::VideoRules::load_for_startup`] and threaded
-    /// into every `validate_video` call. Cheap to clone via Arc.
-    video_rules: Arc<VideoRules>,
     chunk_size: u64,
     upload_semaphore: Arc<Semaphore>,
 }
@@ -110,7 +117,6 @@ impl UploadEngine {
         auto_clean: bool,
         strip_metadata: bool,
         transcode_config: TranscodeConfig,
-        video_rules: Arc<VideoRules>,
         chunk_size_mb: u32,
         max_concurrent: u32,
     ) -> Self {
@@ -122,16 +128,9 @@ impl UploadEngine {
             auto_clean: AtomicBool::new(auto_clean),
             strip_metadata,
             transcode_config,
-            video_rules,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
         }
-    }
-
-    /// Read-only handle to the rule set. UI components that render
-    /// metadata popovers (e.g. device-info rows) need it too.
-    pub fn video_rules(&self) -> Arc<VideoRules> {
-        Arc::clone(&self.video_rules)
     }
 
     /// Update the auto-clean flag at runtime. Takes effect on the next
@@ -143,6 +142,99 @@ impl UploadEngine {
     /// Read the current auto-clean flag.
     pub fn auto_clean(&self) -> bool {
         self.auto_clean.load(Ordering::Relaxed)
+    }
+
+    /// Run the server-side video quality check at staging time.
+    ///
+    /// Returns `(video_info, warnings, verdict)`. `video_info` mirrors
+    /// the server's probe output for the per-row popover; `warnings`
+    /// are advisory lines (recommend bands, telemetry hints);
+    /// `verdict` defers `Stage` vs `Reject` to the hash worker.
+    ///
+    /// Errors:
+    ///   * `VideoUnplayable` — no `moov` atom, surfaced before any
+    ///     network call so power-cut recordings fail fast.
+    ///   * `QualityCheckPayloadTooLarge` — assembled head-bytes exceed
+    ///     the 8 MiB cap. Real-world camera output stays well under
+    ///     this; hitting it means the input is malformed.
+    ///   * `QualityCheckOffline` — server unreachable. Hard cutover
+    ///     means we cannot fall back to a local rule check.
+    async fn run_quality_check(
+        &self,
+        path: &Path,
+        tenant_id: &str,
+        project_id: &str,
+        filename: &str,
+    ) -> Result<
+        (
+            Option<crate::models::VideoInfo>,
+            Vec<String>,
+            PostHashVerdict,
+        ),
+        UploadError,
+    > {
+        // Magic-byte sniff before we touch the atom walker. The walker
+        // assumes an ISO BMFF top-level layout; pointing it at a Matroska
+        // or AVI file just produces noise and an opaque "no moov" error.
+        // The 2026-05-16 production-data sweep showed 99.98% of customer
+        // uploads are already ISO BMFF, so the right answer for the rest
+        // is a kind-specific rejection before we spend any IO.
+        match container_kind::detect(path)? {
+            ContainerKind::IsoBmff => {}
+            kind @ (ContainerKind::Matroska
+            | ContainerKind::WebM
+            | ContainerKind::Avi
+            | ContainerKind::Asf
+            | ContainerKind::Flv
+            | ContainerKind::MpegTs
+            | ContainerKind::Unknown) => {
+                return Err(UploadError::UnsupportedContainer { kind });
+            }
+        }
+
+        let path_buf = path.to_path_buf();
+        let chunks =
+            match tokio::task::spawn_blocking(move || video_head::extract_atom_chunks(&path_buf))
+                .await
+            {
+                Ok(Ok(c)) => c,
+                Ok(Err(VideoValidationError::Unplayable { reason })) => {
+                    return Err(UploadError::VideoUnplayable { reason });
+                }
+                Ok(Err(VideoValidationError::MoovTooLarge { bytes, cap })) => {
+                    return Err(UploadError::QualityCheckPayloadTooLarge { bytes, cap });
+                }
+                Ok(Err(VideoValidationError::Io(e))) => {
+                    return Err(UploadError::Io(e));
+                }
+                Ok(Err(
+                    e @ (VideoValidationError::FfprobeNotFound
+                    | VideoValidationError::ProbeFailed(_)
+                    | VideoValidationError::UnsupportedFormat(_)),
+                )) => {
+                    // The atom walker no longer produces these variants; if
+                    // a future change reintroduces them we want to know
+                    // rather than silently treating them as Unplayable.
+                    tracing::warn!("Atom walker produced unexpected error for {filename}: {e}");
+                    return Err(UploadError::VideoUnplayable {
+                        reason: e.to_string(),
+                    });
+                }
+                Err(join_err) => {
+                    tracing::error!("Atom walker task panicked for {filename}: {join_err}");
+                    return Err(UploadError::Io(std::io::Error::other(join_err)));
+                }
+            };
+
+        let response = self
+            .api
+            .quality_check(tenant_id, project_id, chunks)
+            .await?;
+        let verdict = match response.acceptance {
+            Acceptance::Accepted => PostHashVerdict::Stage,
+            Acceptance::Rejected { reasons } => PostHashVerdict::Reject(reasons),
+        };
+        Ok((Some(response.info), response.warnings, verdict))
     }
 
     /// Stage a file for review (step 1 of two-step upload).
@@ -181,43 +273,28 @@ impl UploadEngine {
             .first_or_octet_stream()
             .to_string();
 
-        // Probe video files at staging time so info is available in the UI.
-        // `Unplayable` is fatal — the file has no playable timeline, so we
-        // refuse to stage it at all and let the UI render an immediate error
-        // toast. The other variants (probe environment / codec we don't
-        // understand / transient internal failure) degrade to a warning and
-        // the task still stages without `video_info`.
+        // Server-side quality check for video files. Two phases:
         //
-        // `Acceptance::Rejected` is captured as a `pending_rejection`
-        // verdict that the hash worker applies after hashing completes —
-        // we still hash the file so a super-admin Force-upload bypass has
-        // an MD5 to send, and the row spends the hashing window in the
-        // `Hashing` state instead of flickering Rejected → Hashing → Rejected.
-        enum PostHashVerdict {
-            Stage,
-            Reject(Vec<String>),
-            // Quality-Rejected: hash, then route to Rejected with these reasons.
-        }
+        // 1. Walk the source's top-level atoms locally and assemble the
+        //    sparse layout the server needs to reconstruct a probe-able
+        //    file. A missing `moov` atom (typical for power-cut
+        //    recordings) bails out as `VideoUnplayable` before any
+        //    network round-trip.
+        // 2. POST the assembled chunks to `/quality-check`. The server
+        //    runs ffprobe + the global+per-project rule set and returns
+        //    `acceptance + warnings + info`.
+        //
+        // `Unplayable` and the >8 MiB cap are fatal — refuse to stage.
+        // Network/connect failures bubble up as `QualityCheckOffline`
+        // so the UI can render the dedicated "server unreachable"
+        // message. Quality `Rejected` is captured as a deferred verdict
+        // that the hash worker applies after hashing completes, so the
+        // row spends the hashing window in `Hashing` instead of
+        // flickering Rejected → Hashing → Rejected and a super-admin
+        // Force-upload bypass still has the MD5 ready to send.
         let (video_info, validation_warnings, post_hash) = if mime_type.starts_with("video/") {
-            match video::validate_video(path, Arc::clone(&self.video_rules)).await {
-                Ok(result) => match result.acceptance {
-                    Acceptance::Accepted => {
-                        (Some(result.info), result.warnings, PostHashVerdict::Stage)
-                    }
-                    Acceptance::Rejected { reasons } => (
-                        Some(result.info),
-                        result.warnings,
-                        PostHashVerdict::Reject(reasons),
-                    ),
-                },
-                Err(VideoValidationError::Unplayable { reason }) => {
-                    return Err(UploadError::VideoUnplayable { reason });
-                }
-                Err(e) => {
-                    tracing::warn!("Video probe failed for {filename}: {e}");
-                    (None, Vec::new(), PostHashVerdict::Stage)
-                }
-            }
+            self.run_quality_check(path, tenant_id, project_id, &filename)
+                .await?
         } else {
             (None, Vec::new(), PostHashVerdict::Stage)
         };
@@ -598,33 +675,34 @@ impl UploadEngine {
         // `insert_file_hash`, so fail loudly instead.
         let hash = task.hash.clone().expect("hash set in Stage 1");
 
-        // Stage 2: Video validation (skip if already probed at staging time).
-        // The `Unplayable` branch is defense-in-depth — the staging path
-        // already rejects unplayable files, but a task carried over from a
-        // previous client version may have been staged before that guard
-        // existed. Failing here keeps the bad file from burning transcode
-        // CPU and upload bandwidth before the server rejects it.
+        // Stage 2: Video re-check (skip when staging already populated
+        // `video_info`). Defense-in-depth for legacy rows that were
+        // staged before the server-side quality check existed —
+        // failing here on an unplayable file keeps the bad file from
+        // burning transcode CPU and upload bandwidth. We only run the
+        // local atom walk; the full server check would re-run the
+        // acceptance gate, which is wrong for a row the user has
+        // already confirmed. `video_info` stays `None` for such rows
+        // (the popover gets its data from the next quality check on
+        // re-stage if the user wants it).
         let video_info = if task.video_info.is_some() {
             task.video_info.clone()
         } else if task.mime_type.starts_with("video/") {
             self.update_state(task, UploadState::Validating).await;
-            match video::validate_video(path, Arc::clone(&self.video_rules)).await {
-                Ok(result) => {
-                    if !result.warnings.is_empty() {
-                        task.validation_warnings = result.warnings.clone();
-                        let _ = self.event_tx.send(UploadEvent::ValidationWarnings {
-                            task_id: task.id.clone(),
-                            warnings: result.warnings,
-                            rejection_reasons: Vec::new(),
-                        });
-                    }
-                    Some(result.info)
-                }
-                Err(VideoValidationError::Unplayable { reason }) => {
+            let path_buf = path.to_path_buf();
+            match tokio::task::spawn_blocking(move || video_head::extract_atom_chunks(&path_buf))
+                .await
+            {
+                Ok(Ok(_)) => None,
+                Ok(Err(VideoValidationError::Unplayable { reason })) => {
                     return Err(UploadError::VideoUnplayable { reason });
                 }
-                Err(e) => {
-                    tracing::warn!("Video validation failed for {}: {e}", task.filename);
+                Ok(Err(e)) => {
+                    tracing::warn!("Atom walk failed for {}: {e}", task.filename);
+                    None
+                }
+                Err(join_err) => {
+                    tracing::error!("Atom walk task panicked for {}: {join_err}", task.filename);
                     None
                 }
             }

@@ -11,11 +11,9 @@
 //! concern, unlike FFmpeg which we treat as a build prerequisite.
 
 use lw_core::config::TranscodeConfig;
+use lw_core::models::VideoInfo;
 use lw_core::transcode;
-use lw_core::video;
-use lw_core::video_rules::VideoRules;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// ~2.7 MB h264/mp4 sample, 5 seconds. samplelib.com publishes a stable
 /// set of MP4 fixtures at predictable URLs; if the host ever rotates,
@@ -84,11 +82,12 @@ async fn test_transcode_real_file() {
     ffmpeg_next::init().expect("ffmpeg init");
     let path: &Path = &path;
 
-    let rules: Arc<VideoRules> = VideoRules::embedded();
-    let result = video::validate_video(path, rules)
-        .await
-        .expect("probe failed");
-    let info = &result.info;
+    // Probe the sample inline. The desktop's quality check now lives on
+    // the server, so we no longer go through `validate_video`; this
+    // test only needs the structural fields the transcoder reads
+    // (codec / dims / fps / bitrate / duration), which we read straight
+    // from libav.
+    let info = probe_for_transcode_test(path).expect("probe sample");
     eprintln!(
         "Input: {} {}x{} {:.0}fps {}kbps {:.1}s",
         info.codec, info.width, info.height, info.fps, info.bitrate_kbps, info.duration_secs
@@ -100,7 +99,7 @@ async fn test_transcode_real_file() {
         config.crf, config.preset, config.max_bitrate_mbps
     );
 
-    let tc_result = transcode::transcode_video(path, info, &config, &|done, total| {
+    let tc_result = transcode::transcode_video(path, &info, &config, &|done, total| {
         if done % 100 == 0 || done == total {
             eprintln!("  {done}/{total} frames");
         }
@@ -118,4 +117,52 @@ async fn test_transcode_real_file() {
         }
         Err(e) => panic!("Transcode failed: {e}"),
     }
+}
+
+/// Inline ffmpeg-next probe used only by this test. Mirrors the small
+/// subset of fields `transcode_video` actually reads — anything else on
+/// `VideoInfo` is left at its default. The production desktop receives
+/// a fully populated `VideoInfo` from the server-side quality check,
+/// so this helper is test-only.
+fn probe_for_transcode_test(path: &Path) -> Option<VideoInfo> {
+    let ictx = ffmpeg_next::format::input(path).ok()?;
+    let stream = ictx.streams().best(ffmpeg_next::media::Type::Video)?;
+    let video_ctx =
+        ffmpeg_next::codec::context::Context::from_parameters(stream.parameters()).ok()?;
+    let video_dec = video_ctx.decoder().video().ok()?;
+
+    let codec = stream.parameters().id().name().to_string();
+    let width = video_dec.width();
+    let height = video_dec.height();
+    let rate = stream.rate();
+    let fps = if rate.1 > 0 {
+        rate.0 as f64 / rate.1 as f64
+    } else {
+        0.0
+    };
+    let bitrate_bps = if video_dec.bit_rate() > 0 {
+        video_dec.bit_rate() as u64
+    } else {
+        ictx.bit_rate().max(0) as u64
+    };
+    let duration_secs = ictx.duration() as f64 / f64::from(ffmpeg_next::ffi::AV_TIME_BASE);
+    let format = ictx.format().name().to_string();
+    let audio_codec = ictx
+        .streams()
+        .best(ffmpeg_next::media::Type::Audio)
+        .map(|s| s.parameters().id().name().to_string())
+        .unwrap_or_default();
+
+    Some(VideoInfo {
+        width,
+        height,
+        fps,
+        bitrate_kbps: bitrate_bps / 1000,
+        codec,
+        audio_codec,
+        duration_secs,
+        format,
+        metadata: Vec::new(),
+        telemetry: None,
+    })
 }

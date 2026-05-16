@@ -3,9 +3,10 @@ use crate::config::Environment;
 use crate::error::UploadError;
 use crate::models::{
     CreateDocumentRequest, DedupCheckRequest, DedupCheckResponse, DocumentResponse,
-    PresignedUrlResponse, Project, WhoAmIResponse,
+    PresignedUrlResponse, Project, QualityCheckResponse, WhoAmIResponse,
 };
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use crate::video_head::{AtomChunks, MAX_PAYLOAD_BYTES};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use std::sync::Arc;
 
 pub struct ApiClient {
@@ -197,6 +198,87 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// POST /api/org/{tenant}/projects/{pid}/quality-check
+    ///
+    /// Ship the sparse atom layout assembled by
+    /// [`crate::video_head::extract_atom_chunks`] and let the server run
+    /// `ffprobe` against a reconstructed sparse temp file, then apply
+    /// the global+per-project rule set. The body is the concatenated
+    /// chunk bytes; `X-Linewise-Atom-Layout` carries the
+    /// `<offset>:<len>,...` map so the server knows where each chunk
+    /// sits in the original file.
+    ///
+    /// Errors:
+    ///   * [`UploadError::QualityCheckPayloadTooLarge`] if the assembled
+    ///     payload exceeds [`MAX_PAYLOAD_BYTES`] — refused before the
+    ///     network call so we don't burn bandwidth.
+    ///   * [`UploadError::QualityCheckOffline`] when the request fails
+    ///     due to connect / timeout / DNS — distinct from
+    ///     [`UploadError::Api`] so the UI can render the dedicated
+    ///     "server unreachable" message after the hard cutover.
+    ///   * [`UploadError::Api`] for non-2xx responses with the body as
+    ///     the message.
+    pub async fn quality_check(
+        &self,
+        tenant: &str,
+        project_id: &str,
+        atoms: AtomChunks,
+    ) -> Result<QualityCheckResponse, UploadError> {
+        let payload_bytes = atoms.payload_bytes();
+        if payload_bytes > MAX_PAYLOAD_BYTES {
+            return Err(UploadError::QualityCheckPayloadTooLarge {
+                bytes: payload_bytes,
+                cap: MAX_PAYLOAD_BYTES,
+            });
+        }
+
+        let layout = atoms
+            .chunks
+            .iter()
+            .map(|(off, b)| format!("{off}:{}", b.len()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let total_size = atoms.total_size;
+        let body: Vec<u8> = atoms.chunks.into_iter().flat_map(|(_, b)| b).collect();
+
+        let mut headers = self.auth_headers().await?;
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            "X-Linewise-Total-Size",
+            HeaderValue::from_str(&total_size.to_string())
+                .expect("decimal digits are valid header bytes"),
+        );
+        headers.insert(
+            "X-Linewise-Atom-Layout",
+            HeaderValue::from_str(&layout)
+                .expect("ascii digits/colons/commas are valid header bytes"),
+        );
+
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/org/{}/projects/{}/quality-check",
+                self.base_url, tenant, project_id,
+            ))
+            .headers(headers)
+            .body(body)
+            .send()
+            .await
+            .map_err(quality_check_send_error)?;
+
+        if !resp.status().is_success() {
+            return Err(UploadError::Api {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+
+        Ok(resp.json().await?)
+    }
+
     /// Verify document upload by polling until gcsUri is set
     pub async fn verify_upload(
         &self,
@@ -219,5 +301,25 @@ impl ApiClient {
             status: 408,
             message: "Upload verification timed out".to_string(),
         })
+    }
+}
+
+/// Map a `reqwest::Error` from `quality_check` to either
+/// `QualityCheckOffline` (server unreachable from the client side) or the
+/// generic `Network` variant. The classifier matters because the hard cutover
+/// means an offline launch can't run a local rule check any more, and the UI
+/// wants to render that dedicated message.
+///
+/// Offline covers everything that fails *before* an HTTP response arrives:
+/// connect failures (DNS, refused, network unreachable, TLS handshake — all
+/// classified as `is_connect()` by reqwest's connector), TCP/TLS timeouts,
+/// and request-builder failures (URL parse, header build). A response with a
+/// non-2xx status is *not* offline — that surfaces as `UploadError::Api` from
+/// the response-handling path, never reaches this classifier.
+fn quality_check_send_error(err: reqwest::Error) -> UploadError {
+    if err.is_connect() || err.is_timeout() || err.is_request() {
+        UploadError::QualityCheckOffline { source: err }
+    } else {
+        UploadError::Network(err)
     }
 }
