@@ -382,13 +382,14 @@ pub fn UploadQueue() -> Element {
         "2px dashed transparent"
     };
 
-    // Split tasks into sections. REJECTED rows live alongside STAGED in
-    // the "Ready to Upload" section so the user sees them next to the
-    // files they *can* upload — but they render in red and the upload
-    // button at the top of the section ignores them via `staged_count`.
     let staged: Vec<_> = tasks
         .iter()
-        .filter(|t| matches!(t.state, UploadState::Staged | UploadState::Rejected))
+        .filter(|t| t.state == UploadState::Staged)
+        .cloned()
+        .collect();
+    let rejected: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.state == UploadState::Rejected)
         .cloned()
         .collect();
     let transcoding: Vec<_> = tasks
@@ -477,6 +478,24 @@ pub fn UploadQueue() -> Element {
                     }
                 }
 
+                // Rejected files — shown separately so the user can tell at a
+                // glance which files will not upload. StagedRow already
+                // handles the red border, REJECTED chip, and red warning rows.
+                if !rejected.is_empty() {
+                    SectionHeader { title: "Rejected", count: rejected.len() }
+                    div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
+                        for task in rejected.iter() {
+                            StagedRow {
+                                key: "{task.id}",
+                                task: task.clone(),
+                                transcode_config: app_state.config.read().transcode.clone(),
+                                on_remove: on_remove.clone(),
+                                on_transcode_click,
+                            }
+                        }
+                    }
+                }
+
                 // Preparing (transcoding)
                 if !transcoding.is_empty() {
                     SectionHeader { title: "Preparing", count: transcoding.len() }
@@ -537,7 +556,7 @@ pub fn UploadQueue() -> Element {
                 // Empty state. Wording tracks the scope — only prompt for
                 // drop/add when the current scope can actually accept new
                 // uploads (Project scope).
-                if staged.is_empty() && transcoding.is_empty() && active.is_empty() && history.is_empty() {
+                if staged.is_empty() && rejected.is_empty() && transcoding.is_empty() && active.is_empty() && history.is_empty() {
                     div {
                         style: "text-align: center; padding: 48px 16px; color: var(--text-muted);",
                         p { style: "font-size: 14px; margin: 0 0 4px;", "No files in queue" }
