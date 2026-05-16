@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 mod bundle_ffmpeg;
 mod cmd;
 mod generate_icons;
+mod release;
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +31,19 @@ enum Cmd {
     },
     /// Regenerate platform icons (.png/.ico/.icns) from assets/icons/logo.svg.
     GenerateIcons,
+    /// Cut a release: rewrite workspace version, refresh Cargo.lock,
+    /// commit, and tag. Push is opt-in via `--push`. The tag must
+    /// start with `v`, e.g. `v0.0.10-test`.
+    Release {
+        /// Tag to create (e.g. `v0.0.10-test`).
+        tag: String,
+        /// Skip the clean-tree precheck. Use only for emergency releases.
+        #[arg(long, default_value_t = false)]
+        allow_dirty: bool,
+        /// Push the new commit and tag to `origin` after creating them.
+        #[arg(long, default_value_t = false)]
+        push: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -38,6 +52,11 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::BundleFfmpeg { target, create_dmg } => bundle_ffmpeg::run(&root, &target, create_dmg),
         Cmd::GenerateIcons => generate_icons::run(&root),
+        Cmd::Release {
+            tag,
+            allow_dirty,
+            push,
+        } => release::run(&root, &tag, allow_dirty, push),
     }
 }
 

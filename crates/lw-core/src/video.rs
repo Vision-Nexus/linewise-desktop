@@ -587,6 +587,7 @@ fn probe_and_validate(
     };
 
     let mut warnings = Vec::new();
+    let provenance = classify_provenance(&ictx, &rules.provenance);
 
     // Soft fps band.
     if info.fps > 0.0
@@ -646,10 +647,10 @@ fn probe_and_validate(
         ));
     }
 
-    // Provenance check rides the same warnings vector but sits *after* the
-    // camera-settings link footer, since the link doesn't apply — the user
-    // can't fix re-encoding by changing a camera setting.
-    let provenance = classify_provenance(&ictx, &rules.provenance);
+    // Provenance soft warning. Recommend-band-equivalent for provenance —
+    // emitted on every non-camera-original row, and the UI colours it
+    // alongside the other warn-tier lines. The acceptance check below
+    // produces its own (error-tier) reason separately.
     if let Some(msg) = provenance_warning(&provenance, &rules.provenance) {
         warnings.push(msg);
     }

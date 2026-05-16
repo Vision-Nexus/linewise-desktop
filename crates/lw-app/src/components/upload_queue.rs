@@ -485,9 +485,17 @@ pub fn UploadQueue() -> Element {
         .filter(|t| t.state == UploadState::Transcoding)
         .cloned()
         .collect();
+    // `Paused` rows belong in the active section even though
+    // `is_active()` returns false for them — `is_active` means "engine
+    // is processing this row," and a paused row isn't. But the user
+    // expects to see the row right where they left it, with a Resume
+    // button, instead of having it vanish out of every section.
     let active: Vec<_> = tasks
         .iter()
-        .filter(|t| t.state.is_active() && t.state != UploadState::Transcoding)
+        .filter(|t| {
+            (t.state.is_active() || t.state == UploadState::Paused)
+                && t.state != UploadState::Transcoding
+        })
         .cloned()
         .collect();
     let history: Vec<_> = tasks
@@ -894,11 +902,16 @@ fn StagedRow(
     } else {
         "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg); transition: background 0.15s, border-color 0.15s;"
     };
-    let warning_style = if is_rejected {
-        "font-size: 11px; color: var(--error); margin-top: 4px; padding: 3px 6px; background: var(--bg); border: 1px solid var(--error); border-radius: 3px;"
-    } else {
-        "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 3px;"
-    };
+    // Two severities, two palettes:
+    //   * `warning_style` — recommend-band advisories, telemetry hints,
+    //     missing-fingerprint nudges. Warn palette regardless of the
+    //     row's verdict; on a rejected row they sit alongside the
+    //     error-coloured reject reasons so the user can tell the
+    //     "you might want to" lines from the "this won't upload" lines.
+    //   * `reason_style` — acceptance-band reject reasons. Always
+    //     error-coloured; only present on rejected rows.
+    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 3px;";
+    let reason_style = "font-size: 11px; color: var(--error); margin-top: 4px; padding: 3px 6px; background: var(--bg); border: 1px solid var(--error); border-radius: 3px;";
 
     rsx! {
         div {
@@ -990,8 +1003,15 @@ fn StagedRow(
                 }
             }
 
-            // Validation warnings (rendered red when the row is REJECTED so
-            // the rejection reasons read as the cause, not a side note).
+            // Reject reasons render first so they read as the headline
+            // for a rejected row; advisory warnings follow underneath in
+            // the warn palette.
+            for reason in task.rejection_reasons.iter() {
+                div {
+                    style: "{reason_style}",
+                    "{reason}"
+                }
+            }
             for warning in task.validation_warnings.iter() {
                 div {
                     style: "{warning_style}",
@@ -1235,6 +1255,12 @@ fn UploadTaskRow(
                 }
             }
 
+            for reason in task.rejection_reasons.iter() {
+                div {
+                    style: "font-size: 12px; color: var(--error); margin-top: 2px; padding: 4px 8px; background: var(--error-bg); border-radius: 4px;",
+                    "{reason}"
+                }
+            }
             for warning in task.validation_warnings.iter() {
                 div {
                     style: "font-size: 12px; color: var(--warning); margin-top: 2px; padding: 4px 8px; background: var(--warning-bg); border-radius: 4px;",
@@ -1314,8 +1340,15 @@ fn handle_upload_event(
                 .write()
                 .insert(task_id, (bytes_hashed, total_bytes));
         }
-        UploadEvent::ValidationWarnings { task_id, warnings } => {
-            update_task(app_state, &task_id, |t| t.validation_warnings = warnings);
+        UploadEvent::ValidationWarnings {
+            task_id,
+            warnings,
+            rejection_reasons,
+        } => {
+            update_task(app_state, &task_id, |t| {
+                t.validation_warnings = warnings;
+                t.rejection_reasons = rejection_reasons;
+            });
         }
         UploadEvent::TranscodeProgress { task_id, percent } => {
             transcode_progress.write().insert(task_id, percent);

@@ -333,7 +333,16 @@ pub struct UploadTask {
     /// on document creation, and the `dedup-checks` request body.
     /// `None` on rows staged before this field existed.
     pub source_md5: Option<String>,
+    /// Advisory lines (warn-coloured in the UI). Recommend-band hints,
+    /// telemetry advisories, missing-device-fingerprint nudges. Not
+    /// blocking — a row can be `Staged` and still carry warnings.
     pub validation_warnings: Vec<String>,
+    /// Hard reject reasons (error-coloured in the UI). Acceptance-band
+    /// failures, blocking provenance issues. Populated only when the
+    /// row's terminal state is `Rejected`. The split from
+    /// `validation_warnings` lets the UI render severity through
+    /// colour without parsing message strings.
+    pub rejection_reasons: Vec<String>,
     pub retry_count: u32,
     /// User opted in to transcode this file before upload
     pub transcode: bool,

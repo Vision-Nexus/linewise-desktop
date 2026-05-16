@@ -46,9 +46,14 @@ pub enum UploadEvent {
         bytes_hashed: u64,
         total_bytes: u64,
     },
+    /// Replace the per-row hint lists in the UI cache. `warnings`
+    /// renders in the warn palette, `rejection_reasons` in the error
+    /// palette. Either may be empty; both are sent together so the
+    /// UI never observes a half-updated row.
     ValidationWarnings {
         task_id: String,
         warnings: Vec<String>,
+        rejection_reasons: Vec<String>,
     },
     TranscodeProgress {
         task_id: String,
@@ -233,6 +238,7 @@ impl UploadEngine {
             hash: None,
             source_md5: None,
             validation_warnings,
+            rejection_reasons: Vec::new(),
             retry_count: 0,
             transcode: false,
             transcoded_size: None,
@@ -249,23 +255,18 @@ impl UploadEngine {
         let task_id = task.id.clone();
         let path_buf = path.to_path_buf();
         let tenant_id = tenant_id.to_string();
-        let initial_warnings = task.validation_warnings.clone();
+        let warnings = task.validation_warnings.clone();
         tokio::spawn(async move {
             let final_state = match post_hash {
                 PostHashVerdict::Stage => {
                     engine
-                        .run_hash_and_dedup(
-                            &task_id,
-                            &path_buf,
-                            &tenant_id,
-                            initial_warnings.clone(),
-                        )
+                        .run_hash_and_dedup(&task_id, &path_buf, &tenant_id, warnings)
                         .await
                 }
                 PostHashVerdict::Reject(reasons) => {
-                    let mut warnings = initial_warnings;
-                    warnings.extend(reasons);
-                    engine.run_hash_only(&task_id, &path_buf, warnings).await
+                    engine
+                        .run_hash_only(&task_id, &path_buf, warnings, reasons)
+                        .await
                 }
             };
             tracing::debug!(task_id = %task_id, ?final_state, "stage_file worker finished");
@@ -283,40 +284,27 @@ impl UploadEngine {
         task_id: &str,
         path: &Path,
         tenant_id: &str,
-        existing_warnings: Vec<String>,
+        warnings: Vec<String>,
     ) -> UploadState {
         let hashes = match self.consume_hash_stream(task_id, path).await {
             Ok(h) => h,
             Err(_) => return self.fail_hashing(task_id).await,
         };
 
-        let mut warnings = existing_warnings;
+        let mut rejection_reasons: Vec<String> = Vec::new();
         let final_state = match self
             .dedup_reject_reason(tenant_id, &hashes.md5_hex, task_id)
             .await
         {
             Some(reason) => {
-                warnings.push(reason);
+                rejection_reasons.push(reason);
                 UploadState::Rejected
             }
             None => UploadState::Staged,
         };
 
-        let _ = self
-            .db
-            .update_upload_state_and_warnings(task_id, final_state.clone(), &warnings)
-            .await;
-        if !warnings.is_empty() {
-            let _ = self.event_tx.send(UploadEvent::ValidationWarnings {
-                task_id: task_id.to_string(),
-                warnings,
-            });
-        }
-        let _ = self.event_tx.send(UploadEvent::StateChanged {
-            task_id: task_id.to_string(),
-            state: final_state.clone(),
-        });
-        final_state
+        self.settle_post_hash(task_id, final_state, warnings, rejection_reasons)
+            .await
     }
 
     /// Hash a quality-rejected row so the MD5 is on disk for a future
@@ -328,23 +316,45 @@ impl UploadEngine {
         task_id: &str,
         path: &Path,
         warnings: Vec<String>,
+        rejection_reasons: Vec<String>,
     ) -> UploadState {
         if self.consume_hash_stream(task_id, path).await.is_err() {
             return self.fail_hashing(task_id).await;
         }
+        self.settle_post_hash(task_id, UploadState::Rejected, warnings, rejection_reasons)
+            .await
+    }
+
+    /// One write + two events: persist state + warnings + reasons,
+    /// notify the UI, return the state for logging. Shared by both
+    /// terminal paths so the DB and event order can't drift between
+    /// them.
+    async fn settle_post_hash(
+        &self,
+        task_id: &str,
+        state: UploadState,
+        warnings: Vec<String>,
+        rejection_reasons: Vec<String>,
+    ) -> UploadState {
         let _ = self
             .db
-            .update_upload_state_and_warnings(task_id, UploadState::Rejected, &warnings)
+            .update_upload_state_warnings_and_reasons(
+                task_id,
+                state.clone(),
+                &warnings,
+                &rejection_reasons,
+            )
             .await;
         let _ = self.event_tx.send(UploadEvent::ValidationWarnings {
             task_id: task_id.to_string(),
             warnings,
+            rejection_reasons,
         });
         let _ = self.event_tx.send(UploadEvent::StateChanged {
             task_id: task_id.to_string(),
-            state: UploadState::Rejected,
+            state: state.clone(),
         });
-        UploadState::Rejected
+        state
     }
 
     /// Pump the hash stream into UI events + persisted hashes. The
@@ -605,6 +615,7 @@ impl UploadEngine {
                         let _ = self.event_tx.send(UploadEvent::ValidationWarnings {
                             task_id: task.id.clone(),
                             warnings: result.warnings,
+                            rejection_reasons: Vec::new(),
                         });
                     }
                     Some(result.info)

@@ -29,6 +29,7 @@ struct UploadRow {
     hash: Option<String>,
     source_md5: Option<String>,
     validation_warnings: Option<String>,
+    rejection_reasons: Option<String>,
     retry_count: Option<i64>,
     video_info: Option<String>,
     transcode: i64,
@@ -40,6 +41,9 @@ impl From<UploadRow> for UploadTask {
     fn from(r: UploadRow) -> Self {
         let warnings: Vec<String> =
             serde_json::from_str(r.validation_warnings.as_deref().unwrap_or("[]"))
+                .unwrap_or_default();
+        let rejection_reasons: Vec<String> =
+            serde_json::from_str(r.rejection_reasons.as_deref().unwrap_or("[]"))
                 .unwrap_or_default();
         Self {
             id: r.id.unwrap_or_default(),
@@ -57,6 +61,7 @@ impl From<UploadRow> for UploadTask {
             hash: r.hash,
             source_md5: r.source_md5,
             validation_warnings: warnings,
+            rejection_reasons,
             retry_count: r.retry_count.unwrap_or(0) as u32,
             transcode: r.transcode != 0,
             transcoded_size: r.transcoded_size.map(|v| v as u64),
@@ -131,6 +136,7 @@ impl Database {
 
     pub async fn insert_upload_task(&self, task: &UploadTask) -> Result<(), DbError> {
         let warnings_json = serde_json::to_string(&task.validation_warnings)?;
+        let reasons_json = serde_json::to_string(&task.rejection_reasons)?;
         let video_info_json = task
             .video_info
             .as_ref()
@@ -141,8 +147,8 @@ impl Database {
         let transcode = i64::from(task.transcode);
         let force_upload = i64::from(task.force_upload);
         sqlx::query!(
-            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, source_md5, validation_warnings, video_info, transcode, force_upload)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, source_md5, validation_warnings, rejection_reasons, video_info, transcode, force_upload)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             task.id,
             task.local_path,
             task.filename,
@@ -154,6 +160,7 @@ impl Database {
             task.hash,
             task.source_md5,
             warnings_json,
+            reasons_json,
             video_info_json,
             transcode,
             force_upload,
@@ -301,22 +308,25 @@ impl Database {
     }
 
     /// Settle the staging-time hash worker in one UPDATE: state +
-    /// warnings + cleared error message. Used at the terminal
-    /// `Staged` / `Rejected` transition so the row never sits in an
-    /// intermediate "warnings written, state still HASHING" window
-    /// that the UI could observe between two separate writes.
-    pub async fn update_upload_state_and_warnings(
+    /// warnings + reasons + cleared error message. Used at the
+    /// terminal `Staged` / `Rejected` transition so the row never
+    /// sits in an intermediate window that the UI could observe
+    /// between two separate writes.
+    pub async fn update_upload_state_warnings_and_reasons(
         &self,
         id: &str,
         state: UploadState,
         warnings: &[String],
+        rejection_reasons: &[String],
     ) -> Result<(), DbError> {
         let state_str = state.as_str();
-        let json = serde_json::to_string(warnings)?;
+        let warnings_json = serde_json::to_string(warnings)?;
+        let reasons_json = serde_json::to_string(rejection_reasons)?;
         sqlx::query!(
-            "UPDATE upload_queue SET state = ?, validation_warnings = ?, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE upload_queue SET state = ?, validation_warnings = ?, rejection_reasons = ?, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
             state_str,
-            json,
+            warnings_json,
+            reasons_json,
             id,
         )
         .execute(&self.pool)
@@ -359,7 +369,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, validation_warnings, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
              WHERE state = 'FAILED'
                AND retry_count < 10
@@ -381,7 +391,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, validation_warnings, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -394,7 +404,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, validation_warnings, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
              WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
              ORDER BY created_at ASC",
@@ -409,7 +419,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, validation_warnings, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue ORDER BY created_at DESC LIMIT 100",
         )
         .fetch_all(&self.pool)
