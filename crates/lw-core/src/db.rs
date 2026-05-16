@@ -85,7 +85,9 @@ impl Database {
     /// counterpart (either a staged file on disk the user can re-add, or
     /// an already-uploaded document tracked by the API), so resetting is
     /// safe — the user loses queue history but no uploaded data.
+    #[tracing::instrument(skip_all)]
     pub fn reset_local_files() -> Result<(), DbError> {
+        tracing::warn!("resetting local sqlite files (destructive recovery path)");
         let db_path = AppConfig::db_path();
         for suffix in ["", "-wal", "-shm"] {
             let mut p = db_path.clone();
@@ -106,6 +108,7 @@ impl Database {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn open() -> Result<Self, DbError> {
         let db_path = AppConfig::db_path();
         std::fs::create_dir_all(db_path.parent().expect("db path must have parent"))
@@ -134,6 +137,12 @@ impl Database {
 
     // -- Upload Queue --
 
+    #[tracing::instrument(skip_all, fields(
+        task_id = %task.id,
+        tenant = %task.tenant_id,
+        filename = %task.filename,
+        size = task.size,
+    ))]
     pub async fn insert_upload_task(&self, task: &UploadTask) -> Result<(), DbError> {
         let warnings_json = serde_json::to_string(&task.validation_warnings)?;
         let reasons_json = serde_json::to_string(&task.rejection_reasons)?;
@@ -167,6 +176,7 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+        tracing::info!("queued upload task");
         Ok(())
     }
 
@@ -185,6 +195,7 @@ impl Database {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(task_id = %id, state = %state.as_str()))]
     pub async fn update_upload_state(
         &self,
         id: &str,
@@ -200,6 +211,7 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+        tracing::debug!("state transition");
         Ok(())
     }
 
@@ -349,6 +361,7 @@ impl Database {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn reset_stale_uploads(&self) -> Result<u64, DbError> {
         // HASHING is included because the in-memory hash worker dies
         // with the process; the row would otherwise sit forever with
@@ -360,7 +373,11 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
-        Ok(result.rows_affected())
+        let rows = result.rows_affected();
+        if rows > 0 {
+            tracing::warn!(rows, "reset stale in-flight uploads after restart");
+        }
+        Ok(rows)
     }
 
     /// Get failed uploads that are retryable (network errors, server errors, interrupted).
@@ -399,6 +416,7 @@ impl Database {
         Ok(rows.into_iter().map(UploadTask::from).collect())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn get_pending_uploads(&self) -> Result<Vec<UploadTask>, DbError> {
         let rows = sqlx::query_as!(
             UploadRow,
@@ -411,6 +429,9 @@ impl Database {
         )
         .fetch_all(&self.pool)
         .await?;
+        if !rows.is_empty() {
+            tracing::debug!(count = rows.len(), "polled pending uploads");
+        }
         Ok(rows.into_iter().map(UploadTask::from).collect())
     }
 

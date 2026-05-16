@@ -112,9 +112,12 @@ pub fn App() -> Element {
         }
         spawn(async move {
             match CoreServices::init().await {
-                Ok(services) => boot.set(BootState::Ready(Arc::new(services))),
+                Ok(services) => {
+                    tracing::info!("boot complete");
+                    boot.set(BootState::Ready(Arc::new(services)));
+                }
                 Err(e) => {
-                    tracing::error!("Core services failed to initialize: {e}");
+                    tracing::warn!("Core services failed to initialize: {e}");
                     boot.set(BootState::Failed(e));
                 }
             }

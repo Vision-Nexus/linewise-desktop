@@ -16,6 +16,7 @@ pub struct WatchEvent {
 
 /// Spawns file watchers for all configured watch folders.
 /// Returns a receiver that emits WatchEvents when new files are detected.
+#[tracing::instrument(skip_all, fields(folder_count = folders.len()))]
 pub fn start_watching(
     folders: Vec<WatchFolderEntry>,
 ) -> Result<mpsc::UnboundedReceiver<WatchEvent>, notify::Error> {
@@ -35,7 +36,7 @@ pub fn start_watching(
             let mut debouncer = match new_debouncer(Duration::from_secs(2), notify_tx) {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::error!("Failed to create watcher for {}: {e}", path.display());
+                    tracing::warn!("Failed to create watcher for {}: {e}", path.display());
                     return;
                 }
             };
@@ -44,7 +45,7 @@ pub fn start_watching(
                 .watcher()
                 .watch(&path, notify::RecursiveMode::Recursive)
             {
-                tracing::error!("Failed to watch {}: {e}", path.display());
+                tracing::warn!("Failed to watch {}: {e}", path.display());
                 return;
             }
 

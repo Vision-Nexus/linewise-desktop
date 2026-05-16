@@ -76,6 +76,11 @@ impl StorageBackend {
 }
 
 /// Upload a file with chunked resumable protocol.
+#[tracing::instrument(skip_all, fields(
+    filename = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+    total_size = session.total_size,
+    start_offset,
+))]
 pub async fn upload_file_chunked(
     backend: &StorageBackend,
     session: &UploadSession,

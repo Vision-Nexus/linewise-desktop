@@ -97,12 +97,18 @@ impl Atom {
 ///   * [`VideoValidationError::MoovTooLarge`] — assembled payload would
 ///     exceed [`MAX_PAYLOAD_BYTES`].
 ///   * [`VideoValidationError::Io`] — read from the input file failed.
+#[tracing::instrument(skip_all, fields(
+    filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+    total_size = tracing::field::Empty,
+))]
 pub fn extract_atom_chunks(path: &Path) -> Result<AtomChunks, VideoValidationError> {
     let mut file = File::open(path)?;
     let total_size = file.metadata()?.len();
+    tracing::Span::current().record("total_size", total_size);
 
     let atoms = walk_atoms(&mut file, total_size)?;
     let Some(moov_index) = atoms.iter().position(|a| &a.fourcc == b"moov") else {
+        tracing::warn!("no moov atom — file is unfinalized or truncated");
         return Err(VideoValidationError::Unplayable {
             reason: "no moov atom (file is unfinalized or truncated)".to_string(),
         });
@@ -149,6 +155,11 @@ fn chunk_len_for(atom: &Atom) -> u64 {
 fn check_payload_budget(running: u64, next_len: u64) -> Result<(), VideoValidationError> {
     let projected = running.saturating_add(next_len);
     if projected > MAX_PAYLOAD_BYTES {
+        tracing::warn!(
+            payload_bytes = projected,
+            cap = MAX_PAYLOAD_BYTES,
+            "atom payload exceeds cap",
+        );
         return Err(VideoValidationError::MoovTooLarge {
             bytes: projected,
             cap: MAX_PAYLOAD_BYTES,
@@ -238,6 +249,7 @@ fn read_atom_header(
         1 => {
             // Large-size form: real size is a u64 right after the type.
             if total_size.saturating_sub(offset) < LARGE_HEADER_LEN {
+                tracing::warn!(offset, "truncated large-size atom header");
                 return Err(VideoValidationError::Unplayable {
                     reason: format!("truncated large-size atom header at offset {offset}"),
                 });
@@ -255,6 +267,7 @@ fn read_atom_header(
     };
 
     if size < header_len || offset.checked_add(size).is_none_or(|end| end > total_size) {
+        tracing::warn!(offset, size, total_size, "atom has bogus size");
         return Err(VideoValidationError::Unplayable {
             reason: format!(
                 "atom at offset {offset} has bogus size {size} (file ends at {total_size})"

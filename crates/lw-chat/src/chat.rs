@@ -340,6 +340,10 @@ pub fn ChatPanel(config: ChatConfig) -> Element {
 }
 
 /// Stream response with session persistence.
+#[tracing::instrument(skip_all, fields(
+    has_session = active_session_id.peek().is_some(),
+    message_len = tracing::field::Empty,
+))]
 async fn stream_response(
     config: ChatConfig,
     mut messages: Signal<Vec<ChatMessage>>,
@@ -362,6 +366,7 @@ async fn stream_response(
         msgs.last().cloned()
     };
     let Some(user_msg) = user_msg else { return };
+    tracing::Span::current().record("message_len", user_msg.content.len());
 
     // Create session if new conversation
     let existing_id = active_session_id.read().clone();

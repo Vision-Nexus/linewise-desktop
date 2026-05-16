@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 /// Compute BLAKE3 hash of a file
+#[tracing::instrument(skip_all, fields(filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("?")))]
 pub async fn hash_file(path: &Path) -> Result<String, std::io::Error> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -51,6 +52,7 @@ pub enum HashEvent {
 /// One I/O pass over the file. Streaming events is the cheap shape:
 /// the caller drives the loop, progress reaches the UI in real time,
 /// and there is no callback boxed across the spawn boundary.
+#[tracing::instrument(skip_all, fields(filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("?")))]
 pub fn hash_file_blake3_and_md5_stream(
     path: &Path,
 ) -> impl Stream<Item = HashEvent> + Send + 'static {
@@ -112,11 +114,14 @@ pub fn hash_file_blake3_and_md5_stream(
 }
 
 /// Check if a file is a duplicate based on its hash
+#[tracing::instrument(skip_all, fields(filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("?")))]
 pub async fn check_duplicate(db: &Database, path: &Path) -> Result<Option<String>, AppError> {
     let hash = hash_file(path)
         .await
         .map_err(|e| AppError::Upload(crate::error::UploadError::Io(e)))?;
-    db.find_by_hash(&hash).await.map_err(AppError::Database)
+    let found = db.find_by_hash(&hash).await.map_err(AppError::Database)?;
+    tracing::debug!(found = found.is_some(), "dedup local-cache check");
+    Ok(found)
 }
 
 #[cfg(test)]

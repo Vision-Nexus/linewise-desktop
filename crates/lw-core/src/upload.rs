@@ -519,9 +519,27 @@ impl UploadEngine {
                 return None;
             }
         };
-        let result = resp.results.into_iter().find(|r| r.md5_hash == md5_hex)?;
+        let total_results = resp.results.len();
+        let Some(result) = resp.results.into_iter().find(|r| r.md5_hash == md5_hex) else {
+            tracing::debug!(
+                md5 = md5_hex,
+                tenant_id,
+                filename,
+                total_results,
+                "dedup: no row in response matched our md5 — treating as not-a-duplicate"
+            );
+            return None;
+        };
         let tenant_match_count = result.tenant_matches.len();
         let user_other_tenant_count = result.user_other_tenant_count;
+        tracing::debug!(
+            md5 = md5_hex,
+            tenant_id,
+            filename,
+            tenant_match_count,
+            user_other_tenant_count,
+            "dedup: registry response"
+        );
         if tenant_match_count == 0 && user_other_tenant_count == 0 {
             return None;
         }

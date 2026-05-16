@@ -28,6 +28,7 @@ impl ChatClient {
     }
 
     /// Stream chat completion events via SSE
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, endpoint = "chat/completions"))]
     pub async fn stream_completion(
         &self,
         base_url: &str,
@@ -45,11 +46,13 @@ impl ChatClient {
             .headers(headers)
             .json(&request)
             .send()
-            .await?;
+            .await
+            .inspect_err(|err| tracing::warn!(?err, "chat api offline"))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let message = resp.text().await.unwrap_or_default();
+            tracing::warn!(status, "chat api non-2xx");
             return Err(ChatError::Api { status, message });
         }
 
@@ -67,6 +70,7 @@ impl ChatClient {
     }
 
     /// POST /api/org/{tenant}/chat/sessions — create a new session
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, endpoint = "chat/sessions"))]
     pub async fn create_session(
         &self,
         base_url: &str,
@@ -80,11 +84,13 @@ impl ChatClient {
             .headers(Self::auth_headers(token))
             .json(request)
             .send()
-            .await?;
+            .await
+            .inspect_err(|err| tracing::warn!(?err, "chat api offline"))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let message = resp.text().await.unwrap_or_default();
+            tracing::warn!(status, "chat api non-2xx");
             return Err(ChatError::Api { status, message });
         }
 
@@ -94,6 +100,7 @@ impl ChatClient {
     }
 
     /// GET /api/org/{tenant}/chat/sessions — list user's sessions
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, endpoint = "chat/sessions"))]
     pub async fn list_sessions(
         &self,
         base_url: &str,
@@ -105,11 +112,13 @@ impl ChatClient {
             .get(format!("{base_url}/api/org/{tenant}/chat/sessions"))
             .headers(Self::auth_headers(token))
             .send()
-            .await?;
+            .await
+            .inspect_err(|err| tracing::warn!(?err, "chat api offline"))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let message = resp.text().await.unwrap_or_default();
+            tracing::warn!(status, "chat api non-2xx");
             return Err(ChatError::Api { status, message });
         }
 
@@ -119,6 +128,7 @@ impl ChatClient {
     }
 
     /// GET /api/org/{tenant}/chat/sessions/{id}/messages — get session messages
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, session_id = %session_id, endpoint = "chat/messages"))]
     pub async fn get_session_messages(
         &self,
         base_url: &str,
@@ -133,11 +143,13 @@ impl ChatClient {
             ))
             .headers(Self::auth_headers(token))
             .send()
-            .await?;
+            .await
+            .inspect_err(|err| tracing::warn!(?err, "chat api offline"))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let message = resp.text().await.unwrap_or_default();
+            tracing::warn!(status, "chat api non-2xx");
             return Err(ChatError::Api { status, message });
         }
 
@@ -147,6 +159,7 @@ impl ChatClient {
     }
 
     /// POST /api/org/{tenant}/chat/sessions/{id}/messages — save a message
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, session_id = %session_id, endpoint = "chat/messages"))]
     pub async fn save_message(
         &self,
         base_url: &str,
@@ -163,11 +176,13 @@ impl ChatClient {
             .headers(Self::auth_headers(token))
             .json(request)
             .send()
-            .await?;
+            .await
+            .inspect_err(|err| tracing::warn!(?err, "chat api offline"))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let message = resp.text().await.unwrap_or_default();
+            tracing::warn!(status, "chat api non-2xx");
             return Err(ChatError::Api { status, message });
         }
 
@@ -177,6 +192,7 @@ impl ChatClient {
     }
 
     /// PATCH /api/org/{tenant}/chat/sessions/{id} — update session title
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, session_id = %session_id, endpoint = "chat/session-title"))]
     pub async fn update_session_title(
         &self,
         base_url: &str,
@@ -193,11 +209,13 @@ impl ChatClient {
             .headers(Self::auth_headers(token))
             .json(request)
             .send()
-            .await?;
+            .await
+            .inspect_err(|err| tracing::warn!(?err, "chat api offline"))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let message = resp.text().await.unwrap_or_default();
+            tracing::warn!(status, "chat api non-2xx");
             return Err(ChatError::Api { status, message });
         }
 
@@ -205,6 +223,7 @@ impl ChatClient {
     }
 
     /// DELETE /api/org/{tenant}/chat/sessions/{id} — delete a session
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, session_id = %session_id, endpoint = "chat/session-delete"))]
     pub async fn delete_session(
         &self,
         base_url: &str,
@@ -219,11 +238,13 @@ impl ChatClient {
             ))
             .headers(Self::auth_headers(token))
             .send()
-            .await?;
+            .await
+            .inspect_err(|err| tracing::warn!(?err, "chat api offline"))?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let message = resp.text().await.unwrap_or_default();
+            tracing::warn!(status, "chat api non-2xx");
             return Err(ChatError::Api { status, message });
         }
 

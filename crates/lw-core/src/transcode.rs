@@ -110,9 +110,13 @@ pub fn estimate_transcoded_size(info: &VideoInfo, config: &TranscodeConfig) -> u
 }
 
 /// Initialize FFmpeg library. Call once at app startup.
+#[tracing::instrument(skip_all)]
 pub fn init() -> Result<(), TranscodeError> {
+    // `warn!` (not `error!`) on init failure: the app falls back to "transcoding
+    // disabled" — see `main.rs`. Sentry promotes `error!` into incidents and
+    // the absence of a transcoder is an expected, recoverable startup condition.
     ffmpeg_next::init().map_err(|e| {
-        tracing::error!("FFmpeg init failed: {e}");
+        tracing::warn!("FFmpeg init failed: {e}");
         TranscodeError::FfmpegNotAvailable
     })?;
     tracing::info!(
@@ -124,6 +128,7 @@ pub fn init() -> Result<(), TranscodeError> {
 
 /// Probe what transcoding features the current process has. The UI uses this
 /// to gate the settings pane — see [`transcode_settings.rs`] in lw-app.
+#[tracing::instrument(skip_all, fields(codec = %config.codec))]
 pub fn probe_availability(config: &TranscodeConfig) -> AvailabilityReport {
     // `init()` is idempotent — calling it from here is safe if the app hasn't
     // done it already, but in practice `main.rs` calls it at startup and we
@@ -149,6 +154,11 @@ pub fn probe_availability(config: &TranscodeConfig) -> AvailabilityReport {
 /// `spawn_blocking`. Resumable: if a partially-transcoded HLS scratch directory
 /// already exists under the per-task scratch root, the encode continues from
 /// the first missing segment.
+#[tracing::instrument(skip_all, fields(
+    filename = input_path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+    codec = %config.codec,
+    original_size = tracing::field::Empty,
+))]
 pub fn transcode_video(
     input_path: &Path,
     info: &VideoInfo,
@@ -156,6 +166,7 @@ pub fn transcode_video(
     on_progress: &dyn Fn(u64, u64),
 ) -> Result<TranscodeResult, TranscodeError> {
     let original_size = std::fs::metadata(input_path).map(|m| m.len()).unwrap_or(0);
+    tracing::Span::current().record("original_size", original_size);
     let (scratch_dir, output_path) = prepare_paths(input_path)?;
     fs::create_dir_all(&scratch_dir).map_err(TranscodeError::Io)?;
 

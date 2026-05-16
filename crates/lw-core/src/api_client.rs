@@ -43,6 +43,7 @@ impl ApiClient {
     }
 
     /// GET /api/users/whoami
+    #[tracing::instrument(skip_all)]
     pub async fn whoami(&self) -> Result<WhoAmIResponse, UploadError> {
         let headers = self.auth_headers().await?;
         let resp = self
@@ -52,10 +53,17 @@ impl ApiClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "whoami non-2xx"
+            );
             return Err(UploadError::Api {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message: body,
             });
         }
 
@@ -63,6 +71,7 @@ impl ApiClient {
     }
 
     /// GET /api/org/{tenant}/projects
+    #[tracing::instrument(skip_all, fields(tenant = %tenant))]
     pub async fn list_projects(&self, tenant: &str) -> Result<Vec<Project>, UploadError> {
         let headers = self.auth_headers().await?;
         let resp = self
@@ -72,17 +81,27 @@ impl ApiClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "list_projects non-2xx"
+            );
             return Err(UploadError::Api {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message: body,
             });
         }
 
-        Ok(resp.json().await?)
+        let projects: Vec<Project> = resp.json().await?;
+        tracing::info!(count = projects.len(), "list_projects ok");
+        Ok(projects)
     }
 
     /// POST /api/org/{tenant}/projects/{pid}/documents
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, project_id = %project_id))]
     pub async fn create_document(
         &self,
         tenant: &str,
@@ -101,17 +120,27 @@ impl ApiClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "create_document non-2xx"
+            );
             return Err(UploadError::Api {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message: body,
             });
         }
 
-        Ok(resp.json().await?)
+        let doc: DocumentResponse = resp.json().await?;
+        tracing::info!(document_id = %doc.id, "create_document ok");
+        Ok(doc)
     }
 
     /// POST /api/org/{tenant}/projects/{pid}/documents/{did}/upload-url?resumable=true
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, project_id = %project_id, document_id = %document_id))]
     pub async fn get_upload_url(
         &self,
         tenant: &str,
@@ -129,17 +158,26 @@ impl ApiClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "get_upload_url non-2xx"
+            );
             return Err(UploadError::Api {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message: body,
             });
         }
 
+        tracing::debug!("upload-url issued");
         Ok(resp.json().await?)
     }
 
     /// GET /api/org/{tenant}/projects/{pid}/documents/{did}
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, project_id = %project_id, document_id = %document_id))]
     pub async fn get_document(
         &self,
         tenant: &str,
@@ -157,10 +195,17 @@ impl ApiClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "get_document non-2xx"
+            );
             return Err(UploadError::Api {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message: body,
             });
         }
 
@@ -174,6 +219,7 @@ impl ApiClient {
     /// batch at 100 (returns 400 above that) and at minimum 1
     /// (returns 400 on empty). Results are not guaranteed to come
     /// back in request order — callers must correlate by `md5_hash`.
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, n = md5_hashes.len()))]
     pub async fn check_dedup(
         &self,
         tenant: &str,
@@ -188,14 +234,23 @@ impl ApiClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "check_dedup non-2xx"
+            );
             return Err(UploadError::Api {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message: body,
             });
         }
 
-        Ok(resp.json().await?)
+        let parsed: DedupCheckResponse = resp.json().await?;
+        tracing::debug!(results = parsed.results.len(), "dedup ok");
+        Ok(parsed)
     }
 
     /// POST /api/org/{tenant}/projects/{pid}/quality-check
@@ -218,6 +273,12 @@ impl ApiClient {
     ///     "server unreachable" message after the hard cutover.
     ///   * [`UploadError::Api`] for non-2xx responses with the body as
     ///     the message.
+    #[tracing::instrument(skip_all, fields(
+        tenant = %tenant,
+        project_id = %project_id,
+        payload_bytes = atoms.payload_bytes(),
+        total_size = atoms.total_size,
+    ))]
     pub async fn quality_check(
         &self,
         tenant: &str,
@@ -226,6 +287,11 @@ impl ApiClient {
     ) -> Result<QualityCheckResponse, UploadError> {
         let payload_bytes = atoms.payload_bytes();
         if payload_bytes > MAX_PAYLOAD_BYTES {
+            tracing::warn!(
+                bytes = payload_bytes,
+                cap = MAX_PAYLOAD_BYTES,
+                "quality_check payload over cap"
+            );
             return Err(UploadError::QualityCheckPayloadTooLarge {
                 bytes: payload_bytes,
                 cap: MAX_PAYLOAD_BYTES,
@@ -269,10 +335,17 @@ impl ApiClient {
             .await
             .map_err(quality_check_send_error)?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "quality_check non-2xx"
+            );
             return Err(UploadError::Api {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message: body,
             });
         }
 
@@ -280,6 +353,12 @@ impl ApiClient {
     }
 
     /// Verify document upload by polling until gcsUri is set
+    #[tracing::instrument(skip_all, fields(
+        tenant = %tenant,
+        project_id = %project_id,
+        document_id = %document_id,
+        max_retries,
+    ))]
     pub async fn verify_upload(
         &self,
         tenant: &str,
@@ -290,6 +369,7 @@ impl ApiClient {
         for i in 0..max_retries {
             let doc = self.get_document(tenant, project_id, document_id).await?;
             if doc.gcs_uri.is_some() {
+                tracing::info!(attempt = i, "verify_upload ok");
                 return Ok(doc);
             }
             if i < max_retries - 1 {
@@ -297,11 +377,26 @@ impl ApiClient {
             }
         }
 
+        tracing::warn!("verify_upload timed out");
         Err(UploadError::Api {
             status: 408,
             message: "Upload verification timed out".to_string(),
         })
     }
+}
+
+/// Truncate a string at a byte boundary for safe logging of response bodies.
+/// Avoids the panic-on-non-char-boundary of `&s[..n]` when the body is UTF-8
+/// with multi-byte characters.
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Map a `reqwest::Error` from `quality_check` to either
@@ -318,8 +413,10 @@ impl ApiClient {
 /// the response-handling path, never reaches this classifier.
 fn quality_check_send_error(err: reqwest::Error) -> UploadError {
     if err.is_connect() || err.is_timeout() || err.is_request() {
+        tracing::warn!(?err, "quality_check offline");
         UploadError::QualityCheckOffline { source: err }
     } else {
+        tracing::warn!(?err, "quality_check network error");
         UploadError::Network(err)
     }
 }

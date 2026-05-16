@@ -82,6 +82,7 @@ impl AuthService {
     }
 
     /// Sign in with email and password
+    #[tracing::instrument(skip_all, fields(email = %email))]
     pub async fn sign_in_email(
         &self,
         email: &str,
@@ -113,7 +114,7 @@ impl AuthService {
 
         if !resp.status().is_success() {
             let err: FirebaseErrorResponse = resp.json().await?;
-            return Err(match err.error.message.as_str() {
+            let auth_err = match err.error.message.as_str() {
                 "EMAIL_NOT_FOUND" | "INVALID_PASSWORD" | "INVALID_LOGIN_CREDENTIALS" => {
                     AuthError::InvalidCredentials
                 }
@@ -122,7 +123,9 @@ impl AuthService {
                     code: err.error.code.to_string(),
                     message: msg.to_string(),
                 },
-            });
+            };
+            tracing::warn!(reason = %auth_err, "email sign-in failed");
+            return Err(auth_err);
         }
 
         let sign_in: SignInResponse = resp.json().await?;
@@ -134,19 +137,23 @@ impl AuthService {
         };
 
         self.store_tokens(&tokens).await?;
+        tracing::info!("email sign-in ok");
         Ok(tokens)
     }
 
     /// Sign in with Google via OAuth 2.0 PKCE loopback + Firebase `signInWithIdp`.
+    #[tracing::instrument(skip_all)]
     pub async fn sign_in_google(&self) -> Result<AuthTokens, AuthError> {
         self.sign_in_with_idp(OAuthProvider::Google).await
     }
 
     /// Sign in with Microsoft via OAuth 2.0 PKCE loopback + Firebase `signInWithIdp`.
+    #[tracing::instrument(skip_all)]
     pub async fn sign_in_microsoft(&self) -> Result<AuthTokens, AuthError> {
         self.sign_in_with_idp(OAuthProvider::Microsoft).await
     }
 
+    #[tracing::instrument(skip_all, fields(provider = %provider.firebase_provider_id()))]
     async fn sign_in_with_idp(&self, provider: OAuthProvider) -> Result<AuthTokens, AuthError> {
         let (client_id, client_secret) = match provider {
             OAuthProvider::Google => (
@@ -190,13 +197,15 @@ impl AuthService {
 
         if !resp.status().is_success() {
             let err: FirebaseErrorResponse = resp.json().await?;
-            return Err(match err.error.message.as_str() {
+            let auth_err = match err.error.message.as_str() {
                 "USER_DISABLED" => AuthError::AccountDisabled,
                 msg => AuthError::Firebase {
                     code: err.error.code.to_string(),
                     message: msg.to_string(),
                 },
-            });
+            };
+            tracing::warn!(reason = %auth_err, "oauth sign-in failed");
+            return Err(auth_err);
         }
 
         let sign_in: SignInResponse = resp.json().await?;
@@ -208,10 +217,12 @@ impl AuthService {
         };
 
         self.store_tokens(&tokens).await?;
+        tracing::info!("oauth sign-in ok");
         Ok(tokens)
     }
 
     /// Refresh the ID token using the stored refresh token
+    #[tracing::instrument(skip_all)]
     pub async fn refresh_token(&self) -> Result<AuthTokens, AuthError> {
         let current = self.tokens.read().await;
         let refresh_token = current
@@ -238,10 +249,12 @@ impl AuthService {
 
         if !resp.status().is_success() {
             let err: FirebaseErrorResponse = resp.json().await?;
-            return Err(AuthError::Firebase {
+            let auth_err = AuthError::Firebase {
                 code: err.error.code.to_string(),
                 message: err.error.message,
-            });
+            };
+            tracing::warn!(reason = %auth_err, "token refresh failed");
+            return Err(auth_err);
         }
 
         let refresh: RefreshResponse = resp.json().await?;
@@ -253,6 +266,7 @@ impl AuthService {
         };
 
         self.store_tokens(&tokens).await?;
+        tracing::debug!("token refreshed");
         Ok(tokens)
     }
 
@@ -267,6 +281,7 @@ impl AuthService {
         }
         drop(tokens);
 
+        tracing::debug!("id token expiring soon — refreshing");
         let refreshed = self.refresh_token().await?;
         Ok(refreshed.id_token)
     }

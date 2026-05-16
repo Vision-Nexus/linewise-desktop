@@ -53,11 +53,16 @@ impl PartialEq for CoreServices {
 }
 
 impl CoreServices {
+    #[tracing::instrument(skip_all)]
     pub async fn init() -> Result<Self, String> {
-        let config = AppConfig::load().map_err(|e| format!("Config error: {e}"))?;
-        let db = Database::open()
-            .await
-            .map_err(|e| format!("Database error: {e}"))?;
+        let config = AppConfig::load().map_err(|e| {
+            tracing::warn!(error = %e, "core services init: config load failed");
+            format!("Config error: {e}")
+        })?;
+        let db = Database::open().await.map_err(|e| {
+            tracing::warn!(error = %e, "core services init: database open failed");
+            format!("Database error: {e}")
+        })?;
         let db = Arc::new(db);
 
         let auth = Arc::new(AuthService::new(AuthClientConfig {
@@ -93,6 +98,7 @@ impl CoreServices {
         // Spawn background auto-retry for failed uploads on network recovery
         upload_engine.spawn_auto_retry();
 
+        tracing::info!("core services ready");
         Ok(Self {
             auth,
             api,
@@ -229,9 +235,11 @@ impl AppState {
     /// disk error so the pane can decide how to surface it (toast).
     /// On error, the signal is not touched — the on-disk and in-memory
     /// states stay coherent.
+    #[tracing::instrument(skip_all)]
     pub fn save_config(&mut self, next: AppConfig) -> Result<(), ConfigError> {
         next.save()?;
         self.config.set(next);
+        tracing::info!("config saved");
         Ok(())
     }
 

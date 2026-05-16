@@ -25,6 +25,7 @@ pub struct DesensitizeResult {
 /// Strip all metadata from a video file using ffmpeg-next.
 /// Creates a new file in a temp directory with metadata removed.
 /// Uses stream copy (no re-encoding) for fast remuxing.
+#[tracing::instrument(skip_all, fields(filename = input.file_name().and_then(|s| s.to_str()).unwrap_or("?")))]
 pub async fn strip_video_metadata(input: &Path) -> Result<DesensitizeResult, DesensitizeError> {
     let input = input.to_path_buf();
 
@@ -155,6 +156,7 @@ fn resolve_ffmpeg_binary() -> OsString {
 
 /// Strip EXIF/metadata from an image file.
 /// Still uses ffmpeg CLI for images (ffmpeg-next's image handling is less ergonomic).
+#[tracing::instrument(skip_all, fields(filename = input.file_name().and_then(|s| s.to_str()).unwrap_or("?")))]
 pub async fn strip_image_metadata(input: &Path) -> Result<DesensitizeResult, DesensitizeError> {
     let input = input.to_path_buf();
 
@@ -196,13 +198,16 @@ pub async fn strip_image_metadata(input: &Path) -> Result<DesensitizeResult, Des
 
 /// Strip metadata from any supported file based on MIME type.
 /// Returns None if the file type doesn't need desensitization.
+#[tracing::instrument(skip_all, fields(mime_type = %mime_type))]
 pub async fn strip_metadata(
     input: &Path,
     mime_type: &str,
 ) -> Option<Result<DesensitizeResult, DesensitizeError>> {
     if mime_type.starts_with("video/") {
+        tracing::info!("dispatching video desensitize");
         Some(strip_video_metadata(input).await)
     } else if mime_type.starts_with("image/") {
+        tracing::info!("dispatching image desensitize");
         Some(strip_image_metadata(input).await)
     } else {
         None
