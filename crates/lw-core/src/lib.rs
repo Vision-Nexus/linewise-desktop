@@ -1,6 +1,7 @@
 pub mod api_client;
 pub mod auth;
 pub mod config;
+pub mod container_kind;
 pub mod db;
 pub mod dedup;
 pub mod desensitize;
@@ -12,5 +13,5 @@ pub mod transcode;
 pub mod upload;
 pub mod version_check;
 pub mod video;
-pub mod video_rules;
+pub mod video_head;
 pub mod watcher;

@@ -384,18 +384,33 @@ pub struct VideoInfo {
     pub telemetry: Option<String>,
 }
 
-/// Acceptance verdict produced by the hard quality floor in `video.rs`.
+/// Acceptance verdict from the server-side quality check.
 /// `Accepted` lets the file proceed to STAGED; `Rejected` carries the
 /// user-facing reasons and routes the task into the REJECTED state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Wire shape (mirrors the Scala `VideoQualityResult.acceptance`
+/// case-class hierarchy with the default external-tag serde encoding):
+///   * `"Accepted"` → [`Self::Accepted`]
+///   * `{"Rejected": {"reasons": [...]}}` → [`Self::Rejected`]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Acceptance {
     Accepted,
     Rejected { reasons: Vec<String> },
 }
 
-#[derive(Debug, Clone)]
-pub struct VideoValidationResult {
-    pub info: VideoInfo,
-    pub warnings: Vec<String>,
+/// Response body of `POST /api/org/{tenant}/projects/{pid}/quality-check`.
+/// Mirrors the Scala `VideoQualityResult` case class.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityCheckResponse {
     pub acceptance: Acceptance,
+    /// Advisory lines (warn-coloured in the UI) — recommend-band hints,
+    /// telemetry advisories, missing-device-fingerprint nudges. Not
+    /// blocking — a row can be `Accepted` and still carry warnings.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Probed parameters of the source clip (resolution, fps, codec,
+    /// duration, container metadata, telemetry label). Used by the
+    /// client to render the per-row info popover.
+    pub info: VideoInfo,
 }

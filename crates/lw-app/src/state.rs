@@ -7,7 +7,6 @@ use lw_core::error::ConfigError;
 use lw_core::models::{Project, Tenant, UploadTask, UserInfo};
 use lw_core::upload::{UploadEngine, UploadEvent};
 use lw_core::version_check::VersionStatus;
-use lw_core::video_rules::VideoRules;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -75,13 +74,9 @@ impl CoreServices {
             lw_core::storage::GcsBackend::new(),
         ));
 
-        // Load video quality rules: refresh the on-disk cache from the
-        // public CDN (best-effort, 5s timeout), then read the cache file.
-        // The validator's view is whatever lands on disk by the end of
-        // this call; an offline first launch falls back to the embedded
-        // copy, so the gate is always defined.
-        let video_rules = VideoRules::load_for_startup().await;
-
+        // Video quality rules now live on the server. The desktop ships
+        // the head bytes and the API returns the verdict; nothing to
+        // load at startup any more.
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let upload_engine = Arc::new(UploadEngine::new(
             Arc::clone(&db),
@@ -91,7 +86,6 @@ impl CoreServices {
             config.upload.auto_clean,
             config.desensitization.strip_metadata,
             config.transcode.clone(),
-            video_rules,
             config.upload.chunk_size_mb,
             config.upload.max_concurrent_uploads,
         ));

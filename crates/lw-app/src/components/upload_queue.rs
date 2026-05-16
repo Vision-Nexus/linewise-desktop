@@ -9,10 +9,9 @@ use lw_core::error::UploadError;
 use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload::{self, UploadEvent};
 use lw_core::video;
-use lw_core::video_rules::DeviceEncoderSignature;
+use lw_core::video::DeviceEncoderSignature;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// Formats a staging error into a user-facing toast string. Expected
 /// rejections (the user picked a file we can't accept) get a "Cannot
@@ -34,7 +33,27 @@ fn stage_error_toast(path: &Path, err: &UploadError) -> String {
         | UploadError::DuplicateOnServer { .. }
         | UploadError::FileTooLarge { .. }
         | UploadError::FileNotFound(_)
-        | UploadError::Cancelled => format!("Cannot upload \"{filename}\": {err}"),
+        | UploadError::Cancelled
+        | UploadError::QualityCheckPayloadTooLarge { .. } => {
+            format!("Cannot upload \"{filename}\": {err}")
+        }
+        // Pull the kind-specific label into the prefix so the toast reads
+        // "Cannot upload \"clip.mkv\" (matroska): Linewise supports..."
+        // instead of just "Cannot upload \"clip.mkv\": Linewise supports...".
+        // The user spotted the format from the file extension; surfacing
+        // the detected kind alongside it makes the rejection feel less
+        // like a guess.
+        UploadError::UnsupportedContainer { kind } => {
+            format!(
+                "Cannot upload \"{filename}\" ({label}): {err}",
+                label = kind.human_label(),
+            )
+        }
+        UploadError::QualityCheckOffline { .. } => {
+            format!(
+                "Cannot upload \"{filename}\": server unreachable — quality check requires a network connection"
+            )
+        }
         UploadError::Api { .. }
         | UploadError::GcsUpload { .. }
         | UploadError::Network(_)
@@ -145,18 +164,12 @@ pub fn UploadQueue() -> Element {
         .count();
     let _active_count = tasks.iter().filter(|t| t.state.is_active()).count();
 
-    // Device-encoder signature list lives on the network-loaded video
-    // rules document, already wrapped in Arc inside ProvenanceRules so
-    // each StagedRow prop clone is a refcount bump rather than a fresh
-    // Vec allocation — the queue can carry dozens of rows and re-renders
-    // on every keystroke that changes a sibling signal.
-    let device_encoder_signatures: Arc<Vec<DeviceEncoderSignature>> = Arc::clone(
-        &services
-            .upload_engine
-            .video_rules()
-            .provenance
-            .device_encoder_signatures,
-    );
+    // Device-encoder vendor signatures used by the popover to split a
+    // bare encoder string ("DJI Osmo Nano") into Make + Model. Lives in
+    // a tiny `'static` table now that the rule loader is gone — passing
+    // the slice straight through avoids any per-row allocation.
+    let device_encoder_signatures: &'static [DeviceEncoderSignature] =
+        video::device_encoder_signatures();
 
     // Human-readable label for the Add Files button, e.g. "Add Files to
     // Acme / Website". Only rendered when `can_upload`, so both reads are
@@ -581,7 +594,7 @@ pub fn UploadQueue() -> Element {
                                 key: "{task.id}",
                                 task: task.clone(),
                                 transcode_config: app_state.config.read().transcode.clone(),
-                                device_encoder_signatures: device_encoder_signatures.clone(),
+                                device_encoder_signatures,
                                 on_remove: on_remove.clone(),
                                 on_transcode_click,
                                 on_force_upload: None,
@@ -601,7 +614,7 @@ pub fn UploadQueue() -> Element {
                                 key: "{task.id}",
                                 task: task.clone(),
                                 transcode_config: app_state.config.read().transcode.clone(),
-                                device_encoder_signatures: device_encoder_signatures.clone(),
+                                device_encoder_signatures,
                                 on_remove: on_remove.clone(),
                                 on_transcode_click,
                                 on_force_upload: Some(EventHandler::new(on_force_upload.clone())),
@@ -799,7 +812,7 @@ fn HashingRow(
 fn StagedRow(
     task: UploadTask,
     transcode_config: TranscodeConfig,
-    device_encoder_signatures: Arc<Vec<DeviceEncoderSignature>>,
+    device_encoder_signatures: &'static [DeviceEncoderSignature],
     on_remove: EventHandler<String>,
     on_transcode_click: EventHandler<String>,
     /// Super-admin override hook. `Some` only on rows in the
@@ -861,7 +874,7 @@ fn StagedRow(
         structural.push(("Container".into(), info.format.clone()));
 
         let mut device: Vec<(String, String)> =
-            video::device_info_rows(info, device_encoder_signatures.as_slice())
+            video::device_info_rows(info, device_encoder_signatures)
                 .into_iter()
                 .map(|(label, value)| {
                     let display = if value.is_empty() {

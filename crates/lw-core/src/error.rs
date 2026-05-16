@@ -1,3 +1,4 @@
+use crate::container_kind::ContainerKind;
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +57,35 @@ pub enum UploadError {
     },
     #[error("Video is unplayable: {reason}")]
     VideoUnplayable { reason: String },
+    /// The picked file's magic bytes don't match an ISO BMFF (mp4 / mov)
+    /// container. The 2026-05-16 production-data sweep showed 99.98% of
+    /// real customer uploads are ISO BMFF, so we reject the rest with a
+    /// kind-specific message at staging time — before the atom walker
+    /// runs and before the network round-trip — instead of letting them
+    /// hit the server and return a less helpful error.
+    #[error(
+        "Linewise supports mp4 and mov files; this file appears to be {kind_label}. Please export from your camera or NLE as mp4 or mov.",
+        kind_label = kind.human_label()
+    )]
+    UnsupportedContainer { kind: ContainerKind },
+    /// The reconstructed metadata payload exceeds the 8 MiB hard cap.
+    /// Real-world camera output sits well below 1 MiB, so this almost
+    /// always means the input was a fragmented or pathologically-shaped
+    /// container the desktop can't summarise without sending media bytes.
+    /// Surfaced separately from `Api { 413 }` so the UI can render a
+    /// dedicated message rather than a generic API error.
+    #[error("Video metadata too large: {bytes} bytes exceeds {cap} byte cap")]
+    QualityCheckPayloadTooLarge { bytes: u64, cap: u64 },
+    /// Server unreachable for the quality-check round-trip. After the
+    /// hard cutover the desktop has no local rule evaluator, so a
+    /// network-down launch is now a user-visible step backwards. The
+    /// UI renders "Server unreachable — quality check requires a network
+    /// connection" instead of a generic API/network error.
+    #[error("Quality check unavailable — server unreachable")]
+    QualityCheckOffline {
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("Upload cancelled")]
     Cancelled,
     #[error("Network error: {0}")]
@@ -79,7 +109,10 @@ impl UploadError {
             UploadError::Duplicate { .. }
             | UploadError::DuplicateOnServer { .. }
             | UploadError::Cancelled
-            | UploadError::VideoUnplayable { .. } => true,
+            | UploadError::VideoUnplayable { .. }
+            | UploadError::UnsupportedContainer { .. }
+            | UploadError::QualityCheckPayloadTooLarge { .. }
+            | UploadError::QualityCheckOffline { .. } => true,
             UploadError::FileNotFound(_)
             | UploadError::FileTooLarge { .. }
             | UploadError::Api { .. }
@@ -120,6 +153,15 @@ pub enum VideoValidationError {
     /// playable timeline and never will.
     #[error("Video is unplayable: {reason}")]
     Unplayable { reason: String },
+    /// The reconstructed metadata payload would exceed the 8 MiB hard
+    /// cap. Real-world camera output stays well below 1 MiB, so this
+    /// almost always means a malformed input. We refuse to ship the
+    /// payload in this case.
+    #[error("Video metadata too large: {bytes} bytes exceeds {cap} byte cap")]
+    MoovTooLarge { bytes: u64, cap: u64 },
+    /// Failed to read the input file while walking atoms.
+    #[error("Failed to read video header: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
