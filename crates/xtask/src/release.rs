@@ -45,9 +45,14 @@ pub fn run(root: &Path, tag: &str, allow_dirty: bool, push: bool) -> Result<()> 
     // plugin.
     cmd::run("cargo", ["check", "--workspace", "--all-targets"])?;
 
-    let lockfile = root.join("Cargo.lock");
     git_in(root, ["add", "Cargo.toml"])?;
-    if lockfile.exists() {
+    // `Cargo.lock` may be `.gitignore`d (the convention for library
+    // crates and for binaries that intentionally don't pin transitive
+    // versions). `git add` would error out on an ignored path; skip
+    // the stage step in that case rather than fail the release. The
+    // line edit to `Cargo.toml` is the load-bearing change.
+    let lockfile = root.join("Cargo.lock");
+    if lockfile.exists() && !is_path_ignored(root, "Cargo.lock")? {
         git_in(root, ["add", "Cargo.lock"])?;
     }
     git_in(root, ["commit", "-m", &format!("chore(release): {tag}")])?;
@@ -94,6 +99,28 @@ fn ensure_clean_tree(root: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// True when `path` (relative to `root`) is matched by a `.gitignore`
+/// rule. `git check-ignore` exits 0 when the path is ignored, 1 when
+/// it isn't, and >1 on real errors — we map those three states to
+/// `Ok(true)`, `Ok(false)`, and `Err`.
+fn is_path_ignored(root: &Path, relative: &str) -> Result<bool> {
+    use std::process::{Command, Stdio};
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "--quiet", relative])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("git check-ignore {relative}"))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        Some(other) => bail!("git check-ignore exited with {other}"),
+        None => bail!("git check-ignore terminated by signal"),
+    }
 }
 
 fn ensure_tag_unused(root: &Path, tag: &str) -> Result<()> {
