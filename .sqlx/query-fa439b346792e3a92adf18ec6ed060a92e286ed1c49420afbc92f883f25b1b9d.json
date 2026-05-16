@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size\n             FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')\n             ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -69,28 +69,43 @@
         "type_info": "Text"
       },
       {
-        "name": "validation_warnings",
+        "name": "source_md5",
         "ordinal": 13,
         "type_info": "Text"
       },
       {
-        "name": "retry_count",
+        "name": "validation_warnings",
         "ordinal": 14,
-        "type_info": "Integer"
+        "type_info": "Text"
       },
       {
-        "name": "video_info",
+        "name": "rejection_reasons",
         "ordinal": 15,
         "type_info": "Text"
       },
       {
-        "name": "transcode",
+        "name": "retry_count",
         "ordinal": 16,
         "type_info": "Integer"
       },
       {
-        "name": "transcoded_size",
+        "name": "video_info",
         "ordinal": 17,
+        "type_info": "Text"
+      },
+      {
+        "name": "transcode",
+        "ordinal": 18,
+        "type_info": "Integer"
+      },
+      {
+        "name": "transcoded_size",
+        "ordinal": 19,
+        "type_info": "Integer"
+      },
+      {
+        "name": "force_upload",
+        "ordinal": 20,
         "type_info": "Integer"
       }
     ],
@@ -112,11 +127,14 @@
       true,
       true,
       true,
+      true,
+      true,
       false,
       true,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "a6444468f76843ef0e43d0f4b5b3c0e1deb0664cedf1da962b56d342066fce5b"
+  "hash": "fa439b346792e3a92adf18ec6ed060a92e286ed1c49420afbc92f883f25b1b9d"
 }

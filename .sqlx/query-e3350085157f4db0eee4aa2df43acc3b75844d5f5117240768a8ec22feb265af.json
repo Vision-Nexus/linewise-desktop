@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size\n             FROM upload_queue\n             WHERE state = 'FAILED'\n               AND retry_count < 10\n               AND (error_message LIKE '%Network%'\n                    OR error_message LIKE '%timeout%'\n                    OR error_message LIKE '%no healthy upstream%'\n                    OR error_message LIKE '%Interrupted%'\n                    OR error_message LIKE '%error sending request%')\n             ORDER BY created_at ASC\n             LIMIT 20",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue ORDER BY created_at DESC LIMIT 100",
   "describe": {
     "columns": [
       {
@@ -69,28 +69,43 @@
         "type_info": "Text"
       },
       {
-        "name": "validation_warnings",
+        "name": "source_md5",
         "ordinal": 13,
         "type_info": "Text"
       },
       {
-        "name": "retry_count",
+        "name": "validation_warnings",
         "ordinal": 14,
-        "type_info": "Integer"
+        "type_info": "Text"
       },
       {
-        "name": "video_info",
+        "name": "rejection_reasons",
         "ordinal": 15,
         "type_info": "Text"
       },
       {
-        "name": "transcode",
+        "name": "retry_count",
         "ordinal": 16,
         "type_info": "Integer"
       },
       {
-        "name": "transcoded_size",
+        "name": "video_info",
         "ordinal": 17,
+        "type_info": "Text"
+      },
+      {
+        "name": "transcode",
+        "ordinal": 18,
+        "type_info": "Integer"
+      },
+      {
+        "name": "transcoded_size",
+        "ordinal": 19,
+        "type_info": "Integer"
+      },
+      {
+        "name": "force_upload",
+        "ordinal": 20,
         "type_info": "Integer"
       }
     ],
@@ -112,11 +127,14 @@
       true,
       true,
       true,
+      true,
+      true,
       false,
       true,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "63a9266a5bca307ee2a7688c18d3b03108f280ce6bbeb10d7a2cfa8838309a1a"
+  "hash": "e3350085157f4db0eee4aa2df43acc3b75844d5f5117240768a8ec22feb265af"
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE upload_queue SET state = ?, validation_warnings = ?, rejection_reasons = ?, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "9ef555e52c65d30a5c23d8cabd4f7198ba187407065cd3ea1d33e2ff37bf1f0c"
+}

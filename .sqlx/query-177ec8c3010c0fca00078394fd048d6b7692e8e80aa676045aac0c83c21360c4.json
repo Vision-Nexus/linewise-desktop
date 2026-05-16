@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, validation_warnings, retry_count, video_info, transcode, transcoded_size\n             FROM upload_queue ORDER BY created_at DESC LIMIT 100",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -69,28 +69,43 @@
         "type_info": "Text"
       },
       {
-        "name": "validation_warnings",
+        "name": "source_md5",
         "ordinal": 13,
         "type_info": "Text"
       },
       {
-        "name": "retry_count",
+        "name": "validation_warnings",
         "ordinal": 14,
-        "type_info": "Integer"
+        "type_info": "Text"
       },
       {
-        "name": "video_info",
+        "name": "rejection_reasons",
         "ordinal": 15,
         "type_info": "Text"
       },
       {
-        "name": "transcode",
+        "name": "retry_count",
         "ordinal": 16,
         "type_info": "Integer"
       },
       {
-        "name": "transcoded_size",
+        "name": "video_info",
         "ordinal": 17,
+        "type_info": "Text"
+      },
+      {
+        "name": "transcode",
+        "ordinal": 18,
+        "type_info": "Integer"
+      },
+      {
+        "name": "transcoded_size",
+        "ordinal": 19,
+        "type_info": "Integer"
+      },
+      {
+        "name": "force_upload",
+        "ordinal": 20,
         "type_info": "Integer"
       }
     ],
@@ -112,11 +127,14 @@
       true,
       true,
       true,
+      true,
+      true,
       false,
       true,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "f7ec28553d65aea08d03cacfa492ec673ccc62ab85f53d467be13eb53132b39b"
+  "hash": "177ec8c3010c0fca00078394fd048d6b7692e8e80aa676045aac0c83c21360c4"
 }
