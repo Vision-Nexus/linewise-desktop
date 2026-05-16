@@ -17,3 +17,8 @@ crates/lw-app/tailwind.generated.css
 # macOS Finder metadata
 .DS_Store
 **/.DS_Store
+
+# Agent worktrees (live git worktrees — checking these in would nest the
+# whole repo) and per-machine agent settings overrides.
+.claude/worktrees/
+.claude/settings.local.json
