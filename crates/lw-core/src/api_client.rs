@@ -285,12 +285,65 @@ impl ApiClient {
         project_id: &str,
         atoms: AtomChunks,
     ) -> Result<QualityCheckResponse, UploadError> {
+        let url = format!(
+            "{}/api/org/{}/projects/{}/quality-check",
+            self.base_url, tenant, project_id,
+        );
+        let headers = self.auth_headers().await?;
+        self.post_quality_check(&url, headers, atoms, "quality_check")
+            .await
+    }
+
+    /// POST /api/public/quality-check
+    ///
+    /// Unauthenticated sibling of [`Self::quality_check`] for the
+    /// pre-login playground tab (VLP-545). Vendors drag a clip in
+    /// before signing in, so there's no Firebase token, no tenant,
+    /// and no project context to resolve per-project rule overrides
+    /// against. The server always evaluates against
+    /// `VideoQualityDefaultRules.defaultRules`.
+    ///
+    /// The wire format is identical to the authed path — same atom
+    /// layout header, same body shape, same [`QualityCheckResponse`]
+    /// JSON — so the playground UI can share verdict-rendering code
+    /// with the upload-time gate.
+    ///
+    /// Errors mirror [`Self::quality_check`]: payload-too-large is
+    /// refused locally, transport failures classify as
+    /// [`UploadError::QualityCheckOffline`], non-2xx responses become
+    /// [`UploadError::Api`].
+    #[tracing::instrument(skip_all, fields(
+        payload_bytes = atoms.payload_bytes(),
+        total_size = atoms.total_size,
+    ))]
+    pub async fn quality_check_public(
+        &self,
+        atoms: AtomChunks,
+    ) -> Result<QualityCheckResponse, UploadError> {
+        let url = format!("{}/api/public/quality-check", self.base_url);
+        self.post_quality_check(&url, HeaderMap::new(), atoms, "quality_check_public")
+            .await
+    }
+
+    /// Body shared by [`Self::quality_check`] and
+    /// [`Self::quality_check_public`]: enforce the local payload cap,
+    /// build the layout header + concatenated body, attach the
+    /// caller-provided base headers (auth or empty), POST, and decode.
+    /// `op_label` is a short identifier baked into log messages so
+    /// the two call sites stay distinguishable in traces.
+    async fn post_quality_check(
+        &self,
+        url: &str,
+        mut headers: HeaderMap,
+        atoms: AtomChunks,
+        op_label: &'static str,
+    ) -> Result<QualityCheckResponse, UploadError> {
         let payload_bytes = atoms.payload_bytes();
         if payload_bytes > MAX_PAYLOAD_BYTES {
             tracing::warn!(
                 bytes = payload_bytes,
                 cap = MAX_PAYLOAD_BYTES,
-                "quality_check payload over cap"
+                "{op_label} payload over cap"
             );
             return Err(UploadError::QualityCheckPayloadTooLarge {
                 bytes: payload_bytes,
@@ -307,7 +360,6 @@ impl ApiClient {
         let total_size = atoms.total_size;
         let body: Vec<u8> = atoms.chunks.into_iter().flat_map(|(_, b)| b).collect();
 
-        let mut headers = self.auth_headers().await?;
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/octet-stream"),
@@ -325,10 +377,7 @@ impl ApiClient {
 
         let resp = self
             .client
-            .post(format!(
-                "{}/api/org/{}/projects/{}/quality-check",
-                self.base_url, tenant, project_id,
-            ))
+            .post(url)
             .headers(headers)
             .body(body)
             .send()
@@ -341,7 +390,7 @@ impl ApiClient {
             tracing::warn!(
                 status = status.as_u16(),
                 body = truncate(&body, 256),
-                "quality_check non-2xx"
+                "{op_label} non-2xx"
             );
             return Err(UploadError::Api {
                 status: status.as_u16(),
