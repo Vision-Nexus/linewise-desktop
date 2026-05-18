@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/lw-core", "crates/lw-chat", "crates/lw-app", "crates/xtask"]
-default-members = ["crates/lw-core", "crates/lw-chat", "crates/lw-app"]
+members = ["crates/lw-core", "crates/lw-app", "crates/xtask"]
+default-members = ["crates/lw-core", "crates/lw-app"]
+exclude = ["crates/lw-chat"]
 
 [workspace.package]
 version = "0.1.1-beta"

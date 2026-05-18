@@ -10,7 +10,7 @@ use crate::config::AppConfig;
 /// Note: EnvFilter matches against Rust module paths, which use
 /// underscores — `lw_app`, not `lw-app`. Renaming a crate breaks this
 /// silently because EnvFilter does not error on unknown targets.
-pub const DEFAULT_LOG_FILTER: &str = "info,lw_app=trace,lw_core=trace,lw_chat=trace";
+pub const DEFAULT_LOG_FILTER: &str = "info,lw_app=trace,lw_core=trace";
 
 /// Filename prefix used by the rolling appender. Kept here so the
 /// "find the latest log file" logic stays in sync with the writer.

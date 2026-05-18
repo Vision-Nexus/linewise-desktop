@@ -4,7 +4,6 @@ use crate::components::version_banner::{VersionBlockedScreen, VersionUpdateBanne
 use crate::state::{AppState, CoreServices};
 use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
 use dioxus::prelude::*;
-use lw_chat::{ChatConfig, ChatPanel};
 use lw_core::version_check::{self, VersionStatus};
 use std::sync::Arc;
 
@@ -146,7 +145,6 @@ pub fn App() -> Element {
         style { "{TOGGLE_GROUP_CSS}" }
         style { "{SHEET_CSS}" }
         style { "{PROGRESS_CSS}" }
-        style { "{lw_chat::styles::CHAT_CSS}" }
         div {
             class: "flex flex-col h-screen w-screen overflow-hidden",
             crate::components::title_bar::TitleBar {}
@@ -379,46 +377,7 @@ async fn fetch_user_info(
 
 #[component]
 fn MainView() -> Element {
-    let mut chat_open = use_signal(|| false);
     let mut app_state = use_context::<AppState>();
-    let services = use_context::<CoreServices>();
-
-    let mut tenant_id = use_signal(String::new);
-    let mut project_id_sig: Signal<Option<String>> = use_signal(|| None);
-
-    // Sync tenant/project selections to chat config signals
-    use_effect(move || {
-        let t = app_state
-            .selected_tenant
-            .read()
-            .as_ref()
-            .map(|t| t.id.clone())
-            .unwrap_or_default();
-        tenant_id.set(t);
-    });
-
-    use_effect(move || {
-        let p = app_state
-            .selected_project
-            .read()
-            .as_ref()
-            .map(|p| p.id.clone());
-        project_id_sig.set(p);
-    });
-
-    let chat_config = ChatConfig {
-        base_url: services
-            .config
-            .server
-            .environment
-            .api_base_url()
-            .to_string(),
-        auth_token: app_state.auth_token,
-        tenant: tenant_id,
-        project_id: project_id_sig,
-    };
-
-    let is_open = *chat_open.read();
 
     rsx! {
         div {
@@ -433,33 +392,6 @@ fn MainView() -> Element {
                 main {
                     style: "flex: 1; overflow-y: auto; padding: 16px;",
                     UploadQueue {}
-                }
-
-                button {
-                    style: "position: absolute; bottom: 24px; right: 24px; z-index: 100; \
-                            width: 48px; height: 48px; border-radius: 50%; \
-                            display: flex; align-items: center; justify-content: center; \
-                            background: var(--btn-primary, #5C01DA); color: white; \
-                            border: none; cursor: pointer; \
-                            box-shadow: 0 4px 12px rgba(0,0,0,0.2); \
-                            transition: background 0.15s, transform 0.15s;",
-                    onclick: move |_| chat_open.set(!is_open),
-                    title: if is_open { "Close Chat" } else { "Ask Linus" },
-                    if is_open {
-                        crate::icons::CloseIcon {}
-                    } else {
-                        crate::icons::ChatIcon {}
-                    }
-                }
-            }
-
-            // Right panel — chat
-            if is_open {
-                div {
-                    class: "slide-in-right",
-                    style: "width: 380px; flex-shrink: 0; border-left: 1px solid var(--border); \
-                            display: flex; flex-direction: column; overflow: hidden;",
-                    ChatPanel { config: chat_config }
                 }
             }
 
