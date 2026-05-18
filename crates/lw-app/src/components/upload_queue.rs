@@ -20,8 +20,12 @@ use std::path::{Path, PathBuf};
 /// prefix — they look the same to the user, but the prefix matches the
 /// log-level distinction in `UploadError::log`.
 ///
-/// Listed exhaustively rather than via a catch-all so that adding a new
-/// `UploadError` variant forces a deliberate routing decision here.
+/// Note: most of these variants no longer reach this function because
+/// `stage_file` now defers the quality check (broken file, unsupported
+/// container, server offline) into a `Rejected` row whose reason renders
+/// inline in the queue. The toast path stays exhaustive so that adding
+/// a new `UploadError` still forces a deliberate routing decision, but
+/// in practice only `FileNotFound`, `Io`, and `Database` arrive here.
 fn stage_error_toast(path: &Path, err: &UploadError) -> String {
     let filename = path
         .file_name()
@@ -206,17 +210,35 @@ pub fn UploadQueue() -> Element {
         let mut app_state_for_toast = app_state_add.clone();
 
         spawn(async move {
+            // Timing-instrumented to chase a 1–3 s freeze right after
+            // dismissing the picker. `t_picker_done` is the moment
+            // rfd's future resolves; subsequent deltas measure how
+            // long each `stage_file` `.await` takes on the dioxus
+            // task (which shares the main webview thread on macOS).
+            let t_open = std::time::Instant::now();
             let files = rfd::AsyncFileDialog::new()
                 .set_title("Select files to upload")
                 .pick_files()
                 .await;
+            let t_picker_done = t_open.elapsed();
+            tracing::debug!(
+                t_picker_ms = t_picker_done.as_millis() as u64,
+                "file picker resolved",
+            );
             let Some(files) = files else { return };
+            tracing::info!(file_count = files.len(), "file picker returned files");
             for file in files {
+                let t_file = std::time::Instant::now();
                 let path = PathBuf::from(file.path());
                 if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
                     e.log("Stage file");
                     app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
                 }
+                tracing::debug!(
+                    filename = ?path.file_name(),
+                    t_stage_call_ms = t_file.elapsed().as_millis() as u64,
+                    "stage_file call returned to UI",
+                );
             }
         });
     };
@@ -455,10 +477,16 @@ pub fn UploadQueue() -> Element {
 
         spawn(async move {
             for path in to_stage {
+                let t_file = std::time::Instant::now();
                 if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
                     e.log("Stage dropped file");
                     app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
                 }
+                tracing::debug!(
+                    filename = ?path.file_name(),
+                    t_stage_call_ms = t_file.elapsed().as_millis() as u64,
+                    "stage_file (drop) call returned to UI",
+                );
             }
         });
     };
@@ -478,6 +506,11 @@ pub fn UploadQueue() -> Element {
         "transparent"
     };
 
+    let quality_checking: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.state == UploadState::QualityChecking)
+        .cloned()
+        .collect();
     let hashing: Vec<_> = tasks
         .iter()
         .filter(|t| t.state == UploadState::Hashing)
@@ -572,6 +605,19 @@ pub fn UploadQueue() -> Element {
                 }
             } else {
                 // Staged files (step 1)
+                if !quality_checking.is_empty() {
+                    SectionHeader { title: "Checking", count: quality_checking.len() }
+                    div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
+                        for task in quality_checking.iter() {
+                            QualityCheckingRow {
+                                key: "{task.id}",
+                                task: task.clone(),
+                                on_remove: on_remove.clone(),
+                            }
+                        }
+                    }
+                }
+
                 if !hashing.is_empty() {
                     SectionHeader { title: "Hashing", count: hashing.len() }
                     div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
@@ -579,6 +625,7 @@ pub fn UploadQueue() -> Element {
                             HashingRow {
                                 key: "{task.id}",
                                 task: task.clone(),
+                                device_encoder_signatures,
                                 hash_progress,
                                 on_remove: on_remove.clone(),
                             }
@@ -683,7 +730,7 @@ pub fn UploadQueue() -> Element {
                 // Empty state. Wording tracks the scope — only prompt for
                 // drop/add when the current scope can actually accept new
                 // uploads (Project scope).
-                if staged.is_empty() && rejected.is_empty() && transcoding.is_empty() && active.is_empty() && history.is_empty() {
+                if quality_checking.is_empty() && hashing.is_empty() && staged.is_empty() && rejected.is_empty() && transcoding.is_empty() && active.is_empty() && history.is_empty() {
                     div {
                         style: "text-align: center; padding: 48px 16px; color: var(--text-muted);",
                         p { style: "font-size: 14px; margin: 0 0 4px;", "No files in queue" }
@@ -737,15 +784,209 @@ fn SectionHeader(title: String, count: usize) -> Element {
     }
 }
 
+/// Row metadata derived from a `VideoInfo`: a one-line `summary` for
+/// the dashed-underline affordance and three column groups for the
+/// hover popover. Lifted out of `StagedRow` so the same markup can
+/// render under both the `Checking → Hashing` rows (where the data
+/// has just landed) and the `Staged / Rejected` rows (where it has
+/// been there since staging finished).
+#[derive(Clone, PartialEq)]
+struct VideoDetails {
+    summary: String,
+    structural: Vec<(String, String)>,
+    device: Vec<(String, String)>,
+    raw: Vec<(String, String)>,
+}
+
+fn build_video_details(
+    task: &UploadTask,
+    device_encoder_signatures: &'static [DeviceEncoderSignature],
+) -> Option<VideoDetails> {
+    let info = task.video_info.as_ref()?;
+    let codec = info.codec.to_uppercase();
+    let res = format!("{}x{}", info.width, info.height);
+    let fps_text = format!("{:.0}fps", info.fps);
+    let bitrate = video::format_bitrate(info.bitrate_kbps);
+    let summary = format!("{codec} · {res} · {fps_text} · {bitrate}");
+    let mut structural: Vec<(String, String)> = Vec::new();
+    structural.push(("Codec".into(), info.codec.to_uppercase()));
+    structural.push(("Resolution".into(), res));
+    structural.push(("Frame rate".into(), format!("{:.2} fps", info.fps)));
+    structural.push(("Bitrate".into(), bitrate));
+    if !info.audio_codec.is_empty() {
+        structural.push(("Audio".into(), info.audio_codec.to_uppercase()));
+    }
+    structural.push(("Duration".into(), format_duration(info.duration_secs)));
+    structural.push(("Container".into(), info.format.clone()));
+
+    let mut device: Vec<(String, String)> =
+        video::device_info_rows(info, device_encoder_signatures)
+            .into_iter()
+            .map(|(label, value)| {
+                let display = if value.is_empty() {
+                    "\u{2014}".to_string()
+                } else {
+                    value
+                };
+                (label.to_string(), display)
+            })
+            .collect();
+    device.push((
+        "Telemetry".into(),
+        info.telemetry.clone().unwrap_or_else(|| "\u{2014}".into()),
+    ));
+
+    let raw: Vec<(String, String)> = info.metadata.clone();
+    Some(VideoDetails {
+        summary,
+        structural,
+        device,
+        raw,
+    })
+}
+
+/// Renders the dashed-underline summary + the three-group hover
+/// popover (source metadata, device, raw tags). Identical in
+/// `HashingRow` and `StagedRow`; pulled out so adding a new row that
+/// shows probe data doesn't need to copy 60 lines of rsx.
+#[component]
+fn VideoInfoPopover(details: VideoDetails) -> Element {
+    let VideoDetails {
+        summary,
+        structural,
+        device,
+        raw,
+    } = details;
+    rsx! {
+        div {
+            class: "popover-host",
+            style: "margin-top: 4px;",
+            tabindex: "0",
+            div {
+                style: "font-size: 11px; color: var(--text-secondary); border-bottom: 1px dashed var(--border); display: inline-block;",
+                "{summary}"
+            }
+            div {
+                class: "popover-panel",
+                style: if raw.is_empty() {
+                    "max-height: 360px; overflow-y: auto;".to_string()
+                } else {
+                    "max-height: 360px; overflow-y: auto; display: grid; grid-template-columns: minmax(200px, 1fr) minmax(220px, 1fr); gap: 12px;".to_string()
+                },
+                div {
+                    style: "min-width: 0;",
+                    div {
+                        style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
+                        "Source metadata"
+                    }
+                    div {
+                        style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
+                        for (key, value) in structural.iter() {
+                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                        }
+                    }
+                    div {
+                        style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 10px; margin-bottom: 6px;",
+                        "Device"
+                    }
+                    div {
+                        style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
+                        for (key, value) in device.iter() {
+                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                        }
+                    }
+                }
+                if !raw.is_empty() {
+                    div {
+                        style: "min-width: 0;",
+                        div {
+                            style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
+                            "Raw tags"
+                        }
+                        div {
+                            style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
+                            for (key, value) in raw.iter() {
+                                div { style: "color: var(--text-muted); white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{key}" }
+                                div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One row in the "Checking" section: a freshly-added video whose
+/// local atom walk + server `/quality-check` round-trip is in flight.
+/// Renders an indeterminate progress bar — the network round-trip
+/// has no progress signal we could surface — plus a Remove
+/// affordance. Removing mid-check is safe for the same reason as
+/// `HashingRow`: the worker writes to SQLite at completion, so a
+/// removed row's terminal write becomes a no-op.
+#[component]
+fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> Element {
+    let task_id = task.id.clone();
+    rsx! {
+        div {
+            class: "staged-row fade-in",
+            style: "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg);",
+            div {
+                style: "display: flex; justify-content: space-between; align-items: center;",
+                span {
+                    style: "font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;",
+                    "{task.filename}"
+                }
+                span {
+                    style: "font-size: 12px; color: var(--text-muted); flex-shrink: 0; margin-left: 8px;",
+                    "{format_size(task.size)}"
+                }
+            }
+            div {
+                style: "margin-top: 6px;",
+                // Passing a `None` value flips dioxus-primitives'
+                // Progress into `data-state='indeterminate'`, which
+                // the global CSS animates as a left-to-right shimmer.
+                Progress {
+                    value: Option::<f64>::None,
+                    max: 100.0,
+                    "aria-label": "Quality check in progress",
+                    ProgressIndicator {}
+                }
+            }
+            div {
+                style: "font-size: 11px; margin-top: 2px; color: var(--text-muted);",
+                "Checking video quality…"
+            }
+            div {
+                style: "display: flex; justify-content: flex-end; margin-top: 6px;",
+                button {
+                    class: "btn-danger-sm",
+                    style: "{styles::BTN_DANGER_SM}",
+                    onclick: move |_| on_remove.call(task_id.clone()),
+                    "Remove"
+                }
+            }
+        }
+    }
+}
+
 /// One row in the "Hashing" section: a freshly-added file whose
-/// BLAKE3+MD5 stream is in flight. Renders a determinate progress
-/// bar (driven by `HashProgress` events) plus a Remove affordance.
-/// We let the user remove a row mid-hash — the worker writes to
-/// SQLite at completion, so a removed row's terminal write becomes
-/// a no-op when the row no longer exists.
+/// BLAKE3+MD5 stream is in flight. The quality check has already
+/// landed, so the row carries the same probe-data popover and
+/// advisory warnings the `Staged` row will eventually show — the
+/// user gets to see the verdict during the hash window instead of
+/// only after it. Renders a determinate progress bar driven by
+/// `HashProgress` events, plus a Remove affordance. We let the user
+/// remove a row mid-hash — the worker writes to SQLite at
+/// completion, so a removed row's terminal write becomes a no-op
+/// when the row no longer exists.
 #[component]
 fn HashingRow(
     task: UploadTask,
+    device_encoder_signatures: &'static [DeviceEncoderSignature],
     hash_progress: Signal<HashMap<String, (u64, u64)>>,
     on_remove: EventHandler<String>,
 ) -> Element {
@@ -766,6 +1007,8 @@ fn HashingRow(
         format_size(total_bytes),
         pct,
     );
+    let video_details = build_video_details(&task, device_encoder_signatures);
+    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 3px;";
 
     rsx! {
         div {
@@ -780,6 +1023,15 @@ fn HashingRow(
                 span {
                     style: "font-size: 12px; color: var(--text-muted); flex-shrink: 0; margin-left: 8px;",
                     "{format_size(task.size)}"
+                }
+            }
+            if let Some(details) = video_details {
+                VideoInfoPopover { details }
+            }
+            for warning in task.validation_warnings.iter() {
+                div {
+                    style: "{warning_style}",
+                    "{warning}"
                 }
             }
             div {
@@ -850,50 +1102,12 @@ fn StagedRow(
     let show_transcode_toggle = feature_enabled && is_video && transcode_useful && !rejected;
     let show_already_ok_badge = feature_enabled && is_video && !transcode_useful && !rejected;
 
-    // Build video info summary line and the matching popover groups.
-    // The summary line is the affordance the user hovers; the popover
-    // shows three groups stacked: the structural numbers (codec, res, fps,
-    // bitrate, audio, duration, container), the device-info group with
-    // a Telemetry row, and a flat dump of every readable container /
-    // stream tag for transparency.
-    let video_details = task.video_info.as_ref().map(|info| {
-        let codec = info.codec.to_uppercase();
-        let res = format!("{}x{}", info.width, info.height);
-        let fps_text = format!("{:.0}fps", info.fps);
-        let bitrate = video::format_bitrate(info.bitrate_kbps);
-        let summary = format!("{codec} · {res} · {fps_text} · {bitrate}");
-        let mut structural: Vec<(String, String)> = Vec::new();
-        structural.push(("Codec".into(), info.codec.to_uppercase()));
-        structural.push(("Resolution".into(), res));
-        structural.push(("Frame rate".into(), format!("{:.2} fps", info.fps)));
-        structural.push(("Bitrate".into(), bitrate));
-        if !info.audio_codec.is_empty() {
-            structural.push(("Audio".into(), info.audio_codec.to_uppercase()));
-        }
-        structural.push(("Duration".into(), format_duration(info.duration_secs)));
-        structural.push(("Container".into(), info.format.clone()));
-
-        let mut device: Vec<(String, String)> =
-            video::device_info_rows(info, device_encoder_signatures)
-                .into_iter()
-                .map(|(label, value)| {
-                    let display = if value.is_empty() {
-                        "\u{2014}".to_string()
-                    } else {
-                        value
-                    };
-                    (label.to_string(), display)
-                })
-                .collect();
-        device.push((
-            "Telemetry".into(),
-            info.telemetry.clone().unwrap_or_else(|| "\u{2014}".into()),
-        ));
-
-        let raw: Vec<(String, String)> = info.metadata.clone();
-
-        (summary, structural, device, raw)
-    });
+    // Probe data is built into the same shape — summary line + three
+    // popover groups — used by `HashingRow`. Lifting it out makes the
+    // hashing row light up with codec/resolution/fps the moment the
+    // quality check returns, instead of waiting for the row to land
+    // in `Staged`.
+    let video_details = build_video_details(&task, device_encoder_signatures);
 
     let btn_style = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
     let transcode_btn_style = if transcode_on {
@@ -950,70 +1164,8 @@ fn StagedRow(
                 span { style: "font-size: 12px; color: var(--text-muted); flex-shrink: 0; margin-left: 8px;", "{format_size(task.size)}" }
             }
 
-            // Video info line + hover popover. Two-column layout when
-            // raw tags are present: left column stacks the structural
-            // numbers and the device-info group; right column is the raw
-            // container / stream dump. When raw is empty, the panel
-            // collapses to a single column.
-            if let Some((summary, structural, device, raw)) = &video_details {
-                div {
-                    class: "popover-host",
-                    style: "margin-top: 4px;",
-                    tabindex: "0",
-                    div {
-                        style: "font-size: 11px; color: var(--text-secondary); border-bottom: 1px dashed var(--border); display: inline-block;",
-                        "{summary}"
-                    }
-                    div {
-                        class: "popover-panel",
-                        style: if raw.is_empty() {
-                            "max-height: 360px; overflow-y: auto;".to_string()
-                        } else {
-                            "max-height: 360px; overflow-y: auto; display: grid; grid-template-columns: minmax(200px, 1fr) minmax(220px, 1fr); gap: 12px;".to_string()
-                        },
-                        div {
-                            style: "min-width: 0;",
-                            div {
-                                style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
-                                "Source metadata"
-                            }
-                            div {
-                                style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
-                                for (key, value) in structural.iter() {
-                                    div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
-                                    div { style: "color: var(--text); word-break: break-all;", "{value}" }
-                                }
-                            }
-                            div {
-                                style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 10px; margin-bottom: 6px;",
-                                "Device"
-                            }
-                            div {
-                                style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
-                                for (key, value) in device.iter() {
-                                    div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
-                                    div { style: "color: var(--text); word-break: break-all;", "{value}" }
-                                }
-                            }
-                        }
-                        if !raw.is_empty() {
-                            div {
-                                style: "min-width: 0;",
-                                div {
-                                    style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
-                                    "Raw tags"
-                                }
-                                div {
-                                    style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
-                                    for (key, value) in raw.iter() {
-                                        div { style: "color: var(--text-muted); white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{key}" }
-                                        div { style: "color: var(--text); word-break: break-all;", "{value}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            if let Some(details) = video_details.clone() {
+                VideoInfoPopover { details }
             }
 
             // Reject reasons render first so they read as the headline
@@ -1213,7 +1365,10 @@ fn UploadTaskRow(
                                     "Clear"
                                 }
                             },
-                            UploadState::Staged | UploadState::Rejected | UploadState::Hashing => rsx! {},
+                            UploadState::QualityChecking
+                            | UploadState::Staged
+                            | UploadState::Rejected
+                            | UploadState::Hashing => rsx! {},
                         }
                     }
                 }
@@ -1301,7 +1456,8 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
         UploadState::Verifying => "Verifying...".to_string(),
         UploadState::Paused => "Paused".to_string(),
         UploadState::Pending => "Pending...".to_string(),
-        UploadState::Hashing
+        UploadState::QualityChecking
+        | UploadState::Hashing
         | UploadState::Staged
         | UploadState::Rejected
         | UploadState::Completed
@@ -1361,6 +1517,16 @@ fn handle_upload_event(
             update_task(app_state, &task_id, |t| {
                 t.validation_warnings = warnings;
                 t.rejection_reasons = rejection_reasons;
+            });
+        }
+        UploadEvent::QualityCheckPassed {
+            task_id,
+            video_info,
+            warnings,
+        } => {
+            update_task(app_state, &task_id, |t| {
+                t.video_info = video_info;
+                t.validation_warnings = warnings;
             });
         }
         UploadEvent::TranscodeProgress { task_id, percent } => {

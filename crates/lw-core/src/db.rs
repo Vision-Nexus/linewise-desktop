@@ -319,6 +319,34 @@ impl Database {
         Ok(())
     }
 
+    /// Settle the staging-time quality-check worker in one UPDATE:
+    /// state + video_info + warnings + cleared error message. Used at
+    /// the `QualityChecking → Hashing` transition so the popover-data
+    /// fields the response carries land atomically with the state
+    /// change. `video_info` is serialised to JSON; `None` clears the
+    /// column.
+    pub async fn update_upload_quality_check_settled(
+        &self,
+        id: &str,
+        state: UploadState,
+        video_info: Option<&crate::models::VideoInfo>,
+        warnings: &[String],
+    ) -> Result<(), DbError> {
+        let state_str = state.as_str();
+        let video_info_json = video_info.map(serde_json::to_string).transpose()?;
+        let warnings_json = serde_json::to_string(warnings)?;
+        sqlx::query!(
+            "UPDATE upload_queue SET state = ?, video_info = ?, validation_warnings = ?, error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+            state_str,
+            video_info_json,
+            warnings_json,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Settle the staging-time hash worker in one UPDATE: state +
     /// warnings + reasons + cleared error message. Used at the
     /// terminal `Staged` / `Rejected` transition so the row never
@@ -363,13 +391,14 @@ impl Database {
 
     #[tracing::instrument(skip_all)]
     pub async fn reset_stale_uploads(&self) -> Result<u64, DbError> {
-        // HASHING is included because the in-memory hash worker dies
-        // with the process; the row would otherwise sit forever with
-        // no Staged/Rejected verdict. The user can re-add the file
-        // and it'll get a fresh hash run.
+        // HASHING and QUALITY_CHECKING are included because both
+        // workers run in-process and die with the app; the row would
+        // otherwise sit forever waiting for a verdict that no living
+        // task is going to emit. The user can re-add the file and
+        // it'll get a fresh quality check / hash run.
         let result = sqlx::query!(
             "UPDATE upload_queue SET state = 'FAILED', error_message = 'Interrupted by app restart', updated_at = datetime('now')
-             WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'PENDING', 'HASHING')",
+             WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'PENDING', 'HASHING', 'QUALITY_CHECKING')",
         )
         .execute(&self.pool)
         .await?;

@@ -142,7 +142,7 @@ input:focus { border-color: var(--border-focus) !important; box-shadow: var(--fo
     transition: opacity 0.12s ease-out, transform 0.12s ease-out;
 }
 .popover-host:hover > .popover-panel,
-.popover-host:focus-within > .popover-panel { opacity: 1; transform: translateY(0); }
+.popover-host:focus-within > .popover-panel { opacity: 1; transform: translateY(0); pointer-events: auto; }
 
 /* ── Animations ──────────────────────────────────────────────────── */
 .fade-in { animation: fadeIn 0.2s ease-out; }

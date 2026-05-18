@@ -227,6 +227,20 @@ impl UserInfo {
 /// Upload task state persisted in SQLite
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadState {
+    /// Row was just inserted from a file pick / drop and the server
+    /// quality check is in flight. The atom walk + the
+    /// `/quality-check` round-trip happen here; the row carries no
+    /// `video_info` or warnings yet because both come from the
+    /// response. The UI shows an indeterminate ("loading") progress
+    /// bar so the user can see that work is happening but no estimate
+    /// is available. The row transitions to `Hashing` on accept (or
+    /// server-reject — we still hash for super-admin force-upload)
+    /// and to `Rejected` directly when the local atom walk says the
+    /// file is broken (no `moov`, unsupported container) or the
+    /// server is unreachable. Holding this as its own state keeps
+    /// broken-file rows visible with a typed reason rather than
+    /// hidden behind a transient toast.
+    QualityChecking,
     /// Row was just inserted from a file pick / drop. The video probe
     /// has run (synchronously, fast) so `video_info` and quality
     /// reasons are present, but BLAKE3+MD5 hashing and the
@@ -262,6 +276,7 @@ pub enum UploadState {
 impl UploadState {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::QualityChecking => "QUALITY_CHECKING",
             Self::Hashing => "HASHING",
             Self::Staged => "STAGED",
             Self::Rejected => "REJECTED",
@@ -280,6 +295,7 @@ impl UploadState {
 
     pub fn parse(s: &str) -> Self {
         match s {
+            "QUALITY_CHECKING" => Self::QualityChecking,
             "HASHING" => Self::Hashing,
             "STAGED" => Self::Staged,
             "REJECTED" => Self::Rejected,

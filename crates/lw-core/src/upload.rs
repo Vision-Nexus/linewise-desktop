@@ -67,6 +67,21 @@ pub enum UploadEvent {
         warnings: Vec<String>,
         rejection_reasons: Vec<String>,
     },
+    /// The server quality check finished with a usable verdict
+    /// (`Accepted` or `Rejected`). Carries the populated `video_info`
+    /// and advisory `warnings` so the UI's per-row popover and
+    /// warn-palette lines can render before the hash worker takes
+    /// over. A subsequent `StateChanged → Hashing` flips the row out
+    /// of the `QualityChecking` section. The fail path (broken file,
+    /// unsupported container, server unreachable) does not emit this
+    /// event — those settle directly through `ValidationWarnings`
+    /// with a populated `rejection_reasons` and a `StateChanged →
+    /// Rejected`, because the row carries no usable `video_info`.
+    QualityCheckPassed {
+        task_id: String,
+        video_info: Option<crate::models::VideoInfo>,
+        warnings: Vec<String>,
+    },
     TranscodeProgress {
         task_id: String,
         percent: f32,
@@ -179,6 +194,7 @@ impl UploadEngine {
         // The 2026-05-16 production-data sweep showed 99.98% of customer
         // uploads are already ISO BMFF, so the right answer for the rest
         // is a kind-specific rejection before we spend any IO.
+        let t_qc_entry = std::time::Instant::now();
         match container_kind::detect(path)? {
             ContainerKind::IsoBmff => {}
             kind @ (ContainerKind::Matroska
@@ -191,6 +207,7 @@ impl UploadEngine {
                 return Err(UploadError::UnsupportedContainer { kind });
             }
         }
+        let t_after_kind = t_qc_entry.elapsed();
 
         let path_buf = path.to_path_buf();
         let chunks =
@@ -226,10 +243,20 @@ impl UploadEngine {
                 }
             };
 
+        let t_after_atomwalk = t_qc_entry.elapsed();
         let response = self
             .api
             .quality_check(tenant_id, project_id, chunks)
             .await?;
+        let t_after_server = t_qc_entry.elapsed();
+        tracing::debug!(
+            filename = %filename,
+            t_kind_ms = t_after_kind.as_millis() as u64,
+            t_atomwalk_ms = (t_after_atomwalk - t_after_kind).as_millis() as u64,
+            t_server_ms = (t_after_server - t_after_atomwalk).as_millis() as u64,
+            t_total_ms = t_after_server.as_millis() as u64,
+            "quality_check timings",
+        );
         let verdict = match response.acceptance {
             Acceptance::Accepted => PostHashVerdict::Stage,
             Acceptance::Rejected { reasons } => PostHashVerdict::Reject(reasons),
@@ -239,15 +266,24 @@ impl UploadEngine {
 
     /// Stage a file for review (step 1 of two-step upload).
     ///
-    /// Two-phase: this function returns synchronously after probing
-    /// the video and inserting the row in the `Hashing` state, and
-    /// spawns a background worker that streams BLAKE3+MD5 hashes,
-    /// emits `HashProgress` events, runs the cross-tenant dedup
-    /// check, and finally transitions the row to `Staged` or
-    /// `Rejected`. Computing the hash exactly once is critical —
-    /// videos are commonly tens of GB; the previous implementation
-    /// blocked the file-pick UI on the hash and made re-staging from
-    /// a re-add re-read every byte.
+    /// Three-phase: this function returns synchronously after
+    /// inserting the row in the `QualityChecking` state, and spawns a
+    /// background worker that (1) runs the local atom walk + server
+    /// `/quality-check` round-trip, (2) flips the row to `Hashing`
+    /// and streams BLAKE3+MD5, (3) runs the cross-tenant dedup check
+    /// and settles the row in `Staged` or `Rejected`. Each phase
+    /// emits its own `StateChanged` so the queue UI can render an
+    /// indeterminate progress bar during the network-bound check and
+    /// a determinate one during hashing.
+    ///
+    /// Failures along the quality-check phase (broken file, missing
+    /// `moov`, unsupported container, server unreachable) settle the
+    /// row directly into `Rejected` with a typed reason in
+    /// `rejection_reasons`. They don't surface as a returned `Err`
+    /// any more — keeping them on the row instead of in a transient
+    /// toast is the whole point of the new state, so the user can
+    /// see *which* file is broken and *why* without having to recall
+    /// the toast.
     ///
     /// Quality-`Rejected` rows still go through hashing: a
     /// super-admin "Force upload" bypass turns them into a normal
@@ -259,11 +295,18 @@ impl UploadEngine {
         tenant_id: &str,
         project_id: &str,
     ) -> Result<UploadTask, UploadError> {
+        // Timing-instrumented to chase a 1–3 s freeze on file-pick.
+        // Each numbered checkpoint logs the elapsed-ms-since-entry so
+        // the slow segment is obvious in the rolling log without
+        // needing a perf-sampler attached.
+        let t_entry = std::time::Instant::now();
         if !path.exists() {
             return Err(UploadError::FileNotFound(path.to_path_buf()));
         }
+        let t_after_exists = t_entry.elapsed();
 
         let metadata = std::fs::metadata(path)?;
+        let t_after_metadata = t_entry.elapsed();
         let filename = path
             .file_name()
             .unwrap_or_default()
@@ -272,32 +315,8 @@ impl UploadEngine {
         let mime_type = mime_guess::from_path(path)
             .first_or_octet_stream()
             .to_string();
-
-        // Server-side quality check for video files. Two phases:
-        //
-        // 1. Walk the source's top-level atoms locally and assemble the
-        //    sparse layout the server needs to reconstruct a probe-able
-        //    file. A missing `moov` atom (typical for power-cut
-        //    recordings) bails out as `VideoUnplayable` before any
-        //    network round-trip.
-        // 2. POST the assembled chunks to `/quality-check`. The server
-        //    runs ffprobe + the global+per-project rule set and returns
-        //    `acceptance + warnings + info`.
-        //
-        // `Unplayable` and the >8 MiB cap are fatal — refuse to stage.
-        // Network/connect failures bubble up as `QualityCheckOffline`
-        // so the UI can render the dedicated "server unreachable"
-        // message. Quality `Rejected` is captured as a deferred verdict
-        // that the hash worker applies after hashing completes, so the
-        // row spends the hashing window in `Hashing` instead of
-        // flickering Rejected → Hashing → Rejected and a super-admin
-        // Force-upload bypass still has the MD5 ready to send.
-        let (video_info, validation_warnings, post_hash) = if mime_type.starts_with("video/") {
-            self.run_quality_check(path, tenant_id, project_id, &filename)
-                .await?
-        } else {
-            (None, Vec::new(), PostHashVerdict::Stage)
-        };
+        let is_video = mime_type.starts_with("video/");
+        let t_after_mime = t_entry.elapsed();
 
         let task = UploadTask {
             id: Uuid::new_v4().to_string(),
@@ -310,46 +329,149 @@ impl UploadEngine {
             document_id: None,
             session_id: None,
             bytes_uploaded: 0,
-            state: UploadState::Hashing,
+            // Non-video rows skip the quality-check step entirely; the
+            // server gate runs only for `video/*`. They land in
+            // `Hashing` straight away and follow the regular dedup
+            // path. Video rows enter `QualityChecking` and only
+            // transition to `Hashing` once the server response arrives.
+            state: if is_video {
+                UploadState::QualityChecking
+            } else {
+                UploadState::Hashing
+            },
             error_message: None,
             hash: None,
             source_md5: None,
-            validation_warnings,
+            validation_warnings: Vec::new(),
             rejection_reasons: Vec::new(),
             retry_count: 0,
             transcode: false,
             transcoded_size: None,
-            video_info,
+            video_info: None,
             force_upload: false,
         };
 
         self.db.insert_upload_task(&task).await?;
+        let t_after_insert = t_entry.elapsed();
         let _ = self
             .event_tx
             .send(UploadEvent::TaskAdded(Box::new(task.clone())));
+        let t_after_event = t_entry.elapsed();
 
         let engine = Arc::clone(self);
         let task_id = task.id.clone();
         let path_buf = path.to_path_buf();
-        let tenant_id = tenant_id.to_string();
-        let warnings = task.validation_warnings.clone();
+        let tenant_id_owned = tenant_id.to_string();
+        let project_id_owned = project_id.to_string();
+        let filename = task.filename.clone();
         tokio::spawn(async move {
-            let final_state = match post_hash {
-                PostHashVerdict::Stage => {
-                    engine
-                        .run_hash_and_dedup(&task_id, &path_buf, &tenant_id, warnings)
-                        .await
-                }
-                PostHashVerdict::Reject(reasons) => {
-                    engine
-                        .run_hash_only(&task_id, &path_buf, warnings, reasons)
-                        .await
-                }
+            let final_state = if is_video {
+                engine
+                    .run_quality_then_hash(
+                        &task_id,
+                        &path_buf,
+                        &tenant_id_owned,
+                        &project_id_owned,
+                        &filename,
+                    )
+                    .await
+            } else {
+                engine
+                    .run_hash_and_dedup(&task_id, &path_buf, &tenant_id_owned, Vec::new())
+                    .await
             };
             tracing::debug!(task_id = %task_id, ?final_state, "stage_file worker finished");
         });
+        let t_after_spawn = t_entry.elapsed();
+
+        // Single line per file so the log isn't spammed; the segment
+        // breakdown is right here next to the row id. If any of these
+        // jumps past ~50 ms on a small local file, that's the freeze.
+        // Kept at debug — useful when chasing a regression, noise
+        // otherwise, since a healthy run reads `t_total_ms=1`.
+        tracing::debug!(
+            task_id = %task.id,
+            filename = %task.filename,
+            t_exists_ms = t_after_exists.as_millis() as u64,
+            t_metadata_ms = (t_after_metadata - t_after_exists).as_millis() as u64,
+            t_mime_ms = (t_after_mime - t_after_metadata).as_millis() as u64,
+            t_insert_ms = (t_after_insert - t_after_mime).as_millis() as u64,
+            t_event_ms = (t_after_event - t_after_insert).as_millis() as u64,
+            t_spawn_ms = (t_after_spawn - t_after_event).as_millis() as u64,
+            t_total_ms = t_after_spawn.as_millis() as u64,
+            "stage_file timings",
+        );
 
         Ok(task)
+    }
+
+    /// Drive the quality-check phase, then hand off to the hash phase.
+    /// On a broken-file / unsupported-container / offline failure the
+    /// row settles directly into `Rejected` with the typed message in
+    /// `rejection_reasons`; on accept (or server-reject) the row
+    /// transitions to `Hashing` and the regular post-hash path runs.
+    async fn run_quality_then_hash(
+        self: &Arc<Self>,
+        task_id: &str,
+        path: &Path,
+        tenant_id: &str,
+        project_id: &str,
+        filename: &str,
+    ) -> UploadState {
+        match self
+            .run_quality_check(path, tenant_id, project_id, filename)
+            .await
+        {
+            Ok((video_info, warnings, post_hash)) => {
+                // Persist the response payload + flip to Hashing in
+                // one write so the popover-data fields land atomically
+                // with the state change.
+                let _ = self
+                    .db
+                    .update_upload_quality_check_settled(
+                        task_id,
+                        UploadState::Hashing,
+                        video_info.as_ref(),
+                        &warnings,
+                    )
+                    .await;
+                let _ = self.event_tx.send(UploadEvent::QualityCheckPassed {
+                    task_id: task_id.to_string(),
+                    video_info,
+                    warnings: warnings.clone(),
+                });
+                let _ = self.event_tx.send(UploadEvent::StateChanged {
+                    task_id: task_id.to_string(),
+                    state: UploadState::Hashing,
+                });
+                match post_hash {
+                    PostHashVerdict::Stage => {
+                        self.run_hash_and_dedup(task_id, path, tenant_id, warnings)
+                            .await
+                    }
+                    PostHashVerdict::Reject(reasons) => {
+                        self.run_hash_only(task_id, path, warnings, reasons).await
+                    }
+                }
+            }
+            Err(err) => self.settle_quality_check_rejected(task_id, &err).await,
+        }
+    }
+
+    /// Settle a quality-check failure as a typed `Rejected` row. The
+    /// error's `Display` becomes the single rejection reason; the
+    /// `is_expected()` classifier still controls whether the failure
+    /// is a `warn!` (broken file, offline) or an `error!` (bug we
+    /// should hear about), matching how `Self::log` would route it.
+    async fn settle_quality_check_rejected(
+        self: &Arc<Self>,
+        task_id: &str,
+        err: &UploadError,
+    ) -> UploadState {
+        err.log(format_args!("Quality check for {task_id}"));
+        let reason = err.to_string();
+        self.settle_post_hash(task_id, UploadState::Rejected, Vec::new(), vec![reason])
+            .await
     }
 
     /// Drive the hash stream for a `Hashing` row, then run the
