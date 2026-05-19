@@ -108,6 +108,26 @@ impl Database {
         Ok(())
     }
 
+    /// Drain in-flight queries and close every connection in the pool.
+    ///
+    /// Why this exists: `Database` is held inside `Arc<Database>` and
+    /// cloned widely (CoreServices, the engine, the auto-retry worker,
+    /// the Dioxus context provider). Dropping the outer Arc is not
+    /// enough to release SQLite's file/WAL/SHM locks while sibling Arcs
+    /// are still alive. `SqlitePool::close` runs SQLite's `xClose` on
+    /// every pooled connection regardless of how many `Arc<Database>`
+    /// references remain — when it returns, the file handles are gone
+    /// and `reset_local_files` can safely unlink the on-disk files.
+    ///
+    /// Without this step, `wipe_db` raced the still-open pool: SQLite
+    /// would re-create WAL/SHM sidecars during the wipe and the user
+    /// would be left with a "wiped" DB that immediately came back.
+    #[tracing::instrument(skip_all)]
+    pub async fn close(&self) {
+        self.pool.close().await;
+        tracing::warn!("sqlite pool closed");
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn open() -> Result<Self, DbError> {
         let db_path = AppConfig::db_path();

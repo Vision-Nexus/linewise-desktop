@@ -1,12 +1,27 @@
 use serde::{Deserialize, Serialize};
 
-/// Mirrors backend TenantInfo (from UserModels.scala)
+/// Mirrors backend TenantInfo (from UserModels.scala). `parentGroupId`
+/// is `Option[GroupId]` server-side: tenants admin-created without a
+/// group come back with `None`. We currently surface the value through
+/// `Tenant::is_in_group` so the sidebar can tag vision-lab tenants
+/// with a badge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tenant {
     pub id: String,
     pub name: String,
     pub display_name: String,
+    #[serde(default)]
+    pub parent_group_id: Option<String>,
+}
+
+impl Tenant {
+    /// True when this tenant belongs to the given group. Returns false
+    /// for tenants without a group as well as tenants in a different
+    /// group; the caller doesn't need to disambiguate.
+    pub fn is_in_group(&self, group_id: &str) -> bool {
+        self.parent_group_id.as_deref() == Some(group_id)
+    }
 }
 
 /// Mirrors backend Project type

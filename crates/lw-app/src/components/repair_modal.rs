@@ -270,17 +270,25 @@ pub fn RepairModal(on_close: EventHandler<()>) -> Element {
 }
 
 /// Quiesce every long-running task that might hold a clone of the
-/// service Arcs, then drop the bundle. Two-phase:
+/// service Arcs, then explicitly close the SQLite pool, then drop the
+/// bundle. Three-phase:
 ///
 ///   1. Abort the auto-retry worker. It is the only task spawned with
 ///      the engine handle that lives forever; aborting it releases its
 ///      `Arc<UploadEngine>` (and transitively `Arc<Database>`).
-///   2. Log the strong counts of the load-bearing Arcs *before* the
-///      drop. `db` is the primary signal — it gates the WAL/SHM file
-///      lock — but we also log `upload_engine` and `api` so a future
-///      leak in either path shows up in traces. A count > 1 here means
-///      a task we don't know about is still holding a clone, and the
-///      blocking wipe that follows will race against an open pool.
+///   2. Drive `SqlitePool::close` on the database. `Database` is held
+///      inside `Arc<Database>` and cloned widely (CoreServices, the
+///      engine, the Dioxus context provider, AuthedShell prop). We
+///      can't drop every clone from here — the UI tree still owns
+///      some — but `Pool::close` runs SQLite's `xClose` on every
+///      pooled connection regardless, releasing the file/WAL/SHM
+///      locks. Without this, `wipe_db` raced the still-open pool and
+///      the deleted sidecars came back during the wipe.
+///   3. Log the strong counts of the load-bearing Arcs. `db` is now
+///      decoupled from the on-disk files (the pool is closed); the
+///      counts are diagnostic — anything > 1 means a task or context
+///      provider is still holding a clone, which is benign for the
+///      wipe but worth tracing for future leaks.
 async fn shutdown_services(services: Option<CoreServices>) {
     let Some(svcs) = services else {
         return;
@@ -303,9 +311,16 @@ async fn shutdown_services(services: Option<CoreServices>) {
         }
     }
 
-    // Phase 2: log strong counts before drop. We expect 1 across the
-    // board after the abort settles — anything higher is a real leak
-    // worth investigating, not a benign reference.
+    // Phase 2: close the SQLite pool. After this returns, every
+    // pooled connection has been `xClose`d and the file locks are
+    // gone — even though sibling `Arc<Database>` clones outlive this
+    // call.
+    svcs.db.close().await;
+
+    // Phase 3: log strong counts as a diagnostic. The wipe is safe
+    // regardless because the pool is now closed; the counts only
+    // tell us whether new Arc-leak paths opened up since the last
+    // audit.
     let db_strong = Arc::strong_count(&svcs.db);
     let engine_strong = Arc::strong_count(&svcs.upload_engine);
     let api_strong = Arc::strong_count(&svcs.api);

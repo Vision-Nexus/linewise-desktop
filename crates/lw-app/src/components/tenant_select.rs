@@ -39,11 +39,24 @@ pub fn TenantSelector() -> Element {
             option { value: "", disabled: true, selected: selected_id.is_empty(), "Select Organization" }
 
             for tenant in tenants.iter() {
-                option {
-                    key: "{tenant.id}",
-                    value: "{tenant.id}",
-                    selected: tenant.id == selected_id,
-                    "{tenant.display_name}"
+                {
+                    // Native <option> can't render rich children, so the
+                    // vision-lab badge gets folded into the label as a
+                    // bracketed prefix here. Keep the marker in sync
+                    // with the Sidebar's `VisionLabBadge` component.
+                    let label = if tenant.is_in_group("vision-lab") {
+                        format!("[VL] {}", tenant.display_name)
+                    } else {
+                        tenant.display_name.clone()
+                    };
+                    rsx! {
+                        option {
+                            key: "{tenant.id}",
+                            value: "{tenant.id}",
+                            selected: tenant.id == selected_id,
+                            "{label}"
+                        }
+                    }
                 }
             }
         }

@@ -1,6 +1,27 @@
 use crate::state::{AppState, CoreServices};
 use dioxus::prelude::*;
 
+/// Group id used by the backend for vision-lab tenants. Matches
+/// `parentGroupId` values returned in `TenantInfo`. Hardcoded here on
+/// purpose: the desktop client tags this one group specifically; a
+/// future second group would be added as a peer constant rather than
+/// generalized.
+const VISION_LAB_GROUP_ID: &str = "vision-lab";
+
+/// Small "VL" pill rendered next to the display name for tenants in
+/// the vision-lab group. Visual cue only — no behavioral effect.
+#[component]
+fn VisionLabBadge() -> Element {
+    rsx! {
+        span {
+            class: "shrink-0 text-[10px] font-semibold tracking-wider \
+                    px-1.5 py-0.5 rounded bg-primary/10 text-primary",
+            title: "vision-lab tenant",
+            "VL"
+        }
+    }
+}
+
 /// Left sidebar — tenant list in the first column, project list in the
 /// second. Only renders after sign-in (mounted inside `MainView`), so the
 /// per-tenant project pre-fetch kicks off with a populated tenant list.
@@ -152,10 +173,11 @@ pub fn Sidebar() -> Element {
                                 "text-foreground hover:bg-accent"
                             };
                             let tenant_clone = tenant.clone();
+                            let is_vision_lab = tenant.is_in_group(VISION_LAB_GROUP_ID);
                             rsx! {
                                 div {
                                     key: "{tenant.id}",
-                                    class: "px-3 py-2 mx-2 rounded cursor-pointer text-sm transition-colors truncate {active_class}",
+                                    class: "px-3 py-2 mx-2 rounded cursor-pointer text-sm transition-colors flex items-center gap-1.5 min-w-0 {active_class}",
                                     onclick: move |_| {
                                         let changing = app_state.selected_tenant.read().as_ref().map(|t| t.id.clone()) != Some(tenant_clone.id.clone());
                                         app_state.selected_tenant.set(Some(tenant_clone.clone()));
@@ -163,7 +185,13 @@ pub fn Sidebar() -> Element {
                                             app_state.selected_project.set(None);
                                         }
                                     },
-                                    "{tenant.display_name}"
+                                    span {
+                                        class: "truncate min-w-0",
+                                        "{tenant.display_name}"
+                                    }
+                                    if is_vision_lab {
+                                        VisionLabBadge {}
+                                    }
                                 }
                             }
                         }
