@@ -231,12 +231,12 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             server: ServerConfig {
-                environment: Environment::Production,
+                environment: default_environment(),
             },
             upload: UploadConfig {
                 auto_clean: false,
                 bandwidth_limit_mbps: 0,
-                max_concurrent_uploads: 3,
+                max_concurrent_uploads: 2,
                 chunk_size_mb: 8,
             },
             desensitization: DesensitizationConfig {
