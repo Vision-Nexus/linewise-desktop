@@ -210,6 +210,27 @@ pub enum VersionCheckError {
     },
 }
 
+/// Failure modes for the title-bar Repair flow. Surfaces enough context
+/// (which path, which slice) for the modal to render an actionable error
+/// row instead of a generic "wipe failed" message.
+#[derive(Debug, thiserror::Error)]
+pub enum RepairError {
+    #[error("Failed to remove {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Database reset failed: {0}")]
+    Db(#[from] DbError),
+    /// The repair task itself panicked or was cancelled by the runtime.
+    /// We can't tell which slices succeeded and which didn't — the
+    /// reported state for any selected slice is "unknown", not a
+    /// fabricated I/O failure.
+    #[error("Repair task did not complete: {reason} (state of selected slices unknown)")]
+    TaskPanicked { reason: String },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("Auth error: {0}")]

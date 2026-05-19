@@ -40,6 +40,50 @@ pub fn Sidebar() -> Element {
         }
     });
 
+    // Re-fetch the selected tenant's projects whenever the org changes, so a
+    // teammate creating or removing a project on the server shows up without
+    // an app restart. The mount-time loop above seeds every tenant once;
+    // this effect keeps the active tenant's slice fresh across switches.
+    let selected_tenant_id_for_refetch = app_state
+        .selected_tenant
+        .read()
+        .as_ref()
+        .map(|t| t.id.clone());
+    let api_for_refetch = services.api.clone();
+    let mut app_state_refetch = app_state.clone();
+    use_effect(use_reactive!(|selected_tenant_id_for_refetch| {
+        let Some(tenant_id) = selected_tenant_id_for_refetch.clone() else {
+            return;
+        };
+        let api = api_for_refetch.clone();
+        spawn(async move {
+            match api.list_projects(&tenant_id).await {
+                Ok(projects) => {
+                    app_state_refetch
+                        .tenant_projects
+                        .write()
+                        .insert(tenant_id.clone(), projects.clone());
+                    // Keep the flat `projects` signal coherent when this
+                    // tenant is the one currently selected — older readers
+                    // still consult it for the active-tenant project list.
+                    let still_selected = app_state_refetch
+                        .selected_tenant
+                        .read()
+                        .as_ref()
+                        .map(|t| t.id == tenant_id)
+                        .unwrap_or(false);
+                    if still_selected {
+                        app_state_refetch.projects.set(projects);
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    tenant_id = %tenant_id,
+                    "Project re-fetch on org switch failed: {e}"
+                ),
+            }
+        });
+    }));
+
     let selected_tenant = app_state.selected_tenant.read().clone();
     let selected_tenant_id = selected_tenant
         .as_ref()

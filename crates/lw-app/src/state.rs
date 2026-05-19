@@ -9,7 +9,8 @@ use lw_core::upload::{UploadEngine, UploadEvent};
 use lw_core::version_check::VersionStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as TokioMutex, mpsc};
+use tokio::task::JoinHandle;
 
 const FIREBASE_API_KEY: &str = "AIzaSyDqUP3c44v-S22hyPJdjSTCNAFai_-3914";
 // OAuth client IDs for Google and Microsoft. These are "installed app" /
@@ -34,7 +35,15 @@ pub struct CoreServices {
     pub db: Arc<Database>,
     pub upload_engine: Arc<UploadEngine>,
     pub config: AppConfig,
-    pub event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<UploadEvent>>>,
+    pub event_rx: Arc<TokioMutex<mpsc::UnboundedReceiver<UploadEvent>>>,
+    /// Handle for the long-running auto-retry task spawned in `init()`.
+    /// Wrapped in `Arc<Mutex<Option<…>>>` so the bundle stays `Clone`
+    /// (Dioxus props need it) while still letting the Repair flow
+    /// abort the worker before wiping the SQLite files. The task holds
+    /// `Arc<UploadEngine>` and therefore `Arc<Database>`, so leaving it
+    /// alive across `Database::reset_local_files` would let the pool
+    /// recreate WAL/SHM sidecars mid-wipe.
+    pub auto_retry_handle: Arc<TokioMutex<Option<JoinHandle<()>>>>,
 }
 
 /// Identity-based equality for Dioxus prop memoization. Two `CoreServices`
@@ -95,8 +104,11 @@ impl CoreServices {
             config.upload.max_concurrent_uploads,
         ));
 
-        // Spawn background auto-retry for failed uploads on network recovery
-        upload_engine.spawn_auto_retry();
+        // Spawn background auto-retry for failed uploads on network
+        // recovery. We hold onto the JoinHandle so the Repair flow can
+        // abort the worker before wiping the SQLite files — see the
+        // doc comment on `auto_retry_handle`.
+        let auto_retry = upload_engine.spawn_auto_retry();
 
         tracing::info!("core services ready");
         Ok(Self {
@@ -105,7 +117,8 @@ impl CoreServices {
             db,
             upload_engine,
             config,
-            event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
+            event_rx: Arc::new(TokioMutex::new(event_rx)),
+            auto_retry_handle: Arc::new(TokioMutex::new(Some(auto_retry))),
         })
     }
 }
@@ -124,6 +137,10 @@ pub struct AppState {
     pub error_message: Signal<Option<String>>,
     pub auth_token: Signal<String>,
     pub show_settings: Signal<bool>,
+    /// Title-bar Repair affordance: when true, the repair modal renders
+    /// over the app shell. Reachable independent of auth state — a wedged
+    /// app needs this even when sign-in itself is failing.
+    pub show_repair: Signal<bool>,
     pub toast: Signal<Option<Toast>>,
     pub services: Signal<Option<CoreServices>>,
     /// Live, in-memory `AppConfig`. Settings panes write through
@@ -221,6 +238,7 @@ impl AppState {
             error_message: Signal::new(None),
             auth_token: Signal::new(String::new()),
             show_settings: Signal::new(false),
+            show_repair: Signal::new(false),
             toast: Signal::new(None),
             services: Signal::new(None),
             config: Signal::new(AppConfig::default()),

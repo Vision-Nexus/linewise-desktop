@@ -266,11 +266,42 @@ fn read_atom_header(
         n => (u64::from(n), HEADER_LEN),
     };
 
-    if size < header_len || offset.checked_add(size).is_none_or(|end| end > total_size) {
-        tracing::warn!(offset, size, total_size, "atom has bogus size");
+    // Two distinct failure modes share this size check, and they read very
+    // differently to a videographer. `size < header_len` means the header
+    // bytes themselves are nonsense — the atom claims to occupy fewer bytes
+    // than it already consumed. `offset + size > total_size` means the
+    // header is well-formed but the payload runs past EOF: the recording
+    // was interrupted before the camera finished writing media. Surface
+    // them as separate reasons so the rejection card says "truncated"
+    // when the file is truncated rather than the more alarming "bogus
+    // size".
+    if size < header_len {
+        tracing::warn!(
+            offset,
+            size,
+            header_len,
+            "atom header declares smaller-than-header size"
+        );
         return Err(VideoValidationError::Unplayable {
             reason: format!(
-                "atom at offset {offset} has bogus size {size} (file ends at {total_size})"
+                "atom at offset {offset} declares size {size}, smaller than its {header_len}-byte header"
+            ),
+        });
+    }
+    if offset.checked_add(size).is_none_or(|end| end > total_size) {
+        let remaining = total_size.saturating_sub(offset);
+        let fourcc_str = std::str::from_utf8(&fourcc).expect("fourcc is ASCII per the check above");
+        tracing::warn!(
+            offset,
+            declared_size = size,
+            remaining,
+            total_size,
+            fourcc = fourcc_str,
+            "file is truncated — atom extends past EOF",
+        );
+        return Err(VideoValidationError::Unplayable {
+            reason: format!(
+                "file is truncated: '{fourcc_str}' atom at offset {offset} declares {size} bytes but only {remaining} remain (file size {total_size})"
             ),
         });
     }
@@ -508,8 +539,8 @@ mod tests {
         match result {
             Err(VideoValidationError::Unplayable { reason }) => {
                 assert!(
-                    reason.contains("bogus size"),
-                    "expected bogus-size message, got: {reason}"
+                    reason.contains("smaller than"),
+                    "expected smaller-than-header message, got: {reason}"
                 );
             }
             other => panic!("expected Unplayable, got {other:?}"),
@@ -541,11 +572,56 @@ mod tests {
         match result {
             Err(VideoValidationError::Unplayable { reason }) => {
                 assert!(
-                    reason.contains("bogus size") || reason.contains("overflows"),
-                    "expected size-mismatch message, got: {reason}"
+                    reason.contains("truncated"),
+                    "expected truncated message, got: {reason}"
+                );
+                assert!(
+                    reason.contains("moov"),
+                    "expected fourcc in reason, got: {reason}"
                 );
             }
             other => panic!("expected Unplayable for truncated moov, got {other:?}"),
+        }
+    }
+
+    /// Faststart layout where `mdat` is well-formed at the header but its
+    /// declared payload runs past EOF — the production-camera failure mode
+    /// captured at /tmp/ns-debug/source.bin. The rejection reason must read
+    /// "truncated" with the fourcc, not the legacy "bogus size".
+    #[test]
+    fn truncated_mdat_past_eof_reads_as_truncated() {
+        let ftyp = ftyp_atom();
+        let moov = small_atom(b"moov", 64);
+
+        // mdat header claims (HEADER_LEN + 1 MiB) bytes, but we only write
+        // 200 bytes of payload — the file ends mid-mdat.
+        let declared_size: u32 = HEADER_LEN as u32 + 1024 * 1024;
+        let mut mdat = Vec::new();
+        mdat.extend_from_slice(&declared_size.to_be_bytes());
+        mdat.extend_from_slice(b"mdat");
+        mdat.extend(std::iter::repeat_n(0u8, 200));
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&ftyp);
+        bytes.extend_from_slice(&moov);
+        bytes.extend_from_slice(&mdat);
+
+        let path = write_temp("truncated-mdat", &bytes);
+        let result = extract_atom_chunks(&path);
+        let _ = std::fs::remove_file(&path);
+
+        match result {
+            Err(VideoValidationError::Unplayable { reason }) => {
+                assert!(
+                    reason.contains("truncated"),
+                    "expected truncated wording, got: {reason}"
+                );
+                assert!(
+                    reason.contains("mdat"),
+                    "expected fourcc in reason, got: {reason}"
+                );
+            }
+            other => panic!("expected Unplayable for truncated mdat, got {other:?}"),
         }
     }
 

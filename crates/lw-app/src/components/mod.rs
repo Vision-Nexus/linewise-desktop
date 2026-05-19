@@ -3,6 +3,7 @@ pub mod general_settings;
 pub mod login;
 pub mod progress;
 pub mod project_select;
+pub mod repair_modal;
 pub mod settings_modal;
 pub mod sheet;
 pub mod sidebar;

@@ -174,6 +174,20 @@ pub fn App() -> Element {
                     }
                 }
             }
+
+            // Global repair modal — mounted at the shell level (not under
+            // AuthedShell/MainView) so the trigger from the title bar
+            // works during Initializing, Failed, login, and authed
+            // states. Repair is recovery-only; it must reach a wedged
+            // app even before sign-in completes.
+            if *app_state_for_block.show_repair.read() {
+                crate::components::repair_modal::RepairModal {
+                    on_close: {
+                        let mut app_state = app_state_for_block.clone();
+                        move |_| app_state.show_repair.set(false)
+                    },
+                }
+            }
         }
     }
 }
@@ -401,6 +415,9 @@ fn MainView() -> Element {
                     on_close: move |_| app_state.show_settings.set(false),
                 }
             }
+
+            // Repair modal lives at the shell level (see app.rs root) so
+            // it stays reachable during boot/login.
         }
     }
 }

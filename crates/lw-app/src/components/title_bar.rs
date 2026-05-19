@@ -56,17 +56,22 @@ pub fn TitleBar() -> Element {
             onmousedown: move |_| begin_drag(),
             ondoubleclick: move |_| toggle_maximize(),
 
-            // Left cluster — logo
+            // Left cluster — logo plus Repair. Repair sits next to the
+            // logo (rather than in the right cluster) so it stays
+            // reachable independent of auth: a wedged app needs this
+            // button before sign-in completes, and grouping it with the
+            // user/settings cluster would imply otherwise.
             div {
-                class: "{logo_padding} flex items-center shrink-0",
+                class: "{logo_padding} flex items-center gap-1 shrink-0",
                 crate::icons::LinewiseLogo { width: "96" }
+                RepairButton {}
             }
 
             // Drag spacer — flex-1 so it fills the middle. Intentionally
             // does NOT stop propagation so the empty region drags the window.
             div { class: "flex-1 h-full" }
 
-            // Right cluster — settings + user menu (auth-gated)
+            // Right cluster — settings + user menu (auth-gated).
             if is_authenticated {
                 SettingsButton {}
                 UserMenuButton {}
@@ -75,6 +80,21 @@ pub fn TitleBar() -> Element {
             if show_custom_controls {
                 WindowControls {}
             }
+        }
+    }
+}
+
+#[component]
+fn RepairButton() -> Element {
+    let mut app_state = use_context::<AppState>();
+    rsx! {
+        button {
+            class: "w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive appearance-none border-none bg-transparent cursor-pointer",
+            title: "Repair — reset local app data",
+            aria_label: "Open repair",
+            onmousedown: move |e| e.stop_propagation(),
+            onclick: move |_| app_state.show_repair.set(true),
+            crate::icons::WrenchIcon {}
         }
     }
 }
