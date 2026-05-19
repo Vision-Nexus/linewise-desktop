@@ -231,7 +231,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             server: ServerConfig {
-                environment: Environment::Dev,
+                environment: Environment::Production,
             },
             upload: UploadConfig {
                 auto_clean: false,
