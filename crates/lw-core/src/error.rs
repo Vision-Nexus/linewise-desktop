@@ -69,7 +69,7 @@ pub enum UploadError {
         kind_label = kind.human_label()
     )]
     UnsupportedContainer { kind: ContainerKind },
-    /// The reconstructed metadata payload exceeds the 8 MiB hard cap.
+    /// The reconstructed metadata payload exceeds the 16 MiB hard cap.
     /// Real-world camera output sits well below 1 MiB, so this almost
     /// always means the input was a fragmented or pathologically-shaped
     /// container the desktop can't summarise without sending media bytes.
@@ -154,7 +154,7 @@ pub enum VideoValidationError {
     /// playable timeline and never will.
     #[error("Video is unplayable: {reason}")]
     Unplayable { reason: String },
-    /// The reconstructed metadata payload would exceed the 8 MiB hard
+    /// The reconstructed metadata payload would exceed the 16 MiB hard
     /// cap. Real-world camera output stays well below 1 MiB, so this
     /// almost always means a malformed input. We refuse to ship the
     /// payload in this case.

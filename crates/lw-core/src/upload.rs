@@ -235,7 +235,7 @@ impl UploadEngine {
     ///   * `VideoUnplayable` — no `moov` atom, surfaced before any
     ///     network call so power-cut recordings fail fast.
     ///   * `QualityCheckPayloadTooLarge` — assembled head-bytes exceed
-    ///     the 8 MiB cap. Real-world camera output stays well under
+    ///     the 16 MiB cap. Real-world camera output stays well under
     ///     this; hitting it means the input is malformed.
     ///   * `QualityCheckOffline` — server unreachable. Hard cutover
     ///     means we cannot fall back to a local rule check.
