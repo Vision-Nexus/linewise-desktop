@@ -124,6 +124,16 @@ pub struct DedupCheckRequest<'a> {
 pub struct DedupCheckMatch {
     pub document_id: String,
     pub project_id: String,
+    /// Tenant the document lives in. For same-tenant matches this
+    /// equals the calling tenant (redundant with the URL but kept
+    /// for symmetry with cross-tenant payloads). The desktop joins
+    /// this against its locally-cached `whoami` tenant list to
+    /// render a friendly display name.
+    pub tenant_id: String,
+    /// Linewise UserId (UUID) of the original uploader. Lets the
+    /// client tell "you uploaded this" apart from "a teammate
+    /// uploaded this" without a follow-up document GET.
+    pub creator_id: String,
     pub document_created_at: String,
 }
 
@@ -134,10 +144,12 @@ pub struct DedupCheckResult {
     /// Documents in the calling tenant carrying this hash, restricted
     /// to projects the caller can read.
     pub tenant_matches: Vec<DedupCheckMatch>,
-    /// Distinct documents the same calling user uploaded with this
-    /// hash in other tenants they belong to. A count, not a list —
-    /// other tenants' project structure is intentionally not exposed.
-    pub user_other_tenant_count: u64,
+    /// Distinct tenants OTHER than the calling tenant in which the
+    /// same calling user uploaded this hash. IDs only — other
+    /// tenants' project structure is intentionally not exposed.
+    /// The desktop maps each id to its locally-known tenant
+    /// `display_name` from `whoami`.
+    pub user_other_tenant_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
