@@ -20,6 +20,8 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 blake3 = { workspace = true }
 md-5 = { workspace = true }
+crc32c = { workspace = true }
+sha2 = { workspace = true }
 async-stream = { workspace = true }
 futures-core = { workspace = true }
 tokio-stream = { workspace = true }

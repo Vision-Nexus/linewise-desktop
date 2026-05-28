@@ -47,6 +47,16 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 blake3 = "1"
 md-5 = "0.10"
+# CRC32C (Castagnoli) for the GCS-shape `Digest.crc32c` leg sent on
+# `POST /documents`. Streaming via `crc32c_append`; SSE4.2 / ARMv8 CRC
+# instructions in release builds. Wire-format compatibility with
+# linewise-api's `Crc32c` opaque type — no equivalent in the existing
+# hash crates.
+crc32c = "0.6"
+# SHA-256 over the first 256 KiB of the source file for the
+# `Digest.sha256_head_256kib` leg. RustCrypto family, same shape as the
+# existing `md-5 = "0.10"` dep.
+sha2 = "0.10"
 dirs = "6"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 backon = "1"

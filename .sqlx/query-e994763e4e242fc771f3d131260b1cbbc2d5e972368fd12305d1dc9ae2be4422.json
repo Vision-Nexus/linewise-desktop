@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE upload_queue\n             SET hash = ?, source_md5 = ?, source_crc32c = ?, source_sha256_head_256kib = ?,\n                 updated_at = datetime('now')\n             WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "e994763e4e242fc771f3d131260b1cbbc2d5e972368fd12305d1dc9ae2be4422"
+}

@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::dedup::FileHashes;
 use crate::error::DbError;
 use crate::models::{UploadState, UploadTask};
 use sqlx::SqlitePool;
@@ -28,6 +29,8 @@ struct UploadRow {
     error_message: Option<String>,
     hash: Option<String>,
     source_md5: Option<String>,
+    source_crc32c: Option<String>,
+    source_sha256_head_256kib: Option<String>,
     validation_warnings: Option<String>,
     rejection_reasons: Option<String>,
     retry_count: Option<i64>,
@@ -60,6 +63,8 @@ impl From<UploadRow> for UploadTask {
             error_message: r.error_message,
             hash: r.hash,
             source_md5: r.source_md5,
+            source_crc32c: r.source_crc32c,
+            source_sha256_head_256kib: r.source_sha256_head_256kib,
             validation_warnings: warnings,
             rejection_reasons,
             retry_count: r.retry_count.unwrap_or(0) as u32,
@@ -176,8 +181,8 @@ impl Database {
         let transcode = i64::from(task.transcode);
         let force_upload = i64::from(task.force_upload);
         sqlx::query!(
-            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, source_md5, validation_warnings, rejection_reasons, video_info, transcode, force_upload)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, video_info, transcode, force_upload)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             task.id,
             task.local_path,
             task.filename,
@@ -188,6 +193,8 @@ impl Database {
             state,
             task.hash,
             task.source_md5,
+            task.source_crc32c,
+            task.source_sha256_head_256kib,
             warnings_json,
             reasons_json,
             video_info_json,
@@ -299,39 +306,23 @@ impl Database {
         Ok(())
     }
 
-    /// Persist the source-file MD5 once it has been computed at staging
-    /// time. Separated from [`insert_upload_task`] so a task that was
-    /// inserted before the hash pass finishes can be updated in place
-    /// without re-writing every column.
-    pub async fn update_upload_source_md5(
-        &self,
-        id: &str,
-        source_md5: &str,
-    ) -> Result<(), DbError> {
+    /// Persist all four legs of the staging-time hash pass in one write
+    /// (BLAKE3 + MD5 + CRC32C + SHA-256-head). Used by the staging-time
+    /// hash worker — separate writes would race with
+    /// `update_upload_state` flipping the row to `Staged` / `Rejected`,
+    /// and could leave a row half-written if the app crashes mid-update.
+    /// Takes the full [`FileHashes`] by reference so the four hex
+    /// strings are guaranteed to come from the same I/O pass.
+    pub async fn update_upload_hashes(&self, id: &str, h: &FileHashes) -> Result<(), DbError> {
         sqlx::query!(
-            "UPDATE upload_queue SET source_md5 = ?, updated_at = datetime('now') WHERE id = ?",
-            source_md5,
-            id,
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Persist BLAKE3 + MD5 in a single write once the hash stream
-    /// has finished. Used by the staging-time hash worker — separate
-    /// writes would race with `update_upload_state` flipping the row
-    /// to `Staged` / `Rejected`.
-    pub async fn update_upload_hashes(
-        &self,
-        id: &str,
-        blake3_hex: &str,
-        md5_hex: &str,
-    ) -> Result<(), DbError> {
-        sqlx::query!(
-            "UPDATE upload_queue SET hash = ?, source_md5 = ?, updated_at = datetime('now') WHERE id = ?",
-            blake3_hex,
-            md5_hex,
+            "UPDATE upload_queue
+             SET hash = ?, source_md5 = ?, source_crc32c = ?, source_sha256_head_256kib = ?,
+                 updated_at = datetime('now')
+             WHERE id = ?",
+            h.blake3_hex,
+            h.md5_hex,
+            h.crc32c_b64,
+            h.sha256_head_256kib_hex,
             id,
         )
         .execute(&self.pool)
@@ -435,7 +426,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
              WHERE state = 'FAILED'
                AND retry_count < 10
@@ -457,7 +448,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -471,7 +462,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
              WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
              ORDER BY created_at ASC",
@@ -489,7 +480,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue ORDER BY created_at DESC LIMIT 100",
         )
         .fetch_all(&self.pool)
