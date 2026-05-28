@@ -6,7 +6,7 @@ use crate::dedup;
 use crate::desensitize;
 use crate::error::{DbError, UploadError, VideoValidationError};
 use crate::models::{
-    Acceptance, CreateDocumentMeta, CreateDocumentRequest, Digest, UploadState, UploadTask,
+    Acceptance, CreateDocumentMeta, CreateDocumentRequest, Digest, Tenant, UploadState, UploadTask,
 };
 use crate::storage::{self, StorageBackend};
 use crate::transcode;
@@ -15,7 +15,7 @@ use crate::video_head;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OnceCell, Semaphore, mpsc};
 use uuid::Uuid;
 
 /// Classify a file path as video by sniffing its MIME type from the
@@ -34,6 +34,26 @@ pub fn looks_like_video(path: &Path) -> bool {
 enum PostHashVerdict {
     Stage,
     Reject(Vec<String>),
+}
+
+/// Outcome of the cross-tenant dedup check. Three-way to model the
+/// "resume an abandoned same-user upload" branch:
+///
+///   * `Allow` — no match, or all matches are someone else's; staging
+///     proceeds and `process_task` will create a fresh document.
+///   * `Reuse(document_id)` — a tenant match exists whose
+///     `creator_id` is the current user AND whose `gcs_uri` is null
+///     (the document row was created but the blob was never
+///     uploaded). Staging stamps the task with this id so Stage 4
+///     skips `create_document` and the existing resumable-upload
+///     machinery picks up where the abandoned attempt left off.
+///   * `Reject(reason)` — the match is real and not recoverable
+///     by reuse; the row goes to `Rejected` with `reason` shown to
+///     the user.
+enum DedupVerdict {
+    Allow,
+    Reuse(String),
+    Reject(String),
 }
 
 /// Events emitted by the upload engine to the UI
@@ -120,6 +140,24 @@ pub struct UploadEngine {
     transcode_config: TranscodeConfig,
     chunk_size: u64,
     upload_semaphore: Arc<Semaphore>,
+    /// Lazy-cached `whoami` snapshot for the logged-in user, populated
+    /// on the first dedup check that needs it. The engine is built
+    /// before login, so we can't pass it through the constructor; the
+    /// API client is already authenticated by the time staging runs,
+    /// so a one-shot `whoami` round-trip is fine. Failure is
+    /// non-fatal — same-user reuse and cross-tenant naming both fall
+    /// back to less-rich behaviour, mirroring how a transient API
+    /// outage is handled.
+    current_user_cache: OnceCell<CurrentUserCache>,
+}
+
+/// What the dedup gate needs from the logged-in user: their Linewise
+/// UserId (matched against `creatorId` for the reuse branch) and the
+/// list of tenants they belong to (used to render display names in
+/// the cross-tenant rejection message).
+struct CurrentUserCache {
+    user_id: String,
+    tenants: Vec<Tenant>,
 }
 
 impl UploadEngine {
@@ -145,7 +183,34 @@ impl UploadEngine {
             transcode_config,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
+            current_user_cache: OnceCell::new(),
         }
+    }
+
+    /// Return the cached `whoami` snapshot, fetching it on first call
+    /// and reusing it for the engine's lifetime. `None` on whoami
+    /// failure or when the response has no `user` (Firebase-only auth
+    /// without a tenant join). Callers MUST treat `None` as "skip the
+    /// same-user reuse branch and fall back to a generic cross-tenant
+    /// message" rather than as an error — the rest of the dedup gate
+    /// still works.
+    async fn current_user_cache(&self) -> Option<&CurrentUserCache> {
+        self.current_user_cache
+            .get_or_try_init(|| async {
+                let resp = self.api.whoami().await.map_err(|e| {
+                    tracing::warn!("whoami failed during dedup check: {e}");
+                })?;
+                let Some(user) = resp.user else {
+                    tracing::warn!("whoami returned no user — skipping reuse branch");
+                    return Err(());
+                };
+                Ok(CurrentUserCache {
+                    user_id: user.id,
+                    tenants: user.tenant_infos.unwrap_or_default(),
+                })
+            })
+            .await
+            .ok()
     }
 
     /// Update the auto-clean flag at runtime. Takes effect on the next
@@ -170,7 +235,7 @@ impl UploadEngine {
     ///   * `VideoUnplayable` — no `moov` atom, surfaced before any
     ///     network call so power-cut recordings fail fast.
     ///   * `QualityCheckPayloadTooLarge` — assembled head-bytes exceed
-    ///     the 8 MiB cap. Real-world camera output stays well under
+    ///     the 16 MiB cap. Real-world camera output stays well under
     ///     this; hitting it means the input is malformed.
     ///   * `QualityCheckOffline` — server unreachable. Hard cutover
     ///     means we cannot fall back to a local rule check.
@@ -495,14 +560,35 @@ impl UploadEngine {
 
         let mut rejection_reasons: Vec<String> = Vec::new();
         let final_state = match self
-            .dedup_reject_reason(tenant_id, &hashes.md5_hex, task_id)
+            .dedup_verdict(tenant_id, &hashes.md5_hex, task_id)
             .await
         {
-            Some(reason) => {
+            DedupVerdict::Allow => UploadState::Staged,
+            DedupVerdict::Reuse(document_id) => {
+                // Stamp the abandoned upload's document_id onto the row
+                // so Stage 4 in `process_task` skips `create_document`
+                // and the resumable-upload machinery picks the existing
+                // GCS object. A failure here drops us back to the
+                // regular staging path — the worst case is the row gets
+                // a fresh document on retry, which is the pre-feature
+                // behaviour, so we don't escalate to Rejected.
+                if let Err(e) = self
+                    .db
+                    .update_upload_document_id(task_id, &document_id)
+                    .await
+                {
+                    tracing::warn!(
+                        task_id,
+                        document_id,
+                        "dedup: failed to persist reused document_id, falling back to fresh create: {e}"
+                    );
+                }
+                UploadState::Staged
+            }
+            DedupVerdict::Reject(reason) => {
                 rejection_reasons.push(reason);
                 UploadState::Rejected
             }
-            None => UploadState::Staged,
         };
 
         self.settle_post_hash(task_id, final_state, warnings, rejection_reasons)
@@ -619,24 +705,27 @@ impl UploadEngine {
     }
 
     /// Ask the cross-tenant dedup registry whether this MD5 is already
-    /// known. Returns `Some(reason)` if the row should be rejected,
-    /// `None` otherwise. A network / API failure swallows the error
-    /// and returns `None` so a transient outage doesn't block staging
-    /// — the worst case is the user uploads a duplicate, which is the
+    /// known and decide what staging should do with the row.
+    ///
+    /// The three outcomes are spelled out on [`DedupVerdict`]. A network
+    /// or API failure on the dedup check itself swallows the error and
+    /// returns `Allow` so a transient outage doesn't block staging — the
+    /// worst case is the user uploads a duplicate, which is the
     /// pre-feature behaviour.
-    async fn dedup_reject_reason(
-        &self,
-        tenant_id: &str,
-        md5_hex: &str,
-        filename: &str,
-    ) -> Option<String> {
-        // The cross-tenant dedup registry is intentionally md5-keyed
-        // even after the multi-signal-digest migration: the registry
-        // table predates `Digest` and is shared with the historical
-        // GCS-callback md5 path. The asymmetry is by design — the new
-        // crc32c / sha256_head_256kib legs ride on `create_document`
-        // for the per-document `document_digests` row, not on the
-        // cross-tenant dedup gate.
+    ///
+    /// The `Reuse` branch costs one extra `GET /documents/{id}` per
+    /// same-user candidate match (to read `gcs_uri`); we stop at the
+    /// first reusable hit. Other-user matches and other-tenant counts
+    /// fall through to the existing `Reject` paths unchanged.
+    ///
+    /// The cross-tenant dedup registry is intentionally md5-keyed even
+    /// after the multi-signal-digest migration: the registry table
+    /// predates `Digest` and is shared with the historical GCS-callback
+    /// md5 path. The asymmetry is by design — the new crc32c /
+    /// sha256_head_256kib legs ride on `create_document` for the
+    /// per-document `document_digests` row, not on the cross-tenant
+    /// dedup gate.
+    async fn dedup_verdict(&self, tenant_id: &str, md5_hex: &str, filename: &str) -> DedupVerdict {
         let resp = match self
             .api
             .check_dedup(tenant_id, std::slice::from_ref(&md5_hex.to_string()))
@@ -645,7 +734,7 @@ impl UploadEngine {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::warn!("Dedup check failed for {filename}: {e}");
-                return None;
+                return DedupVerdict::Allow;
             }
         };
         let total_results = resp.results.len();
@@ -657,10 +746,10 @@ impl UploadEngine {
                 total_results,
                 "dedup: no row in response matched our md5 — treating as not-a-duplicate"
             );
-            return None;
+            return DedupVerdict::Allow;
         };
         let tenant_match_count = result.tenant_matches.len();
-        let user_other_tenant_count = result.user_other_tenant_count;
+        let user_other_tenant_count = result.user_other_tenant_ids.len();
         tracing::debug!(
             md5 = md5_hex,
             tenant_id,
@@ -670,16 +759,93 @@ impl UploadEngine {
             "dedup: registry response"
         );
         if tenant_match_count == 0 && user_other_tenant_count == 0 {
-            return None;
+            return DedupVerdict::Allow;
         }
-        if tenant_match_count > 0 {
-            let plural = if tenant_match_count == 1 { "" } else { "s" };
-            Some(format!(
-                "Already uploaded in this tenant ({tenant_match_count} document{plural})",
-            ))
-        } else {
-            Some("You uploaded this file in another tenant".to_string())
+        if tenant_match_count == 0 {
+            return DedupVerdict::Reject(
+                self.cross_tenant_message(&result.user_other_tenant_ids)
+                    .await,
+            );
         }
+        if let Some(reuse_id) = self
+            .find_reusable_tenant_match(tenant_id, &result.tenant_matches, filename)
+            .await
+        {
+            return DedupVerdict::Reuse(reuse_id);
+        }
+        let plural = if tenant_match_count == 1 { "" } else { "s" };
+        DedupVerdict::Reject(format!(
+            "Already uploaded in this tenant ({tenant_match_count} document{plural})",
+        ))
+    }
+
+    /// Build a friendly cross-tenant rejection message that names the
+    /// tenants where the user uploaded this file. Each ID is joined
+    /// against the cached tenant list to render the user-facing
+    /// `display_name`; an unknown ID (rare — user lost membership
+    /// since `whoami`, or the cache failed to load) falls back to the
+    /// raw ID. If the cache itself is unavailable, falls back to the
+    /// generic pre-feature wording.
+    async fn cross_tenant_message(&self, other_tenant_ids: &[String]) -> String {
+        let Some(cache) = self.current_user_cache().await else {
+            return "You uploaded this file in another tenant".to_string();
+        };
+        let names: Vec<&str> = other_tenant_ids
+            .iter()
+            .map(|id| {
+                cache
+                    .tenants
+                    .iter()
+                    .find(|t| t.id == *id)
+                    .map(|t| t.display_name.as_str())
+                    .unwrap_or(id.as_str())
+            })
+            .collect();
+        match names.as_slice() {
+            [] => "You uploaded this file in another tenant".to_string(),
+            [one] => format!("You uploaded this file in tenant '{one}'"),
+            _ => format!("You uploaded this file in tenants: {}", names.join(", ")),
+        }
+    }
+
+    /// Pick the first tenant match whose `creator_id` is the logged-in
+    /// user AND whose document still has no `gcs_uri` — i.e. the row
+    /// the user themselves started uploading earlier and never
+    /// finished. The check is per-candidate so we stop on the first
+    /// reusable hit. `None` means "no such recoverable match"; the
+    /// caller falls back to the regular Reject path.
+    async fn find_reusable_tenant_match(
+        &self,
+        tenant_id: &str,
+        matches: &[crate::models::DedupCheckMatch],
+        filename: &str,
+    ) -> Option<String> {
+        let user_id = self.current_user_cache().await?.user_id.as_str();
+        for m in matches.iter().filter(|m| m.creator_id == user_id) {
+            match self
+                .api
+                .get_document(tenant_id, &m.project_id, &m.document_id)
+                .await
+            {
+                Ok(doc) if doc.gcs_uri.is_none() => {
+                    tracing::info!(
+                        document_id = %m.document_id,
+                        project_id = %m.project_id,
+                        filename,
+                        "dedup: reusing abandoned same-user upload (gcs_uri is null)"
+                    );
+                    return Some(m.document_id.clone());
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        document_id = %m.document_id,
+                        "dedup: get_document failed, skipping reuse candidate: {e}"
+                    );
+                }
+            }
+        }
+        None
     }
 
     /// Super-admin override: flip `force_upload` on a `Rejected` task,

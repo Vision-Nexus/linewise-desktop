@@ -19,7 +19,7 @@
 //! The `moov` payload itself is shipped verbatim at its real offset.
 //!
 //! Total wire cost stays sub-1 MiB even on multi-GB camera files; we cap at
-//! [`MAX_PAYLOAD_BYTES`] (8 MiB) and bail with [`VideoValidationError::MoovTooLarge`]
+//! [`MAX_PAYLOAD_BYTES`] (16 MiB) and bail with [`VideoValidationError::MoovTooLarge`]
 //! for anything beyond.
 
 use crate::error::VideoValidationError;
@@ -28,8 +28,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Hard cap on the assembled payload. Real-world finalized clips top out
-/// near 1 MiB; anything past 8 MiB is malformed or hostile.
-pub const MAX_PAYLOAD_BYTES: u64 = 8 * 1024 * 1024;
+/// near 1 MiB; anything past 16 MiB is malformed or hostile. Bumped from
+/// 8 MiB to keep server and desktop in lockstep with the bumped backend
+/// `VideoQualityService.MaxBodyBytes`.
+pub const MAX_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Atoms below this size go on the wire in full; atoms above only ship
 /// their 8- or 16-byte header. Picked so `ftyp`, `free`, `wide`, and
@@ -490,14 +492,14 @@ mod tests {
         }
     }
 
-    /// moov payload exceeding the 8 MiB cap must reject before the
+    /// moov payload exceeding the 16 MiB cap must reject before the
     /// payload is allocated. Use a large-size moov so we can express
     /// >64 KiB without exhausting u32.
     #[test]
     fn oversized_moov_returns_too_large() {
         let ftyp = ftyp_atom();
-        // 9 MiB moov payload — well past the cap.
-        let huge_payload: u64 = 9 * 1024 * 1024;
+        // 17 MiB moov payload — well past the 16 MiB cap.
+        let huge_payload: u64 = 17 * 1024 * 1024;
         let moov = large_atom(b"moov", huge_payload);
 
         let mut bytes = Vec::new();
@@ -661,9 +663,9 @@ mod tests {
         // large-size form so its declared size can exceed FULL_COPY_THRESHOLD,
         // which means it ships header-only — to actually trip the pre-moov
         // budget we need to sit *under* the 64 KiB threshold per atom but
-        // still exceed the 8 MiB total. We use one custom small-form atom
+        // still exceed the 16 MiB total. We use one custom small-form atom
         // close to the threshold: 60 KiB, repeated enough times to clear the
-        // cap. Two such atoms are still well under 8 MiB; bumping size to
+        // cap. Two such atoms are still well under 16 MiB; bumping size to
         // ~9 MiB needs the large-size form, which would ship header-only and
         // never trip the cap — so instead we craft a single small atom
         // declared just under FULL_COPY_THRESHOLD but whose payload pushes
@@ -679,7 +681,7 @@ mod tests {
         //
         // The realistic shape this branch covers is a *sequence* of large
         // small-form atoms whose header bytes accumulate past the cap. With
-        // an 8 MiB cap and 8-byte headers per atom that's ~1M atoms — not a
+        // a 16 MiB cap and 8-byte headers per atom that's ~2M atoms — not a
         // practical input. The branch is reachable in principle but vanishingly
         // rare in practice. We validate the budget-check logic itself here
         // instead, since the structural bound makes a real-file test infeasible.
