@@ -717,12 +717,7 @@ impl UploadEngine {
     /// same-user candidate match (to read `gcs_uri`); we stop at the
     /// first reusable hit. Other-user matches and other-tenant counts
     /// fall through to the existing `Reject` paths unchanged.
-    async fn dedup_verdict(
-        &self,
-        tenant_id: &str,
-        md5_hex: &str,
-        filename: &str,
-    ) -> DedupVerdict {
+    async fn dedup_verdict(&self, tenant_id: &str, md5_hex: &str, filename: &str) -> DedupVerdict {
         let resp = match self
             .api
             .check_dedup(tenant_id, std::slice::from_ref(&md5_hex.to_string()))
@@ -759,7 +754,10 @@ impl UploadEngine {
             return DedupVerdict::Allow;
         }
         if tenant_match_count == 0 {
-            return DedupVerdict::Reject(self.cross_tenant_message(&result.user_other_tenant_ids).await);
+            return DedupVerdict::Reject(
+                self.cross_tenant_message(&result.user_other_tenant_ids)
+                    .await,
+            );
         }
         if let Some(reuse_id) = self
             .find_reusable_tenant_match(tenant_id, &result.tenant_matches, filename)
