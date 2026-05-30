@@ -2,7 +2,7 @@ use crate::auth::AuthService;
 use crate::config::Environment;
 use crate::error::UploadError;
 use crate::models::{
-    CreateDocumentRequest, DedupCheckRequest, DedupCheckResponse, DocumentResponse,
+    CreateDocumentRequest, Digest, DigestCheckRequest, DigestCheckResponse, DocumentResponse,
     PresignedUrlResponse, Project, QualityCheckResponse, WhoAmIResponse,
 };
 use crate::video_head::{AtomChunks, MAX_PAYLOAD_BYTES};
@@ -109,12 +109,13 @@ impl ApiClient {
         request: &CreateDocumentRequest,
     ) -> Result<DocumentResponse, UploadError> {
         let headers = self.auth_headers().await?;
+        let url = format!(
+            "{}/api/org/{}/projects/{}/documents",
+            self.base_url, tenant, project_id
+        );
         let resp = self
             .client
-            .post(format!(
-                "{}/api/org/{}/projects/{}/documents",
-                self.base_url, tenant, project_id
-            ))
+            .post(&url)
             .headers(headers)
             .json(request)
             .send()
@@ -212,25 +213,35 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    /// POST /api/org/{tenant}/dedup-checks
+    /// POST /api/org/{tenant}/digest-checks
     ///
-    /// Batch query against the cross-tenant MD5 dedup registry. Each
-    /// hash is a 32-char lowercase hex string. The server caps the
-    /// batch at 100 (returns 400 above that) and at minimum 1
-    /// (returns 400 on empty). Results are not guaranteed to come
-    /// back in request order — callers must correlate by `md5_hash`.
-    #[tracing::instrument(skip_all, fields(tenant = %tenant, n = md5_hashes.len()))]
-    pub async fn check_dedup(
+    /// Multi-signal (V2) cross-tenant dedup query. Each candidate carries
+    /// any subset of `{md5, crc32c, sha256_head_256kib}`; the desktop
+    /// sends one candidate with all three legs of the file's digest. The
+    /// server matches on the verified `(crc32c, sha256_head_256kib)` pair
+    /// in addition to md5, so a file uploaded via a resumable path (GCS
+    /// exposes crc32c but no md5) is still found — which the legacy
+    /// md5-only `/dedup-checks` could not do.
+    ///
+    /// The legacy `/dedup-checks` route is deliberately left in place on
+    /// the server for older desktop builds; this client no longer calls
+    /// it.
+    #[tracing::instrument(skip_all, fields(tenant = %tenant))]
+    pub async fn check_digests(
         &self,
         tenant: &str,
-        md5_hashes: &[String],
-    ) -> Result<DedupCheckResponse, UploadError> {
+        candidate: &Digest,
+    ) -> Result<DigestCheckResponse, UploadError> {
         let headers = self.auth_headers().await?;
+        let url = format!("{}/api/org/{}/digest-checks", self.base_url, tenant);
+        let body = DigestCheckRequest {
+            candidates: std::slice::from_ref(candidate),
+        };
         let resp = self
             .client
-            .post(format!("{}/api/org/{}/dedup-checks", self.base_url, tenant))
+            .post(&url)
             .headers(headers)
-            .json(&DedupCheckRequest { md5_hashes })
+            .json(&body)
             .send()
             .await?;
 
@@ -240,7 +251,7 @@ impl ApiClient {
             tracing::warn!(
                 status = status.as_u16(),
                 body = truncate(&body, 256),
-                "check_dedup non-2xx"
+                "check_digests non-2xx"
             );
             return Err(UploadError::Api {
                 status: status.as_u16(),
@@ -248,8 +259,8 @@ impl ApiClient {
             });
         }
 
-        let parsed: DedupCheckResponse = resp.json().await?;
-        tracing::debug!(results = parsed.results.len(), "dedup ok");
+        let parsed: DigestCheckResponse = resp.json().await?;
+        tracing::debug!(results = parsed.results.len(), "digest-checks ok");
         Ok(parsed)
     }
 

@@ -560,7 +560,7 @@ impl UploadEngine {
 
         let mut rejection_reasons: Vec<String> = Vec::new();
         let final_state = match self
-            .dedup_verdict(tenant_id, &hashes.md5_hex, task_id)
+            .dedup_verdict(tenant_id, &hashes, task_id)
             .await
         {
             DedupVerdict::Allow => UploadState::Staged,
@@ -704,8 +704,8 @@ impl UploadEngine {
         UploadState::Failed
     }
 
-    /// Ask the cross-tenant dedup registry whether this MD5 is already
-    /// known and decide what staging should do with the row.
+    /// Ask the cross-tenant dedup registry whether this file's digest is
+    /// already known and decide what staging should do with the row.
     ///
     /// The three outcomes are spelled out on [`DedupVerdict`]. A network
     /// or API failure on the dedup check itself swallows the error and
@@ -718,40 +718,43 @@ impl UploadEngine {
     /// first reusable hit. Other-user matches and other-tenant counts
     /// fall through to the existing `Reject` paths unchanged.
     ///
-    /// The cross-tenant dedup registry is intentionally md5-keyed even
-    /// after the multi-signal-digest migration: the registry table
-    /// predates `Digest` and is shared with the historical GCS-callback
-    /// md5 path. The asymmetry is by design — the new crc32c /
-    /// sha256_head_256kib legs ride on `create_document` for the
-    /// per-document `document_digests` row, not on the cross-tenant
-    /// dedup gate.
-    async fn dedup_verdict(&self, tenant_id: &str, md5_hex: &str, filename: &str) -> DedupVerdict {
-        let resp = match self
-            .api
-            .check_dedup(tenant_id, std::slice::from_ref(&md5_hex.to_string()))
-            .await
-        {
+    /// Uses the multi-signal V2 `/digest-checks` endpoint: we send the
+    /// full `{md5, crc32c, sha256_head_256kib}` digest so the server can
+    /// match on the verified `(crc32c, sha256_head_256kib)` pair, not
+    /// just md5. This catches files first uploaded via a resumable path
+    /// — where GCS surfaces a crc32c but never an md5 — that the legacy
+    /// md5-only gate (`/dedup-checks`) missed entirely.
+    async fn dedup_verdict(
+        &self,
+        tenant_id: &str,
+        hashes: &dedup::FileHashes,
+        filename: &str,
+    ) -> DedupVerdict {
+        let candidate = Digest {
+            md5: Some(hashes.md5_hex.clone()),
+            crc32c: Some(hashes.crc32c_b64.clone()),
+            sha256_head_256kib: Some(hashes.sha256_head_256kib_hex.clone()),
+        };
+        let resp = match self.api.check_digests(tenant_id, &candidate).await {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::warn!("Dedup check failed for {filename}: {e}");
                 return DedupVerdict::Allow;
             }
         };
-        let total_results = resp.results.len();
-        let Some(result) = resp.results.into_iter().find(|r| r.md5_hash == md5_hex) else {
+        // One candidate in → at most one result row out, so no md5
+        // correlation is needed: take the single row if present.
+        let Some(result) = resp.results.into_iter().next() else {
             tracing::debug!(
-                md5 = md5_hex,
                 tenant_id,
                 filename,
-                total_results,
-                "dedup: no row in response matched our md5 — treating as not-a-duplicate"
+                "dedup: empty digest-check response — treating as not-a-duplicate"
             );
             return DedupVerdict::Allow;
         };
         let tenant_match_count = result.tenant_matches.len();
         let user_other_tenant_count = result.user_other_tenant_ids.len();
         tracing::debug!(
-            md5 = md5_hex,
             tenant_id,
             filename,
             tenant_match_count,

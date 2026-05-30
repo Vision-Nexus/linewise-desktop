@@ -148,13 +148,21 @@ pub struct CreateDocumentMeta {
     pub size: Option<i64>,
 }
 
-/// Request body for `POST /api/org/{tenant}/dedup-checks` — batch up
-/// to 100 source-file MD5s. The backend rejects empty arrays and
-/// arrays longer than 100 with a typed 400.
+/// Request body for `POST /api/org/{tenant}/digest-checks` — the
+/// multi-signal (V2) cross-tenant dedup query. Each candidate carries
+/// any subset of `{md5, crc32c, sha256_head_256kib}` (desktop sends all
+/// three legs of one file's digest). Unlike the legacy md5-only
+/// `/dedup-checks`, the server can match on the verified
+/// `(crc32c, sha256_head_256kib)` pair, so a file uploaded via a
+/// resumable path — where GCS surfaces crc32c but never an md5 — is
+/// still detected as a duplicate.
+///
+/// `sources` (remote gs:///Drive URLs) is intentionally omitted: the
+/// desktop only ever dedups local files it has already hashed. The
+/// backend treats a missing `sources` as `None`.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DedupCheckRequest<'a> {
-    pub md5_hashes: &'a [String],
+pub struct DigestCheckRequest<'a> {
+    pub candidates: &'a [Digest],
 }
 
 /// One match row inside the calling tenant for a queried hash. The
@@ -178,15 +186,21 @@ pub struct DedupCheckMatch {
     pub document_created_at: String,
 }
 
+/// One row of V2 dedup output for a queried candidate. Mirrors backend
+/// `DigestCheckResult` (DigestCheckModels.scala). The echoed `candidate`
+/// field and each match's `matchType` tag are present on the wire but
+/// intentionally not deserialized here: the desktop sends exactly one
+/// candidate per request (so `results` carries at most one row and no
+/// correlation is needed), and the Allow/Reject/Reuse verdict keys off
+/// the match *lists*, not the confidence tag.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DedupCheckResult {
-    pub md5_hash: String,
-    /// Documents in the calling tenant carrying this hash, restricted
+pub struct DigestCheckResult {
+    /// Documents in the calling tenant carrying this digest, restricted
     /// to projects the caller can read.
     pub tenant_matches: Vec<DedupCheckMatch>,
     /// Distinct tenants OTHER than the calling tenant in which the
-    /// same calling user uploaded this hash. IDs only — other
+    /// same calling user uploaded this digest. IDs only — other
     /// tenants' project structure is intentionally not exposed.
     /// The desktop maps each id to its locally-known tenant
     /// `display_name` from `whoami`.
@@ -195,8 +209,8 @@ pub struct DedupCheckResult {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DedupCheckResponse {
-    pub results: Vec<DedupCheckResult>,
+pub struct DigestCheckResponse {
+    pub results: Vec<DigestCheckResult>,
 }
 
 /// Mirrors backend PresignedUrlResponse (GCSModels.scala)
