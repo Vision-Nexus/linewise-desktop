@@ -74,7 +74,52 @@ pub struct DocumentMeta {
     pub masking: Option<serde_json::Value>,
 }
 
-/// Mirrors backend CreateDocumentRequest (DocumentModels.scala)
+/// Multi-signal pre-upload digest of the source file (pre-transcode).
+/// Mirrors `linewise-api`'s `Digest` case class
+/// (`features/document/Digest.scala`).
+///
+/// **JSON keys are emitted verbatim** by the backend's
+/// `Codec.AsObject.derived[Digest]`. The underscores in
+/// `sha256_head_256kib` are load-bearing — DO NOT add
+/// `serde(rename_all = "camelCase")` to this struct, even if a future
+/// cleanup unifies camelCase across DTOs. A camelCase rename here
+/// silently makes the field unrecognised on the wire (the backend reads
+/// the literal snake_case key) and the upload-time digest leg is lost
+/// without any error — the GCS-callback `verified_digest` would still
+/// land but the pre-upload dedup signal would degrade.
+///
+/// Each leg is `Option<String>` independently — desktop sends all three;
+/// older / partial-data rows may carry only md5. The wire shapes are
+/// constrained server-side:
+///   - `md5` — 32 lowercase hex chars (`Md5Hash`).
+///   - `crc32c` — base64 of 4 big-endian bytes, exactly 8 chars
+///     (`[A-Za-z0-9+/]{6}==`), shape-compatible with GCS's
+///     `x-goog-hash: crc32c=` (`Crc32c`).
+///   - `sha256_head_256kib` — 64 lowercase hex chars over the first
+///     262144 bytes of the source file (`Sha256Hex`).
+#[derive(Debug, Serialize)]
+pub struct Digest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crc32c: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256_head_256kib: Option<String>,
+}
+
+/// Mirrors backend CreateDocumentRequest (DocumentModels.scala — folded
+/// V2 back into V1 in linewise-api PR #203). The pre-upload `digest`
+/// field lives at the top level (NOT inside `metadata`) on purpose:
+/// content hashes are permanent physical facts about the source bytes,
+/// not lifecycle metadata. Placing them inside `metadata` would silently
+/// drop them because `DocumentMeta` does not declare the keys.
+///
+/// The legacy single-md5 `originalMd5` field is intentionally absent —
+/// the desktop is the canonical "digest provider" client, the backend
+/// only falls back to `originalMd5` for older clients that haven't
+/// migrated. Note: backend's `DocumentResponse` also exposes a separate
+/// `originalDigest` field; we don't decode that here because the upload
+/// finalisation path only needs `gcs_uri`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDocumentRequest {
@@ -85,16 +130,12 @@ pub struct CreateDocumentRequest {
     pub model_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
-    /// Source-file MD5 (32 lowercase hex chars), pre-transcode. Lives at
-    /// the top level — NOT inside `metadata`. The backend persists this
-    /// to a dedicated `documents.original_md5` column with a regex CHECK
-    /// and a `BEFORE UPDATE` immutability trigger; a `BEFORE INSERT`
-    /// trigger on the registry mirrors it into `public.document_file_hashes`
-    /// so future dedup-checks can match. Putting it inside `metadata`
-    /// silently drops the value because `DocumentMeta` does not declare
-    /// the key.
+    /// Pre-upload multi-signal digest. Desktop sends all three legs.
+    /// Note: this `Option` is for the rare partial-staging case; in the
+    /// happy path the desktop always sends `Some(_)` because
+    /// `consume_hash_stream` populates all four hashes in one I/O pass.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub original_md5: Option<String>,
+    pub digest: Option<Digest>,
 }
 
 /// Metadata for CreateDocumentRequest — matches DocumentMeta fields
@@ -107,13 +148,21 @@ pub struct CreateDocumentMeta {
     pub size: Option<i64>,
 }
 
-/// Request body for `POST /api/org/{tenant}/dedup-checks` — batch up
-/// to 100 source-file MD5s. The backend rejects empty arrays and
-/// arrays longer than 100 with a typed 400.
+/// Request body for `POST /api/org/{tenant}/digest-checks` — the
+/// multi-signal (V2) cross-tenant dedup query. Each candidate carries
+/// any subset of `{md5, crc32c, sha256_head_256kib}` (desktop sends all
+/// three legs of one file's digest). Unlike the legacy md5-only
+/// `/dedup-checks`, the server can match on the verified
+/// `(crc32c, sha256_head_256kib)` pair, so a file uploaded via a
+/// resumable path — where GCS surfaces crc32c but never an md5 — is
+/// still detected as a duplicate.
+///
+/// `sources` (remote gs:///Drive URLs) is intentionally omitted: the
+/// desktop only ever dedups local files it has already hashed. The
+/// backend treats a missing `sources` as `None`.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DedupCheckRequest<'a> {
-    pub md5_hashes: &'a [String],
+pub struct DigestCheckRequest<'a> {
+    pub candidates: &'a [Digest],
 }
 
 /// One match row inside the calling tenant for a queried hash. The
@@ -137,15 +186,21 @@ pub struct DedupCheckMatch {
     pub document_created_at: String,
 }
 
+/// One row of V2 dedup output for a queried candidate. Mirrors backend
+/// `DigestCheckResult` (DigestCheckModels.scala). The echoed `candidate`
+/// field and each match's `matchType` tag are present on the wire but
+/// intentionally not deserialized here: the desktop sends exactly one
+/// candidate per request (so `results` carries at most one row and no
+/// correlation is needed), and the Allow/Reject/Reuse verdict keys off
+/// the match *lists*, not the confidence tag.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DedupCheckResult {
-    pub md5_hash: String,
-    /// Documents in the calling tenant carrying this hash, restricted
+pub struct DigestCheckResult {
+    /// Documents in the calling tenant carrying this digest, restricted
     /// to projects the caller can read.
     pub tenant_matches: Vec<DedupCheckMatch>,
     /// Distinct tenants OTHER than the calling tenant in which the
-    /// same calling user uploaded this hash. IDs only — other
+    /// same calling user uploaded this digest. IDs only — other
     /// tenants' project structure is intentionally not exposed.
     /// The desktop maps each id to its locally-known tenant
     /// `display_name` from `whoami`.
@@ -154,8 +209,8 @@ pub struct DedupCheckResult {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DedupCheckResponse {
-    pub results: Vec<DedupCheckResult>,
+pub struct DigestCheckResponse {
+    pub results: Vec<DigestCheckResult>,
 }
 
 /// Mirrors backend PresignedUrlResponse (GCSModels.scala)
@@ -371,11 +426,26 @@ pub struct UploadTask {
     pub error_message: Option<String>,
     pub hash: Option<String>,
     /// MD5 of the source file (pre-transcode), 32 lowercase hex
-    /// chars. Computed alongside [`hash`] in a single I/O pass at
-    /// staging time. Sent to the backend in two places: `originalMd5`
-    /// on document creation, and the `dedup-checks` request body.
-    /// `None` on rows staged before this field existed.
+    /// chars. Computed alongside [`hash`] / [`source_crc32c`] /
+    /// [`source_sha256_head_256kib`] in a single I/O pass at staging
+    /// time. Sent to the backend in two places: as `digest.md5` on
+    /// document creation (multi-signal Digest), and as the sole key
+    /// of the `dedup-checks` request body (the cross-tenant dedup
+    /// registry remains md5-keyed). `None` on rows staged before this
+    /// field existed.
     pub source_md5: Option<String>,
+    /// CRC32C of the source file, base64-encoded with `==` padding (8
+    /// chars total). Big-endian byte order to match GCS's
+    /// `x-goog-hash: crc32c=` shape — desktop-supplied value is then
+    /// directly comparable to the post-upload
+    /// `verified_digest.crc32c`. Sent as `digest.crc32c`. `None` on
+    /// rows staged before the multi-signal-digest migration.
+    pub source_crc32c: Option<String>,
+    /// SHA-256 over the first 262144 bytes of the source file (or
+    /// whole file if shorter), 64 lowercase hex chars. Sent as
+    /// `digest.sha256_head_256kib`. `None` on rows staged before the
+    /// multi-signal-digest migration.
+    pub source_sha256_head_256kib: Option<String>,
     /// Advisory lines (warn-coloured in the UI). Recommend-band hints,
     /// telemetry advisories, missing-device-fingerprint nudges. Not
     /// blocking — a row can be `Staged` and still carry warnings.
@@ -456,4 +526,51 @@ pub struct QualityCheckResponse {
     /// duration, container metadata, telemetry label). Used by the
     /// client to render the per-row info popover.
     pub info: VideoInfo,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the wire shape of `CreateDocumentRequest` against the backend's
+    /// `Codec.AsObject.derived[Digest]`. Two regressions this catches:
+    ///   1. A future `serde(rename_all = "camelCase")` on `Digest` would
+    ///      emit `sha256Head_256kib` (or similar) — the backend would
+    ///      ignore the field silently. The literal snake_case key is
+    ///      load-bearing.
+    ///   2. A revival of the legacy `originalMd5` field would route via
+    ///      `Digest.fromLegacy` server-side, defeating the whole reason
+    ///      for sending the multi-signal `digest`.
+    #[test]
+    fn create_document_request_wire_shape() {
+        let body = CreateDocumentRequest {
+            collection: "documents".to_string(),
+            description: "x".to_string(),
+            metadata: CreateDocumentMeta {
+                filename: "x.mp4".to_string(),
+                mime_type: "video/mp4".to_string(),
+                size: Some(1),
+            },
+            model_name: None,
+            folder: None,
+            digest: Some(Digest {
+                md5: Some("d41d8cd98f00b204e9800998ecf8427e".to_string()),
+                crc32c: Some("AAAAAA==".to_string()),
+                sha256_head_256kib: Some(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+                ),
+            }),
+        };
+        let v = serde_json::to_value(&body).expect("serialise");
+        assert!(
+            v.pointer("/digest/sha256_head_256kib").is_some(),
+            "snake_case key must be emitted verbatim, got: {v}"
+        );
+        assert!(v.pointer("/digest/md5").is_some());
+        assert!(v.pointer("/digest/crc32c").is_some());
+        assert!(
+            v.get("originalMd5").is_none(),
+            "legacy originalMd5 field must NOT appear on the wire"
+        );
+    }
 }

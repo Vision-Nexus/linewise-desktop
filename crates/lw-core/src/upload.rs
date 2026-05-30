@@ -6,7 +6,7 @@ use crate::dedup;
 use crate::desensitize;
 use crate::error::{DbError, UploadError, VideoValidationError};
 use crate::models::{
-    Acceptance, CreateDocumentMeta, CreateDocumentRequest, Tenant, UploadState, UploadTask,
+    Acceptance, CreateDocumentMeta, CreateDocumentRequest, Digest, Tenant, UploadState, UploadTask,
 };
 use crate::storage::{self, StorageBackend};
 use crate::transcode;
@@ -352,8 +352,9 @@ impl UploadEngine {
     ///
     /// Quality-`Rejected` rows still go through hashing: a
     /// super-admin "Force upload" bypass turns them into a normal
-    /// pipeline run, and that run wants the MD5 already on the row
-    /// so the `create_document` call carries `originalMd5`.
+    /// pipeline run, and that run wants the digest already on the row
+    /// so the `create_document` call can carry `digest.{md5, crc32c,
+    /// sha256_head_256kib}` without paying for a second I/O pass.
     pub async fn stage_file(
         self: &Arc<Self>,
         path: &Path,
@@ -407,6 +408,8 @@ impl UploadEngine {
             error_message: None,
             hash: None,
             source_md5: None,
+            source_crc32c: None,
+            source_sha256_head_256kib: None,
             validation_warnings: Vec::new(),
             rejection_reasons: Vec::new(),
             retry_count: 0,
@@ -556,10 +559,7 @@ impl UploadEngine {
         };
 
         let mut rejection_reasons: Vec<String> = Vec::new();
-        let final_state = match self
-            .dedup_verdict(tenant_id, &hashes.md5_hex, task_id)
-            .await
-        {
+        let final_state = match self.dedup_verdict(tenant_id, &hashes, task_id).await {
             DedupVerdict::Allow => UploadState::Staged,
             DedupVerdict::Reuse(document_id) => {
                 // Stamp the abandoned upload's document_id onto the row
@@ -657,7 +657,7 @@ impl UploadEngine {
     ) -> Result<dedup::FileHashes, UploadError> {
         use tokio_stream::StreamExt;
 
-        let mut stream = Box::pin(dedup::hash_file_blake3_and_md5_stream(path));
+        let mut stream = Box::pin(dedup::hash_file_full_stream(path));
         while let Some(event) = stream.next().await {
             match event {
                 dedup::HashEvent::Progress {
@@ -671,10 +671,7 @@ impl UploadEngine {
                     });
                 }
                 dedup::HashEvent::Done(hashes) => {
-                    let _ = self
-                        .db
-                        .update_upload_hashes(task_id, &hashes.blake3_hex, &hashes.md5_hex)
-                        .await;
+                    let _ = self.db.update_upload_hashes(task_id, &hashes).await;
                     return Ok(hashes);
                 }
                 dedup::HashEvent::Error(e) => {
@@ -704,8 +701,8 @@ impl UploadEngine {
         UploadState::Failed
     }
 
-    /// Ask the cross-tenant dedup registry whether this MD5 is already
-    /// known and decide what staging should do with the row.
+    /// Ask the cross-tenant dedup registry whether this file's digest is
+    /// already known and decide what staging should do with the row.
     ///
     /// The three outcomes are spelled out on [`DedupVerdict`]. A network
     /// or API failure on the dedup check itself swallows the error and
@@ -717,33 +714,44 @@ impl UploadEngine {
     /// same-user candidate match (to read `gcs_uri`); we stop at the
     /// first reusable hit. Other-user matches and other-tenant counts
     /// fall through to the existing `Reject` paths unchanged.
-    async fn dedup_verdict(&self, tenant_id: &str, md5_hex: &str, filename: &str) -> DedupVerdict {
-        let resp = match self
-            .api
-            .check_dedup(tenant_id, std::slice::from_ref(&md5_hex.to_string()))
-            .await
-        {
+    ///
+    /// Uses the multi-signal V2 `/digest-checks` endpoint: we send the
+    /// full `{md5, crc32c, sha256_head_256kib}` digest so the server can
+    /// match on the verified `(crc32c, sha256_head_256kib)` pair, not
+    /// just md5. This catches files first uploaded via a resumable path
+    /// — where GCS surfaces a crc32c but never an md5 — that the legacy
+    /// md5-only gate (`/dedup-checks`) missed entirely.
+    async fn dedup_verdict(
+        &self,
+        tenant_id: &str,
+        hashes: &dedup::FileHashes,
+        filename: &str,
+    ) -> DedupVerdict {
+        let candidate = Digest {
+            md5: Some(hashes.md5_hex.clone()),
+            crc32c: Some(hashes.crc32c_b64.clone()),
+            sha256_head_256kib: Some(hashes.sha256_head_256kib_hex.clone()),
+        };
+        let resp = match self.api.check_digests(tenant_id, &candidate).await {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::warn!("Dedup check failed for {filename}: {e}");
                 return DedupVerdict::Allow;
             }
         };
-        let total_results = resp.results.len();
-        let Some(result) = resp.results.into_iter().find(|r| r.md5_hash == md5_hex) else {
+        // One candidate in → at most one result row out, so no md5
+        // correlation is needed: take the single row if present.
+        let Some(result) = resp.results.into_iter().next() else {
             tracing::debug!(
-                md5 = md5_hex,
                 tenant_id,
                 filename,
-                total_results,
-                "dedup: no row in response matched our md5 — treating as not-a-duplicate"
+                "dedup: empty digest-check response — treating as not-a-duplicate"
             );
             return DedupVerdict::Allow;
         };
         let tenant_match_count = result.tenant_matches.len();
         let user_other_tenant_count = result.user_other_tenant_ids.len();
         tracing::debug!(
-            md5 = md5_hex,
             tenant_id,
             filename,
             tenant_match_count,
@@ -948,9 +956,18 @@ impl UploadEngine {
         let path = path_buf.as_path();
 
         // Stage 1: Dedup check (skip if already hashed). Staging now
-        // pre-computes both BLAKE3 and MD5, so on the happy path we
-        // already have `task.hash` set; this branch only runs for
-        // legacy rows staged before the dual-hash pass landed.
+        // pre-computes the full 4-way hash (BLAKE3 + MD5 + CRC32C +
+        // SHA-256-head), so on the happy path we already have all four
+        // values on the row. This branch fires for two cases:
+        //
+        //   1. Legacy rows staged before the dual-hash pass landed
+        //      (`task.hash` is None).
+        //   2. Rows staged in the BLAKE3+MD5-only era after the
+        //      multi-signal-digest migration: `task.hash` is set but
+        //      `source_crc32c` / `source_sha256_head_256kib` are NULL.
+        //      Without rehashing, Stage 4's `create_document` would
+        //      send a partial `digest` and the GCS-callback verified
+        //      pair couldn't match the desktop-supplied legs.
         //
         // The `force_upload` flag suppresses both the local-DB
         // short-circuit and (implicitly) the staging-time dedup gate
@@ -958,10 +975,15 @@ impl UploadEngine {
         // a force-upload row reaches `process_task` only because a
         // super-admin clicked the bypass, so re-asserting the gate
         // here would defeat the affordance.
-        if task.hash.is_none() {
+        let needs_rehash = task.hash.is_none()
+            || task.source_crc32c.is_none()
+            || task.source_sha256_head_256kib.is_none();
+        if needs_rehash {
             let hashes = self.consume_hash_stream(&task.id, path).await?;
             task.hash = Some(hashes.blake3_hex.clone());
-            task.source_md5 = Some(hashes.md5_hex);
+            task.source_md5 = Some(hashes.md5_hex.clone());
+            task.source_crc32c = Some(hashes.crc32c_b64.clone());
+            task.source_sha256_head_256kib = Some(hashes.sha256_head_256kib_hex.clone());
 
             if !task.force_upload
                 && let Ok(Some(existing_id)) = self.db.find_by_hash(&hashes.blake3_hex).await
@@ -1093,10 +1115,20 @@ impl UploadEngine {
                         model_name: None,
                         folder: None,
                         // Top-level on the request, NOT inside metadata —
-                        // the backend persists this to a dedicated column
-                        // with an immutability trigger; placing it under
-                        // `metadata` would silently drop the value.
-                        original_md5: task.source_md5.clone(),
+                        // the backend persists this to a dedicated
+                        // `document_digests.original_digest` JSONB column
+                        // with strict regex validation per leg; placing
+                        // it under `metadata` would silently drop the
+                        // value because `DocumentMeta` does not declare
+                        // these keys. All three legs come from the same
+                        // single I/O pass at staging time (or the Stage
+                        // 1 rehash fallback above) so they're guaranteed
+                        // self-consistent.
+                        digest: Some(Digest {
+                            md5: task.source_md5.clone(),
+                            crc32c: task.source_crc32c.clone(),
+                            sha256_head_256kib: task.source_sha256_head_256kib.clone(),
+                        }),
                     },
                 )
                 .await?;

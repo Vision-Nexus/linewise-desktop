@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO upload_queue (id, local_path, filename, size, mime_type, tenant_id, project_id, state, hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, video_info, transcode, force_upload)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 17
+    },
+    "nullable": []
+  },
+  "hash": "d528237ae975c615f14dbbde0861b454a812ca7b23fdd3f48e5845c963fa4a5d"
+}

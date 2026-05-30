@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')\n             ORDER BY created_at ASC",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state = 'FAILED'\n               AND retry_count < 10\n               AND (error_message LIKE '%Network%'\n                    OR error_message LIKE '%timeout%'\n                    OR error_message LIKE '%no healthy upstream%'\n                    OR error_message LIKE '%Interrupted%'\n                    OR error_message LIKE '%error sending request%')\n             ORDER BY created_at ASC\n             LIMIT 20",
   "describe": {
     "columns": [
       {
@@ -74,38 +74,48 @@
         "type_info": "Text"
       },
       {
-        "name": "validation_warnings",
+        "name": "source_crc32c",
         "ordinal": 14,
         "type_info": "Text"
       },
       {
-        "name": "rejection_reasons",
+        "name": "source_sha256_head_256kib",
         "ordinal": 15,
         "type_info": "Text"
       },
       {
-        "name": "retry_count",
+        "name": "validation_warnings",
         "ordinal": 16,
-        "type_info": "Integer"
+        "type_info": "Text"
       },
       {
-        "name": "video_info",
+        "name": "rejection_reasons",
         "ordinal": 17,
         "type_info": "Text"
       },
       {
-        "name": "transcode",
+        "name": "retry_count",
         "ordinal": 18,
         "type_info": "Integer"
       },
       {
-        "name": "transcoded_size",
+        "name": "video_info",
         "ordinal": 19,
+        "type_info": "Text"
+      },
+      {
+        "name": "transcode",
+        "ordinal": 20,
+        "type_info": "Integer"
+      },
+      {
+        "name": "transcoded_size",
+        "ordinal": 21,
         "type_info": "Integer"
       },
       {
         "name": "force_upload",
-        "ordinal": 20,
+        "ordinal": 22,
         "type_info": "Integer"
       }
     ],
@@ -129,6 +139,8 @@
       true,
       true,
       true,
+      true,
+      true,
       false,
       true,
       false,
@@ -136,5 +148,5 @@
       false
     ]
   },
-  "hash": "fa439b346792e3a92adf18ec6ed060a92e286ed1c49420afbc92f883f25b1b9d"
+  "hash": "4a05bc969734b5a0416927876918965409b364f2b0893770d1e75e891aca6ed3"
 }

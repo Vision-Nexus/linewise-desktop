@@ -2,6 +2,7 @@ use crate::components::login::LoginPage;
 use crate::components::upload_queue::UploadQueue;
 use crate::components::version_banner::{VersionBlockedScreen, VersionUpdateBanner};
 use crate::state::{AppState, CoreServices};
+use dioxus::desktop::WindowCloseBehaviour;
 use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
 use dioxus::prelude::*;
 use lw_core::version_check::{self, VersionStatus};
@@ -49,14 +50,33 @@ pub fn App() -> Element {
         let menu = build_tray_menu();
         init_tray_icon(menu, None);
     });
-    dioxus::desktop::use_tray_menu_event_handler(move |event| match event.id().0.as_str() {
-        "show" => {
-            let window = dioxus::desktop::window();
-            window.set_visible(true);
-            window.set_focus();
+    // Tray menu item clicks (and app-menu clicks) arrive on muda's single
+    // global MenuEvent stream. dioxus forwards that stream as `MudaMenuEvent`
+    // because its menubar receiver wins muda's `OnceCell` handler slot — the
+    // later `set_tray_icon_receiver` call that would route to `TrayMenuEvent`
+    // is silently dropped (OnceCell::set is a no-op once set). So
+    // `use_tray_menu_event_handler` never fires when an app menu is also
+    // configured; `use_muda_event_handler` is the stream that actually
+    // carries our tray "show"/"quit" items.
+    dioxus::desktop::use_muda_event_handler(move |event| {
+        match event.id().0.as_str() {
+            "show" => {
+                let window = dioxus::desktop::window();
+                window.set_visible(true);
+                window.set_focus();
+            }
+            "quit" => {
+                // Don't `std::process::exit` from this UI-thread callback: on
+                // Windows that runs WebView2's STA-COM teardown while the
+                // message pump is stopped and can deadlock. Switch to a real
+                // close and drop the last window so `exit_on_last_window_close`
+                // sets `ControlFlow::Exit` and the loop unwinds cleanly.
+                let window = dioxus::desktop::window();
+                window.set_close_behavior(WindowCloseBehaviour::WindowCloses);
+                window.close();
+            }
+            _ => {}
         }
-        "quit" => std::process::exit(0),
-        _ => {}
     });
     dioxus::desktop::use_tray_icon_event_handler(move |event| {
         use dioxus::desktop::trayicon::{MouseButton, MouseButtonState, TrayIconEvent};
