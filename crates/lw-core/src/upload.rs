@@ -559,10 +559,7 @@ impl UploadEngine {
         };
 
         let mut rejection_reasons: Vec<String> = Vec::new();
-        let final_state = match self
-            .dedup_verdict(tenant_id, &hashes, task_id)
-            .await
-        {
+        let final_state = match self.dedup_verdict(tenant_id, &hashes, task_id).await {
             DedupVerdict::Allow => UploadState::Staged,
             DedupVerdict::Reuse(document_id) => {
                 // Stamp the abandoned upload's document_id onto the row
