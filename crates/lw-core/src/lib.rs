@@ -4,7 +4,6 @@ pub mod config;
 pub mod container_kind;
 pub mod db;
 pub mod dedup;
-pub mod desensitize;
 pub mod error;
 pub mod logging;
 pub mod models;

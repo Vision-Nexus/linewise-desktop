@@ -3,7 +3,6 @@ use crate::config::TranscodeConfig;
 use crate::container_kind::{self, ContainerKind};
 use crate::db::Database;
 use crate::dedup;
-use crate::desensitize;
 use crate::error::{DbError, UploadError, VideoValidationError};
 use crate::models::{
     Acceptance, CreateDocumentMeta, CreateDocumentRequest, Digest, Tenant, UploadState, UploadTask,
@@ -136,7 +135,6 @@ pub struct UploadEngine {
     /// upload task reads this exactly once, after the upload has already
     /// completed, so ordering against other work is irrelevant.
     auto_clean: AtomicBool,
-    strip_metadata: bool,
     transcode_config: TranscodeConfig,
     chunk_size: u64,
     upload_semaphore: Arc<Semaphore>,
@@ -168,7 +166,6 @@ impl UploadEngine {
         storage: Arc<StorageBackend>,
         event_tx: mpsc::UnboundedSender<UploadEvent>,
         auto_clean: bool,
-        strip_metadata: bool,
         transcode_config: TranscodeConfig,
         chunk_size_mb: u32,
         max_concurrent: u32,
@@ -179,7 +176,6 @@ impl UploadEngine {
             storage,
             event_tx,
             auto_clean: AtomicBool::new(auto_clean),
-            strip_metadata,
             transcode_config,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
@@ -1040,30 +1036,7 @@ impl UploadEngine {
         // Stage 2.5: Transcoding (user opt-in, video files only)
         let transcoded_path = self.maybe_transcode(task, path, &video_info).await?;
 
-        // Stage 3: Data desensitization (skip if already transcoded — transcoding strips metadata)
-        let mut desensitized_path: Option<PathBuf> = None;
-        if self.strip_metadata && transcoded_path.is_none() {
-            self.update_state(task, UploadState::Desensitizing).await;
-            match desensitize::strip_metadata(path, &task.mime_type).await {
-                Some(Ok(result)) => {
-                    tracing::info!(
-                        "Metadata stripped from {}: output at {}",
-                        task.filename,
-                        result.output_path.display()
-                    );
-                    desensitized_path = Some(result.output_path);
-                }
-                Some(Err(e)) => {
-                    tracing::warn!("Desensitization failed for {}: {e}", task.filename);
-                }
-                None => {}
-            }
-        }
-
-        let upload_path = transcoded_path
-            .as_deref()
-            .or(desensitized_path.as_deref())
-            .unwrap_or(path);
+        let upload_path = transcoded_path.as_deref().unwrap_or(path);
         let upload_size = tokio::fs::metadata(upload_path).await?.len();
 
         // Sanity check: if this task carries a recorded `transcoded_size`
@@ -1174,7 +1147,6 @@ impl UploadEngine {
                             upload_path,
                             upload_size,
                             &hash,
-                            &desensitized_path,
                             &transcoded_path,
                         )
                         .await;
@@ -1204,7 +1176,6 @@ impl UploadEngine {
             upload_path,
             upload_size,
             &hash,
-            &desensitized_path,
             &transcoded_path,
         )
         .await
@@ -1218,7 +1189,6 @@ impl UploadEngine {
         upload_path: &std::path::Path,
         _upload_size: u64,
         hash: &str,
-        desensitized_path: &Option<PathBuf>,
         transcoded_path: &Option<PathBuf>,
     ) -> Result<(), UploadError> {
         self.update_state(task, UploadState::Uploading).await;
@@ -1273,12 +1243,9 @@ impl UploadEngine {
             )
             .await;
 
-        // Clean up temp files
-        if let Some(dp) = desensitized_path {
-            desensitize::cleanup_temp_file(dp);
-        }
+        // Clean up the transcoded temp artifact
         if let Some(tp) = transcoded_path {
-            desensitize::cleanup_temp_file(tp);
+            crate::transcode::cleanup_temp_file(tp);
         }
 
         // Auto-clean original file

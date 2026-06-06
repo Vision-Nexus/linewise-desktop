@@ -1473,6 +1473,14 @@ fn encoder_options(kind: EncoderKind, config: &TranscodeConfig) -> Dictionary<'s
     o
 }
 
+/// Remove a transcoded temp artifact after a successful upload, logging
+/// (but not failing) if the file is already gone.
+pub fn cleanup_temp_file(path: &std::path::Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        tracing::warn!("Failed to clean up temp file {}: {e}", path.display());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

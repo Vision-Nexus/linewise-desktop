@@ -42,17 +42,15 @@ graph TB
         Engine["Upload Engine<br/>stage → confirm → process<br/>resume · auto-retry<br/>4 concurrent (semaphore)"]
         Storage["Storage Backend<br/>GCS (resumable POST)<br/>S3 (multipart)"]
         DB["Database<br/>SQLite (sqlx query!)<br/>upload_queue · file_hashes"]
-        Desensitize["Desensitize<br/>ffmpeg -map_metadata -1<br/>video + image"]
         Video["Video Validate<br/>ffprobe: fps 20-40<br/>bitrate 10-35Mbps<br/>advisory warnings"]
         Watcher["File Watcher<br/>notify 8.x<br/>per-folder · MIME filter"]
         Dedup["Dedup<br/>BLAKE3 hash<br/>SQLite lookup"]
-        Config["Config<br/>TOML · environment<br/>upload · desensitization"]
+        Config["Config<br/>TOML · environment<br/>upload · transcode"]
 
         Engine --> Auth
         Engine --> API
         Engine --> Storage
         Engine --> DB
-        Engine --> Desensitize
         Engine --> Video
         Engine --> Dedup
         Watcher --> Engine
@@ -79,8 +77,7 @@ stateDiagram-v2
     Staged --> Pending : Confirm Upload
 
     Pending --> Validating : Start processing
-    Validating --> Desensitizing : ffprobe check (advisory)
-    Desensitizing --> Creating : ffmpeg strip metadata
+    Validating --> Creating : ffprobe check (advisory)
     Creating --> Uploading : POST create document
 
     Uploading --> Uploading : Chunk uploaded (progress)
@@ -176,7 +173,6 @@ graph LR
         C3[api_client.rs]
         C4[auth.rs]
         C5[db.rs]
-        C6[desensitize.rs]
         C7[video.rs]
         C8[dedup.rs]
         C9[watcher.rs]
@@ -199,7 +195,6 @@ graph LR
     C1 --> C2
     C1 --> C3
     C1 --> C5
-    C1 --> C6
     C1 --> C7
     C1 --> C8
     C3 --> C4
@@ -251,14 +246,13 @@ graph LR
 |--------|------|---------|
 | **Auth** | `auth.rs` | Firebase Auth REST API: email sign-in, token refresh (50min), OS keychain storage |
 | **API Client** | `api_client.rs` | Linewise backend client: whoami, list_projects, create_document, upload-url, verify |
-| **Upload Engine** | `upload.rs` | Orchestrates: stage → confirm → hash → validate → desensitize → create → upload → verify. Resumable with auto-retry on network recovery |
+| **Upload Engine** | `upload.rs` | Orchestrates: stage → confirm → hash → validate → transcode → create → upload → verify. Resumable with auto-retry on network recovery |
 | **Storage** | `storage.rs` | Cloud-agnostic enum: `GcsBackend` (resumable POST) + `S3Backend` (multipart). Per-chunk retry with exponential backoff |
 | **Database** | `db.rs` | SQLite via sqlx with `query!` macros. Tables: `upload_queue`, `file_hashes`. Async pool |
-| **Desensitize** | `desensitize.rs` | ffmpeg metadata stripping: `-map_metadata -1 -c copy`. Video + image support |
 | **Video** | `video.rs` | ffprobe validation: fps 20-40, bitrate 10-35Mbps, resolution ≥720p. Advisory warnings + camera guide link |
 | **Dedup** | `dedup.rs` | BLAKE3 file hashing → SQLite `file_hashes` lookup |
 | **Watcher** | `watcher.rs` | `notify` 8.x file system watcher: per-folder with tenant/project mapping, MIME filter, 2s debounce |
-| **Config** | `config.rs` | TOML config: server environment, upload prefs, desensitization, camera detection, watch folders |
+| **Config** | `config.rs` | TOML config: server environment, upload prefs, transcode, camera detection, watch folders |
 | **Models** | `models.rs` | Domain types mirroring Scala backend DTOs (source of truth: linewise-api) |
 | **Error** | `error.rs` | ADT error enums: `AuthError`, `UploadError`, `VideoValidationError`, `DbError`, `ConfigError`, `AppError` |
 
@@ -272,7 +266,6 @@ graph LR
 | File Watching | notify 8.x + notify-debouncer-mini |
 | File Dialog | rfd 0.17 |
 | Video Probing | ffprobe (std::process::Command) |
-| Metadata Strip | ffmpeg (std::process::Command) |
 | File Hashing | BLAKE3 |
 | Credentials | keyring 3.x (OS keychain) |
 | System Tray | tray-icon (via Dioxus desktop) |
@@ -292,11 +285,6 @@ environment = "dev"  # dev | testing | production
 auto_clean = true
 chunk_size_mb = 32
 max_concurrent_uploads = 4
-
-[desensitization]
-strip_metadata = true
-blur_faces = false              # future: ONNX model
-processing_mode = "local"       # local | remote
 
 [camera]
 auto_detect = true              # future: USB detection

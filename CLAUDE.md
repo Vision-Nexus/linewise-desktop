@@ -1,6 +1,6 @@
 # Linewise Desktop
 
-Cross-platform desktop client for Linewise — handles data desensitization, resumable uploads, video validation, and action camera integration. Built with Rust + Dioxus.
+Cross-platform desktop client for Linewise — handles resumable uploads, video validation, and action camera integration. Built with Rust + Dioxus.
 
 **Docs**: [README.md](README.md) | [ARCHITECTURE.md](ARCHITECTURE.md) (Mermaid diagrams)
 
@@ -49,7 +49,7 @@ crates/
 | `db.rs` | SQLite via rusqlite (upload queue persistence, file hash dedup) |
 | `video.rs` | ffprobe-based video parameter validation (30fps/1080p/30Mbps targets) |
 | `dedup.rs` | BLAKE3 file hashing for duplicate detection |
-| `config.rs` | TOML configuration (server env, upload prefs, desensitization, watch folders) |
+| `config.rs` | TOML configuration (server env, upload prefs, transcode, watch folders) |
 | `models.rs` | Domain types mirroring backend entities |
 | `error.rs` | Typed error ADT enums (AuthError, UploadError, VideoValidationError) |
 
@@ -106,7 +106,7 @@ All endpoints follow `/api/org/{tenant}/...` pattern. Bearer token from Firebase
   match state {
       UploadState::Pending => ...,
       UploadState::Validating => ...,
-      UploadState::Desensitizing => ...,
+      UploadState::Transcoding => ...,
       UploadState::Creating => ...,
       UploadState::Uploading => ...,
       UploadState::Verifying => ...,

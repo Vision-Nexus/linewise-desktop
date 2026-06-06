@@ -409,7 +409,7 @@ impl Database {
         // it'll get a fresh quality check / hash run.
         let result = sqlx::query!(
             "UPDATE upload_queue SET state = 'FAILED', error_message = 'Interrupted by app restart', updated_at = datetime('now')
-             WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'PENDING', 'HASHING', 'QUALITY_CHECKING')",
+             WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'PENDING', 'HASHING', 'QUALITY_CHECKING')",
         )
         .execute(&self.pool)
         .await?;
@@ -464,7 +464,7 @@ impl Database {
                     document_id, session_id, bytes_uploaded, state, error_message,
                     hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
-             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
+             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'TRANSCODING')
              ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)

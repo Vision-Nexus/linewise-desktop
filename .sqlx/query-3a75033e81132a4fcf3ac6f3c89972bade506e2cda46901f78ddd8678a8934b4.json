@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state = 'FAILED'\n               AND retry_count < 10\n               AND (error_message LIKE '%Network%'\n                    OR error_message LIKE '%timeout%'\n                    OR error_message LIKE '%no healthy upstream%'\n                    OR error_message LIKE '%Interrupted%'\n                    OR error_message LIKE '%error sending request%')\n             ORDER BY created_at ASC\n             LIMIT 20",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'TRANSCODING')\n             ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -286,5 +286,5 @@
       false
     ]
   },
-  "hash": "4a05bc969734b5a0416927876918965409b364f2b0893770d1e75e891aca6ed3"
+  "hash": "3a75033e81132a4fcf3ac6f3c89972bade506e2cda46901f78ddd8678a8934b4"
 }

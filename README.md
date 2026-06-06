@@ -1,6 +1,6 @@
 # Linewise Upload
 
-Cross-platform desktop client for [Linewise](https://app.linewise.io) — data desensitization, resumable uploads, video validation, and action camera integration.
+Cross-platform desktop client for [Linewise](https://app.linewise.io) — resumable uploads, video validation, and action camera integration.
 
 Built with **Rust** + **Dioxus** + **Tailwind CSS v4**.
 
@@ -15,7 +15,6 @@ Built with **Rust** + **Dioxus** + **Tailwind CSS v4**.
 - **Two-step upload** — select/review files, then confirm. No accidental uploads.
 - **Resumable chunked upload** — 32MB chunks, auto-resumes on network recovery. Survives wifi drops, laptop sleep, app restart.
 - **Cloud-agnostic storage** — GCS (resumable) and S3-compatible (multipart) backends.
-- **Data desensitization** — strips GPS, device info, timestamps from videos/images via ffmpeg before upload.
 - **Video validation** — advisory fps/bitrate/resolution checks with tolerance ranges and camera settings guide.
 - **Duplicate detection** — BLAKE3 file hashing with SQLite lookup.
 - **System tray** — runs in background, hides on close, tray menu to show/quit.
@@ -90,9 +89,6 @@ environment = "dev"  # dev | testing | production
 auto_clean = true
 chunk_size_mb = 32
 max_concurrent_uploads = 4
-
-[desensitization]
-strip_metadata = true
 ```
 
 ## Architecture

@@ -6,7 +6,13 @@
       {
         "name": "document_id",
         "ordinal": 0,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "file_hashes",
+            "name": "document_id"
+          }
+        }
       }
     ],
     "parameters": {

@@ -6,117 +6,255 @@
       {
         "name": "id",
         "ordinal": 0,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "id"
+          }
+        }
       },
       {
         "name": "local_path",
         "ordinal": 1,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "local_path"
+          }
+        }
       },
       {
         "name": "filename",
         "ordinal": 2,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "filename"
+          }
+        }
       },
       {
         "name": "size",
         "ordinal": 3,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "size"
+          }
+        }
       },
       {
         "name": "mime_type",
         "ordinal": 4,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "mime_type"
+          }
+        }
       },
       {
         "name": "tenant_id",
         "ordinal": 5,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "tenant_id"
+          }
+        }
       },
       {
         "name": "project_id",
         "ordinal": 6,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "project_id"
+          }
+        }
       },
       {
         "name": "document_id",
         "ordinal": 7,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "document_id"
+          }
+        }
       },
       {
         "name": "session_id",
         "ordinal": 8,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "session_id"
+          }
+        }
       },
       {
         "name": "bytes_uploaded",
         "ordinal": 9,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "bytes_uploaded"
+          }
+        }
       },
       {
         "name": "state",
         "ordinal": 10,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "state"
+          }
+        }
       },
       {
         "name": "error_message",
         "ordinal": 11,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "error_message"
+          }
+        }
       },
       {
         "name": "hash",
         "ordinal": 12,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "hash"
+          }
+        }
       },
       {
         "name": "source_md5",
         "ordinal": 13,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "source_md5"
+          }
+        }
       },
       {
         "name": "source_crc32c",
         "ordinal": 14,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "source_crc32c"
+          }
+        }
       },
       {
         "name": "source_sha256_head_256kib",
         "ordinal": 15,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "source_sha256_head_256kib"
+          }
+        }
       },
       {
         "name": "validation_warnings",
         "ordinal": 16,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "validation_warnings"
+          }
+        }
       },
       {
         "name": "rejection_reasons",
         "ordinal": 17,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "rejection_reasons"
+          }
+        }
       },
       {
         "name": "retry_count",
         "ordinal": 18,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "retry_count"
+          }
+        }
       },
       {
         "name": "video_info",
         "ordinal": 19,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "video_info"
+          }
+        }
       },
       {
         "name": "transcode",
         "ordinal": 20,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "transcode"
+          }
+        }
       },
       {
         "name": "transcoded_size",
         "ordinal": 21,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "transcoded_size"
+          }
+        }
       },
       {
         "name": "force_upload",
         "ordinal": 22,
-        "type_info": "Integer"
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "upload_queue",
+            "name": "force_upload"
+          }
+        }
       }
     ],
     "parameters": {
