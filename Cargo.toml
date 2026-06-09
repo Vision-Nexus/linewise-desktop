@@ -57,6 +57,15 @@ crc32c = "0.6"
 # `Digest.sha256_head_256kib` leg. RustCrypto family, same shape as the
 # existing `md-5 = "0.10"` dep.
 sha2 = "0.10"
+# PDQ perceptual hash (Meta's image hash) for Tier-2 near-duplicate
+# detection. New-crate justification: there is no PDQ hasher in-tree, and
+# the byte/blake3/md5/crc/sha crates above are all exact-content hashes —
+# none survive a re-encode / metadata edit, which is exactly the case PDQ
+# catches. Pure-Rust port (no C++/LGPL), re-exports `image`. The server
+# stores `bit(256)` and compares via Hamming, so the desktop hash MUST be
+# bit-exact with the browser/sidecar hash space — gated OFF
+# (`pdq::PDQ_ENABLED = false`) until a distance-0-vs-sidecar CI gate passes.
+pdqhash = "0.1"
 dirs = "6"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 backon = "1"

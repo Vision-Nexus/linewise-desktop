@@ -6,8 +6,10 @@ use crate::dedup;
 use crate::desensitize;
 use crate::error::{DbError, UploadError, VideoValidationError};
 use crate::models::{
-    Acceptance, CreateDocumentMeta, CreateDocumentRequest, Digest, Tenant, UploadState, UploadTask,
+    Acceptance, CreateDocumentMeta, CreateDocumentRequest, Digest, DigestCheckCandidate,
+    NearDuplicateMatch, PdqFrameWire, Tenant, UploadState, UploadTask,
 };
+use crate::pdq;
 use crate::storage::{self, StorageBackend};
 use crate::transcode;
 use crate::video;
@@ -54,6 +56,19 @@ enum DedupVerdict {
     Allow,
     Reuse(String),
     Reject(String),
+}
+
+/// Render a user-facing rejection line for a PDQ near-duplicate hit. Mirrors
+/// the exact-dedup "already uploaded" wording but flags the perceptual nature
+/// so the user understands it's a re-encode / re-mux of footage already in the
+/// tenant, not a byte-identical file.
+fn near_duplicate_message(near: &NearDuplicateMatch) -> String {
+    let pct = (near.coverage * 100.0).round() as i64;
+    let plural = if near.matched_frames == 1 { "" } else { "s" };
+    format!(
+        "Near-duplicate of an existing video in this tenant ({} frame{plural} matched, {pct}% coverage)",
+        near.matched_frames,
+    )
 }
 
 /// Events emitted by the upload engine to the UI
@@ -557,9 +572,16 @@ impl UploadEngine {
             Ok(h) => h,
             Err(_) => return self.fail_hashing(task_id).await,
         };
+        // Tier-2 perceptual frames (empty + no-op while `pdq::PDQ_ENABLED` is
+        // false). Computed here so the dedup query can carry them; recomputed at
+        // Stage 4 for persistence (see `process_task`).
+        let pdq_frames = pdq::compute_pdq_frames(path).await;
 
         let mut rejection_reasons: Vec<String> = Vec::new();
-        let final_state = match self.dedup_verdict(tenant_id, &hashes, task_id).await {
+        let final_state = match self
+            .dedup_verdict(tenant_id, &hashes, pdq_frames, task_id)
+            .await
+        {
             DedupVerdict::Allow => UploadState::Staged,
             DedupVerdict::Reuse(document_id) => {
                 // Stamp the abandoned upload's document_id onto the row
@@ -725,12 +747,19 @@ impl UploadEngine {
         &self,
         tenant_id: &str,
         hashes: &dedup::FileHashes,
+        pdq_frames: Vec<PdqFrameWire>,
         filename: &str,
     ) -> DedupVerdict {
-        let candidate = Digest {
-            md5: Some(hashes.md5_hex.clone()),
-            crc32c: Some(hashes.crc32c_b64.clone()),
-            sha256_head_256kib: Some(hashes.sha256_head_256kib_hex.clone()),
+        let candidate = DigestCheckCandidate {
+            digest: Digest {
+                md5: Some(hashes.md5_hex.clone()),
+                crc32c: Some(hashes.crc32c_b64.clone()),
+                sha256_head_256kib: Some(hashes.sha256_head_256kib_hex.clone()),
+            },
+            // Sent inline so the server runs the same-tenant PDQ coverage scan
+            // without its sidecar. Empty (PDQ disabled / nothing decoded) → omit
+            // the field, leaving an exact-only query.
+            pdq_frames: (!pdq_frames.is_empty()).then_some(pdq_frames),
         };
         let resp = match self.api.check_digests(tenant_id, &candidate).await {
             Ok(resp) => resp,
@@ -759,7 +788,13 @@ impl UploadEngine {
             "dedup: registry response"
         );
         if tenant_match_count == 0 && user_other_tenant_count == 0 {
-            return DedupVerdict::Allow;
+            // Exact gate missed. If the server escalated to PDQ and found a
+            // same-tenant perceptual near-duplicate, reject on that; otherwise
+            // the file is genuinely new.
+            return match result.near_duplicate {
+                Some(near) => DedupVerdict::Reject(near_duplicate_message(&near)),
+                None => DedupVerdict::Allow,
+            };
         }
         if tenant_match_count == 0 {
             return DedupVerdict::Reject(
@@ -1099,6 +1134,12 @@ impl UploadEngine {
             doc_id.clone()
         } else {
             self.update_state(task, UploadState::Creating).await;
+            // Recompute the perceptual frames (cheap: <=5 keyframe seeks) so the
+            // created doc is persisted as a near-duplicate match target. Empty +
+            // omitted while `pdq::PDQ_ENABLED` is false. Recomputed rather than
+            // carried from staging to avoid a DB column / migration — the source
+            // file is local and unchanged, so the frames are identical.
+            let pdq_frames = pdq::compute_pdq_frames(path).await;
             let doc = self
                 .api
                 .create_document(
@@ -1129,6 +1170,10 @@ impl UploadEngine {
                             crc32c: task.source_crc32c.clone(),
                             sha256_head_256kib: task.source_sha256_head_256kib.clone(),
                         }),
+                        // Persisted to `public.document_frame_hashes` so this
+                        // upload becomes a near-duplicate match target. Omitted
+                        // while PDQ is disabled / nothing decoded.
+                        pdq_frames: (!pdq_frames.is_empty()).then_some(pdq_frames),
                     },
                 )
                 .await?;

@@ -109,7 +109,7 @@ fn strip_video_metadata_blocking(input: &Path) -> Result<DesensitizeResult, Dese
 }
 
 /// Resolve the ffmpeg CLI binary, preferring the bundled copy over system PATH.
-fn resolve_ffmpeg_binary() -> OsString {
+pub(crate) fn resolve_ffmpeg_binary() -> OsString {
     let Ok(exe) = std::env::current_exe() else {
         return OsString::from("ffmpeg");
     };
