@@ -32,7 +32,7 @@
 use crate::models::PdqFrameWire;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// Master kill-switch (mirrors the browser `STUB_MODE` and the server
 /// `PDQ_ENABLED`). Held `false` until the desktop hash is validated bit-exact
@@ -117,7 +117,7 @@ fn hash_frame_at(ffmpeg: &OsStr, path: &Path, t: u32) -> Option<PdqFrameWire> {
 fn extract_frame_rgb24(ffmpeg: &OsStr, path: &Path, t: u32) -> Option<Vec<u8>> {
     let secs = t.to_string();
     let scale = format!("scale={PDQ_DIM}:{PDQ_DIM}");
-    let result = Command::new(ffmpeg)
+    let result = crate::desensitize::hidden_command(ffmpeg)
         .args(["-v", "error", "-ss", secs.as_str()])
         .arg("-i")
         .arg(path)
@@ -170,7 +170,12 @@ fn compute_pdq_hash(rgb: &[u8]) -> Option<(String, u8)> {
     let img = RgbImage::from_raw(PDQ_DIM, PDQ_DIM, rgb.to_vec())?;
     let (hash, quality) = pdqhash::generate_pdq_full_size(&DynamicImage::ImageRgb8(img));
     let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-    let quality = quality.round().clamp(0.0, 100.0) as u8;
+    // The `pdqhash` crate returns quality as a 0..=1 fraction (gradient_sum/90,
+    // clamped to 1.0). Meta's reference, the Python sidecar (`quality_min=50`),
+    // the wire `PdqFrameIn.quality: Int`, and our [`PDQ_QUALITY_MIN`] are all on
+    // the 0..=100 scale — so scale up by 100, else every real frame rounds to
+    // 0/1 and the quality gate drops the whole bag (no frames ever sent).
+    let quality = (quality * 100.0).round().clamp(0.0, 100.0) as u8;
     Some((hex, quality))
 }
 

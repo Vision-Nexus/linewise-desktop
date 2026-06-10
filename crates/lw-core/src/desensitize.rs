@@ -154,6 +154,22 @@ pub(crate) fn resolve_ffmpeg_binary() -> OsString {
     OsString::from("ffmpeg")
 }
 
+/// Build a `Command` for an ffmpeg-CLI invocation that does NOT pop a console
+/// window on Windows. The desktop app runs on the `windows` GUI subsystem;
+/// spawning a console subprocess without `CREATE_NO_WINDOW` flashes a black
+/// `cmd` window per spawn — very visible during PDQ frame extraction (up to 5
+/// spawns while hashing) and image desensitization. No-op on non-Windows.
+pub(crate) fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Strip EXIF/metadata from an image file.
 /// Still uses ffmpeg CLI for images (ffmpeg-next's image handling is less ergonomic).
 #[tracing::instrument(skip_all, fields(filename = input.file_name().and_then(|s| s.to_str()).unwrap_or("?")))]
@@ -170,7 +186,7 @@ pub async fn strip_image_metadata(input: &Path) -> Result<DesensitizeResult, Des
             .to_string_lossy();
         let output = temp_dir.join(format!("clean_{filename}"));
 
-        let result = std::process::Command::new(resolve_ffmpeg_binary())
+        let result = hidden_command(resolve_ffmpeg_binary())
             .args(["-y", "-i"])
             .arg(&input)
             .args(["-map_metadata", "-1"])

@@ -785,6 +785,7 @@ impl UploadEngine {
             filename,
             tenant_match_count,
             user_other_tenant_count,
+            near_duplicate = result.near_duplicate.is_some(),
             "dedup: registry response"
         );
         if tenant_match_count == 0 && user_other_tenant_count == 0 {
@@ -792,7 +793,17 @@ impl UploadEngine {
             // same-tenant perceptual near-duplicate, reject on that; otherwise
             // the file is genuinely new.
             return match result.near_duplicate {
-                Some(near) => DedupVerdict::Reject(near_duplicate_message(&near)),
+                Some(near) => {
+                    tracing::debug!(
+                        tenant_id,
+                        filename,
+                        document_id = %near.document_id,
+                        coverage = near.coverage,
+                        matched_frames = near.matched_frames,
+                        "dedup: PDQ near-duplicate hit"
+                    );
+                    DedupVerdict::Reject(near_duplicate_message(&near))
+                }
                 None => DedupVerdict::Allow,
             };
         }
