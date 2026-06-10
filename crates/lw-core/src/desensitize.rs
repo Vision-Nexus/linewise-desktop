@@ -161,14 +161,24 @@ pub(crate) fn resolve_ffmpeg_binary() -> OsString {
 /// spawns while hashing) and image desensitization. No-op on non-Windows.
 pub(crate) fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    // `&mut cmd` is taken on every platform (so `mut` is always "used" — no
+    // `unused_mut` — and the binding isn't a bare `let x; x` — no
+    // `let_and_return`), but the flag is only set on Windows.
+    apply_no_console_window(&mut cmd);
     cmd
 }
+
+/// Set `CREATE_NO_WINDOW` so a spawned console subprocess has no window.
+#[cfg(windows)]
+fn apply_no_console_window(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// No-op off Windows — there is no console-window concept to suppress.
+#[cfg(not(windows))]
+fn apply_no_console_window(_cmd: &mut std::process::Command) {}
 
 /// Strip EXIF/metadata from an image file.
 /// Still uses ffmpeg CLI for images (ffmpeg-next's image handling is less ergonomic).
