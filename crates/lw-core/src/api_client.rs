@@ -2,8 +2,8 @@ use crate::auth::AuthService;
 use crate::config::Environment;
 use crate::error::UploadError;
 use crate::models::{
-    CreateDocumentRequest, Digest, DigestCheckRequest, DigestCheckResponse, DocumentResponse,
-    PresignedUrlResponse, Project, QualityCheckResponse, WhoAmIResponse,
+    CreateDocumentRequest, DigestCheckCandidate, DigestCheckRequest, DigestCheckResponse,
+    DocumentResponse, PresignedUrlResponse, Project, QualityCheckResponse, WhoAmIResponse,
 };
 use crate::video_head::{AtomChunks, MAX_PAYLOAD_BYTES};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -230,7 +230,7 @@ impl ApiClient {
     pub async fn check_digests(
         &self,
         tenant: &str,
-        candidate: &Digest,
+        candidate: &DigestCheckCandidate,
     ) -> Result<DigestCheckResponse, UploadError> {
         let headers = self.auth_headers().await?;
         let url = format!("{}/api/org/{}/digest-checks", self.base_url, tenant);

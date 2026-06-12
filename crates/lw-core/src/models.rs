@@ -107,6 +107,43 @@ pub struct Digest {
     pub sha256_head_256kib: Option<String>,
 }
 
+/// One client-supplied PDQ perceptual frame. Mirrors backend `PdqFrameIn`
+/// (`features/dedup/DigestCheckModels.scala`, `derives Codec.AsObject`) — the
+/// JSON keys `t` / `hash` / `quality` are emitted verbatim, so this struct must
+/// NOT carry `rename_all`. Shared by the dedup precheck candidate
+/// ([`DigestCheckCandidate`]) and the `createDocument` request.
+///
+///   - `t` — sample seek time in seconds (one of `pdq::PDQ_TIMES`).
+///   - `hash` — the 64 lowercase-hex PDQ digest. The backend `PdqHash` validates
+///     `^[0-9a-fA-F]{64}$` and rejects anything else, failing the WHOLE request
+///     decode — so the producer must emit exactly that shape (`pdq.rs` does).
+///   - `quality` — PDQ quality 0..=100; below-threshold frames are dropped
+///     client-side before they reach here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PdqFrameWire {
+    pub t: f64,
+    pub hash: String,
+    pub quality: u8,
+}
+
+/// One candidate in a `POST /digest-checks` body. Mirrors backend
+/// `DigestCandidate`: the three exact-hash legs (flattened in from [`Digest`],
+/// which keeps its load-bearing snake_case keys) plus an optional inline
+/// `pdq_frames` bag. When the exact head-256 gate misses and `pdq_frames` is
+/// present, the server runs the same-tenant PDQ coverage scan directly —
+/// without calling its sidecar.
+///
+/// `pdq_frames` is a SIBLING of the hash legs here (nested inside the
+/// candidate), NOT top-level — unlike [`CreateDocumentRequest`] where it is
+/// top-level. The two endpoints place it differently on purpose; do not unify.
+#[derive(Debug, Serialize)]
+pub struct DigestCheckCandidate {
+    #[serde(flatten)]
+    pub digest: Digest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdq_frames: Option<Vec<PdqFrameWire>>,
+}
+
 /// Mirrors backend CreateDocumentRequest (DocumentModels.scala — folded
 /// V2 back into V1 in linewise-api PR #203). The pre-upload `digest`
 /// field lives at the top level (NOT inside `metadata`) on purpose:
@@ -136,6 +173,22 @@ pub struct CreateDocumentRequest {
     /// `consume_hash_stream` populates all four hashes in one I/O pass.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub digest: Option<Digest>,
+    /// Browser/desktop-computed PDQ perceptual frames. TOP-LEVEL on the
+    /// request — a sibling of `digest`, NOT nested inside it: the backend
+    /// `CreateDocumentRequest.pdq_frames` field is top-level and is passed
+    /// straight through to `public.document_frame_hashes` after the doc lands,
+    /// never folded into `digest` (which carries only scalar content hashes).
+    /// Persisting frames at create time is what makes a desktop upload a future
+    /// near-duplicate match target.
+    ///
+    /// The wire key MUST stay the literal snake_case `pdq_frames`. This struct
+    /// is `rename_all = "camelCase"`, which would otherwise emit `pdqFrames` —
+    /// a key the backend's `derives Codec.AsObject` does not match, so Circe
+    /// would silently decode it as `None` and the frames would vanish with no
+    /// error. The explicit `rename` overrides the container rule; the
+    /// wire-shape test below pins it.
+    #[serde(rename = "pdq_frames", skip_serializing_if = "Option::is_none")]
+    pub pdq_frames: Option<Vec<PdqFrameWire>>,
 }
 
 /// Metadata for CreateDocumentRequest — matches DocumentMeta fields
@@ -162,7 +215,7 @@ pub struct CreateDocumentMeta {
 /// backend treats a missing `sources` as `None`.
 #[derive(Debug, Serialize)]
 pub struct DigestCheckRequest<'a> {
-    pub candidates: &'a [Digest],
+    pub candidates: &'a [DigestCheckCandidate],
 }
 
 /// One match row inside the calling tenant for a queried hash. The
@@ -186,6 +239,23 @@ pub struct DedupCheckMatch {
     pub document_created_at: String,
 }
 
+/// A perceptual near-duplicate hit surfaced by the PDQ escalation — advisory,
+/// same-tenant. Mirrors backend `NearDup` (`features/dedup/DigestCheckModels.scala`).
+/// Carries only the document id + coverage signal (no project / creator), since
+/// it's a "looks like a re-encode of a video you already have" hint, not an
+/// attribution-grade exact match.
+///
+///   - `coverage` — fraction (0..1) of this upload's query frames matched.
+///   - `matched_frames` — absolute count (the numerator) so the UI can show
+///     "4/5 frames matched" without recomputing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NearDuplicateMatch {
+    pub document_id: String,
+    pub coverage: f64,
+    pub matched_frames: u32,
+}
+
 /// One row of V2 dedup output for a queried candidate. Mirrors backend
 /// `DigestCheckResult` (DigestCheckModels.scala). The echoed `candidate`
 /// field and each match's `matchType` tag are present on the wire but
@@ -205,6 +275,14 @@ pub struct DigestCheckResult {
     /// The desktop maps each id to its locally-known tenant
     /// `display_name` from `whoami`.
     pub user_other_tenant_ids: Vec<String>,
+    /// Perceptual near-duplicate hit from the inline-PDQ escalation. Populated
+    /// only when the exact gate missed AND the candidate shipped `pdq_frames`
+    /// AND the same-tenant coverage scan found a hit; `None` otherwise (and on
+    /// any pre-PDQ server, where the field is simply absent — hence
+    /// `#[serde(default)]`). Mirrors backend
+    /// `DigestCheckResult.nearDuplicate: Option[NearDup]`.
+    #[serde(default)]
+    pub near_duplicate: Option<NearDuplicateMatch>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -560,6 +638,11 @@ mod tests {
                     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
                 ),
             }),
+            pdq_frames: Some(vec![PdqFrameWire {
+                t: 1.0,
+                hash: "0".repeat(64),
+                quality: 100,
+            }]),
         };
         let v = serde_json::to_value(&body).expect("serialise");
         assert!(
@@ -572,5 +655,53 @@ mod tests {
             v.get("originalMd5").is_none(),
             "legacy originalMd5 field must NOT appear on the wire"
         );
+        // pdq_frames is TOP-LEVEL (sibling of digest), NOT camelCased. The
+        // backend field is literally `pdq_frames`; `rename_all="camelCase"`
+        // would emit `pdqFrames` and Circe would silently drop it to None.
+        assert!(
+            v.pointer("/pdq_frames/0/hash").is_some(),
+            "pdq_frames must be a top-level snake_case key, got: {v}"
+        );
+        assert!(
+            v.get("pdqFrames").is_none(),
+            "pdq_frames must NOT be camelCased to pdqFrames"
+        );
+        assert!(
+            v.pointer("/digest/pdq_frames").is_none(),
+            "pdq_frames must be top-level, NOT nested inside digest"
+        );
+    }
+
+    /// Pin the dedup-precheck candidate wire shape: the three exact legs are
+    /// flattened to the top of the candidate object (matching backend
+    /// `DigestCandidate`), and `pdq_frames` rides alongside them as a sibling —
+    /// NOT under a nested `digest` key.
+    #[test]
+    fn digest_check_candidate_wire_shape() {
+        let candidate = DigestCheckCandidate {
+            digest: Digest {
+                md5: Some("d41d8cd98f00b204e9800998ecf8427e".to_string()),
+                crc32c: Some("AAAAAA==".to_string()),
+                sha256_head_256kib: Some("0".repeat(64)),
+            },
+            pdq_frames: Some(vec![PdqFrameWire {
+                t: 5.0,
+                hash: "a".repeat(64),
+                quality: 90,
+            }]),
+        };
+        let v = serde_json::to_value(&candidate).expect("serialise");
+        // Flattened legs sit at the candidate top level (no `digest` wrapper).
+        assert!(
+            v.get("digest").is_none(),
+            "Digest must be flattened, got: {v}"
+        );
+        assert!(v.pointer("/md5").is_some());
+        assert!(v.pointer("/crc32c").is_some());
+        assert!(v.pointer("/sha256_head_256kib").is_some());
+        // pdq_frames is a sibling of the legs (snake_case key).
+        assert!(v.pointer("/pdq_frames/0/hash").is_some());
+        assert!(v.pointer("/pdq_frames/0/t").is_some());
+        assert!(v.pointer("/pdq_frames/0/quality").is_some());
     }
 }
