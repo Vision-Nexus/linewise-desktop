@@ -106,13 +106,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: cargo check
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
 
       - name: cargo build
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
 
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace

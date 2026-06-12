@@ -1,7 +1,10 @@
 node_modules/
 /target
-Cargo.lock
 .env
+
+# NOTE: Cargo.lock is intentionally committed. lw-app is a shipped binary, so
+# the lockfile must be tracked to guarantee reproducible CI/release builds.
+# (A floating lockfile let `time 0.3.48` drift in and break the build.)
 
 # SQLite dev DB (used for sqlx compile-time query checking)
 linewise.db
