@@ -14,13 +14,15 @@
 //!     (`-ss <t> -i <file> -frames:v 1 -vf scale=512:512 -pix_fmt rgb24 ...`),
 //!   - hash with Meta PDQ and render the 256-bit digest as 64 lowercase hex.
 //!
-//! ## Bit-exactness is load-bearing — and unverified here
+//! ## Bit-exactness is load-bearing
 //! The server stores each hash as `bit(256)` and matches via raw Hamming
 //! distance. A hash that differs from the browser/sidecar hash space — wrong
 //! bit order, a different PDQ variant, a different ffmpeg resize kernel — never
-//! matches, silently. Until a "desktop hash == sidecar hash, distance 0" CI
-//! gate exists, this module is held behind [`PDQ_ENABLED`] (`false`): the upload
-//! path never sends frames, so nothing can reach production unvalidated.
+//! matches, silently. [`PDQ_ENABLED`] was flipped to `true` after the desktop
+//! hash was verified to land in the server hash space end-to-end against a live
+//! backend. An automated "desktop hash == sidecar hash, distance 0" CI gate
+//! (see the still-`#[ignore]`d `pdq_hash_bit_exact_with_sidecar` test) remains
+//! the recommended regression guard.
 //!
 //! ## Soft-skip
 //! PDQ is strictly additive. Any failure (no bundled ffmpeg, decode/seek error,
@@ -35,11 +37,11 @@ use std::path::Path;
 use std::process::Output;
 
 /// Master kill-switch (mirrors the browser `STUB_MODE` and the server
-/// `PDQ_ENABLED`). Held `false` until the desktop hash is validated bit-exact
-/// against the sidecar; while `false`, [`compute_pdq_frames`] returns empty and
-/// the upload path sends no `pdq_frames`, so behaviour is byte-identical to the
-/// pre-PDQ client.
-pub const PDQ_ENABLED: bool = false;
+/// `PDQ_ENABLED`). Enabled after the desktop hash was verified end-to-end
+/// against a live backend (see the module header). While `false`,
+/// [`compute_pdq_frames`] returns empty and the upload path sends no
+/// `pdq_frames`, so behaviour is byte-identical to the pre-PDQ client.
+pub const PDQ_ENABLED: bool = true;
 
 /// Fixed seek points in seconds. Must match the sidecar
 /// (`DEFAULT_TIMES = [1, 5, 10, 15, 20]`) and the browser so query frames land
