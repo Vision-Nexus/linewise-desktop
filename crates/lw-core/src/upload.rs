@@ -155,6 +155,15 @@ pub struct UploadEngine {
     transcode_config: TranscodeConfig,
     chunk_size: u64,
     upload_semaphore: Arc<Semaphore>,
+    /// Current batch dispatch mode, remembered from config / the last
+    /// `confirm_staged`. `true` = sequential "upload one by one"; `false` =
+    /// concurrent. Read by `do_upload` (fast-fail budget), `resume_pending`,
+    /// `force_upload`, and the auto-retry loop.
+    sequential: AtomicBool,
+    /// Single-flight guard for the sequential drainer: at most one drainer task
+    /// runs; a confirm/resume/force while it's running just (re)marks rows
+    /// PENDING and the running drainer picks them up on its next iteration.
+    seq_worker_running: AtomicBool,
     /// Lazy-cached `whoami` snapshot for the logged-in user, populated
     /// on the first dedup check that needs it. The engine is built
     /// before login, so we can't pass it through the constructor; the
@@ -187,6 +196,7 @@ impl UploadEngine {
         transcode_config: TranscodeConfig,
         chunk_size_mb: u32,
         max_concurrent: u32,
+        sequential: bool,
     ) -> Self {
         Self {
             db,
@@ -198,6 +208,8 @@ impl UploadEngine {
             transcode_config,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
+            sequential: AtomicBool::new(sequential),
+            seq_worker_running: AtomicBool::new(false),
             current_user_cache: OnceCell::new(),
         }
     }
@@ -908,6 +920,14 @@ impl UploadEngine {
             state: UploadState::Pending,
         });
 
+        // Sequential mode: `force_upload_task` re-stamped `created_at`, so this
+        // row now sits at the tail of the add-ordered queue. Just (re)start the
+        // drainer — it reaches the row in turn. (Decision #5: force = queue tail.)
+        if self.sequential.load(Ordering::Relaxed) {
+            self.start_sequential_worker();
+            return Ok(());
+        }
+
         let pending = self.db.get_pending_uploads().await?;
         let Some(mut task) = pending.into_iter().find(|t| t.id == task_id) else {
             tracing::warn!("force_upload: task {task_id} not found in PENDING set");
@@ -941,7 +961,12 @@ impl UploadEngine {
     pub async fn confirm_staged(
         self: &Arc<Self>,
         transcode_task_ids: &[String],
+        sequential: bool,
     ) -> Result<Vec<String>, DbError> {
+        // Remember the chosen dispatch mode so resume / force / fast-fail all
+        // agree with this batch for the rest of the session.
+        self.sequential.store(sequential, Ordering::Relaxed);
+
         let staged = self.db.get_staged_uploads().await?;
         let mut confirmed_ids = Vec::new();
 
@@ -958,6 +983,13 @@ impl UploadEngine {
                 .await?;
             task.state = UploadState::Pending;
             confirmed_ids.push(task.id.clone());
+
+            // Sequential "upload one by one" mode is drained by the single
+            // worker started below (one in-flight upload, in add-order), so
+            // skip the per-task fan-out here.
+            if sequential {
+                continue;
+            }
 
             let engine = Arc::clone(self);
             let sem = Arc::clone(&self.upload_semaphore);
@@ -985,7 +1017,85 @@ impl UploadEngine {
             });
         }
 
+        if sequential {
+            self.start_sequential_worker();
+        }
+
         Ok(confirmed_ids)
+    }
+
+    /// Start the single sequential drainer if one isn't already running.
+    ///
+    /// "Upload one by one" mode processes the whole PENDING queue with **one**
+    /// in-flight upload, in add-order (`created_at ASC`), so the network isn't
+    /// split across files. A single-flight `AtomicBool` guarantees at most one
+    /// drainer: a confirm / resume / force that happens while a drain is already
+    /// running just marks rows PENDING and returns — the running drainer picks
+    /// them up on its next iteration.
+    fn start_sequential_worker(self: &Arc<Self>) {
+        if self.seq_worker_running.swap(true, Ordering::SeqCst) {
+            return; // a drainer is already running
+        }
+        let engine = Arc::clone(self);
+        tokio::spawn(async move {
+            engine.drain_sequential().await;
+        });
+    }
+
+    /// Drain the PENDING queue one file at a time, in add-order, until empty.
+    ///
+    /// On failure the row is marked `Failed` and the drainer moves on to the
+    /// next file (no retry, no blocking) — maximising how much of the batch
+    /// completes. Clears the single-flight flag on exit, then re-checks once so
+    /// a row enqueued in the tiny window between "queue looks empty" and "flag
+    /// cleared" is not stranded.
+    async fn drain_sequential(self: &Arc<Self>) {
+        loop {
+            let next = match self.db.get_pending_uploads().await {
+                Ok(rows) => rows.into_iter().next(),
+                Err(e) => {
+                    tracing::warn!("sequential drain: get_pending_uploads failed: {e}");
+                    None
+                }
+            };
+
+            let Some(mut task) = next else {
+                // Queue looks empty — release the flag, then re-check once to
+                // avoid stranding a row enqueued during the gap.
+                self.seq_worker_running.store(false, Ordering::SeqCst);
+                let still_empty = self
+                    .db
+                    .get_pending_uploads()
+                    .await
+                    .map(|rows| rows.is_empty())
+                    .unwrap_or(true);
+                if still_empty {
+                    return;
+                }
+                // Work arrived: re-acquire the flag and keep draining. If another
+                // drainer beat us to it, let it own the queue.
+                if self.seq_worker_running.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                continue;
+            };
+
+            match self.process_task(&mut task).await {
+                Ok(()) => tracing::info!("Sequential upload completed: {}", task.filename),
+                Err(e) => {
+                    e.log(format_args!("Sequential upload of {}", task.filename));
+                    let _ = self
+                        .db
+                        .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                        .await;
+                    let _ = self.event_tx.send(UploadEvent::Failed {
+                        task_id: task.id.clone(),
+                        error: e.to_string(),
+                    });
+                    // Skip — continue to the next file.
+                }
+            }
+        }
     }
 
     /// Remove a staged file (before upload confirmation).
@@ -1272,7 +1382,7 @@ impl UploadEngine {
         task: &mut UploadTask,
         session: &storage::UploadSession,
         upload_path: &std::path::Path,
-        _upload_size: u64,
+        upload_size: u64,
         hash: &str,
         desensitized_path: &Option<PathBuf>,
         transcoded_path: &Option<PathBuf>,
@@ -1289,12 +1399,35 @@ impl UploadEngine {
             });
         });
 
+        // Scale the resumable chunk size to the file. A fixed small chunk makes a
+        // multi-GB upload pay a per-chunk round-trip + TCP slow-start penalty
+        // hundreds of times and never saturate the link; `self.chunk_size` (the
+        // config `chunk_size_mb`) acts as the floor. See `storage::pick_chunk_size`.
+        let chunk_size = storage::pick_chunk_size(upload_size, self.chunk_size);
+        // Sequential "upload one by one" mode fails a chunk fast (no retry) so a
+        // dead file doesn't stall the single queue; concurrent mode keeps the
+        // resilient retry budget since other files keep flowing meanwhile.
+        let max_retries = if self.sequential.load(Ordering::Relaxed) {
+            0
+        } else {
+            storage::DEFAULT_MAX_RETRIES
+        };
+        tracing::info!(
+            filename = %task.filename,
+            upload_size,
+            chunk_size,
+            chunk_count = upload_size.div_ceil(chunk_size.max(1)),
+            max_retries,
+            "upload: selected dynamic chunk size",
+        );
+
         let confirmed = storage::upload_file_chunked(
             self.storage.as_ref(),
             session,
             upload_path,
             task.bytes_uploaded,
-            self.chunk_size,
+            chunk_size,
+            max_retries,
             &on_progress,
         )
         .await?;
@@ -1352,10 +1485,24 @@ impl UploadEngine {
         let tasks = self.db.get_pending_uploads().await?;
         tracing::info!("Resuming {} pending uploads", tasks.len());
 
+        // Sequential mode (remembered from config): one drainer handles the
+        // whole queue in add-order; `process_task` resumes each from its
+        // server-confirmed offset. No unbounded fan-out.
+        if self.sequential.load(Ordering::Relaxed) {
+            if !tasks.is_empty() {
+                self.start_sequential_worker();
+            }
+            return Ok(());
+        }
+
         for mut task in tasks {
             let engine = Arc::clone(self);
+            let sem = Arc::clone(&self.upload_semaphore);
 
             tokio::spawn(async move {
+                // Bound concurrency on resume too, so a backlog doesn't fan out
+                // to one connection per pending file.
+                let _permit = sem.acquire().await.expect("semaphore closed");
                 if let Some(ref sid) = task.session_id {
                     let session = storage::UploadSession {
                         session_id: sid.clone(),
@@ -1410,6 +1557,13 @@ impl UploadEngine {
                     .is_ok();
 
                 if !online {
+                    continue;
+                }
+
+                // In sequential "upload one by one" mode, failures are left for
+                // the user to retry manually — don't auto-re-enqueue them, which
+                // would interleave with the ordered single-file queue.
+                if engine.sequential.load(Ordering::Relaxed) {
                     continue;
                 }
 

@@ -66,8 +66,19 @@ pub struct UploadConfig {
     pub bandwidth_limit_mbps: u32,
     #[serde(default = "default_concurrent")]
     pub max_concurrent_uploads: u32,
+    /// Floor (in whole MiB) for the dynamic resumable chunk size. The uploader
+    /// scales the chunk with the file size (see `storage::pick_chunk_size`); this
+    /// raises the lower bound, and an explicit value above the auto cap overrides
+    /// it. It is no longer a fixed chunk size.
     #[serde(default = "default_chunk_size")]
     pub chunk_size_mb: u32,
+    /// Remembered batch dispatch mode for the split "Upload files" button:
+    /// `true` = upload one by one (sequential — single bandwidth, in add-order,
+    /// skip-on-failure), `false` = concurrent (default). `#[serde(default)]`
+    /// keeps config.toml files written before this field existed loading cleanly,
+    /// so upgrading users need no migration.
+    #[serde(default)]
+    pub sequential_uploads: bool,
 }
 
 fn default_true() -> bool {
@@ -76,6 +87,8 @@ fn default_true() -> bool {
 fn default_concurrent() -> u32 {
     3
 }
+/// Floor (in MiB) for the dynamic chunk sizer; 8 keeps small files efficient
+/// while large files scale up automatically. See `storage::pick_chunk_size`.
 fn default_chunk_size() -> u32 {
     8
 }
@@ -238,6 +251,7 @@ impl Default for AppConfig {
                 bandwidth_limit_mbps: 0,
                 max_concurrent_uploads: 2,
                 chunk_size_mb: 8,
+                sequential_uploads: false,
             },
             desensitization: DesensitizationConfig {
                 strip_metadata: true,

@@ -102,6 +102,7 @@ impl CoreServices {
             config.transcode.clone(),
             config.upload.chunk_size_mb,
             config.upload.max_concurrent_uploads,
+            config.upload.sequential_uploads,
         ));
 
         // Spawn background auto-retry for failed uploads on network

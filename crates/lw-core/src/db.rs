@@ -392,7 +392,7 @@ impl Database {
     /// makes `process_task` skip the dedup short-circuit.
     pub async fn force_upload_task(&self, id: &str) -> Result<(), DbError> {
         sqlx::query!(
-            "UPDATE upload_queue SET force_upload = 1, state = 'PENDING', error_message = NULL, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE upload_queue SET force_upload = 1, state = 'PENDING', error_message = NULL, created_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
             id,
         )
         .execute(&self.pool)
@@ -465,7 +465,7 @@ impl Database {
                     hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
              WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
-             ORDER BY created_at ASC",
+             ORDER BY created_at ASC, rowid ASC",
         )
         .fetch_all(&self.pool)
         .await?;
