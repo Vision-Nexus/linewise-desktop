@@ -12,6 +12,51 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 /// Larger chunks = fewer requests = faster for big video files.
 const DEFAULT_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
 
+/// GCS resumable uploads require every non-final chunk to be a multiple of
+/// 256 KiB. See <https://cloud.google.com/storage/docs/performing-resumable-uploads>.
+const CHUNK_QUANTUM: u64 = 256 * 1024;
+
+/// Lower bound for an auto-selected chunk. Matches the historical 8 MiB default
+/// and keeps small/medium files from over-chunking.
+const MIN_AUTO_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+
+/// Upper bound for an auto-selected chunk. This caps memory: the resumable loop
+/// holds one chunk in memory at a time (buffered twice — the read buffer plus
+/// the per-request body copy), so peak RAM is roughly `2 * chunk * concurrent
+/// files`. 64 MiB keeps a few concurrent uploads well-bounded while still
+/// amortizing the per-chunk round-trip / TCP slow-start cost over a big file.
+const MAX_AUTO_CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Number of chunks to aim for, so the chunk size scales with the file instead
+/// of being a fixed value: bigger files get bigger chunks (fewer round-trips),
+/// always clamped to `[MIN_AUTO_CHUNK_SIZE, MAX_AUTO_CHUNK_SIZE]`.
+const TARGET_CHUNK_COUNT: u64 = 32;
+
+/// Pick a resumable chunk size for a file of `file_size` bytes.
+///
+/// A fixed small chunk (the old 8 MiB default) makes a multi-GB upload pay a
+/// per-chunk round-trip + TCP slow-start penalty hundreds of times and never
+/// saturate the link; a single whole-file chunk maximises throughput but makes a
+/// late failure re-send everything. This scales the chunk with the file — aim
+/// for about `TARGET_CHUNK_COUNT` chunks, clamp to `[floor, MAX_AUTO_CHUNK_SIZE]`
+/// and round up to the GCS 256 KiB quantum — so throughput is recovered while a
+/// failed chunk only costs one chunk to re-send.
+///
+/// `floor` is the configured `chunk_size_mb` in bytes: it raises the lower bound
+/// (a power user can force larger chunks) and, if set above the auto cap,
+/// overrides it. A zero `floor` falls back to `MIN_AUTO_CHUNK_SIZE`.
+///
+/// Changing this value between runs is safe: resumable uploads resume from the
+/// server-confirmed byte offset (`query_progress`), not from a chunk index, so
+/// the next chunk size is independent of the previous one.
+pub fn pick_chunk_size(file_size: u64, floor: u64) -> u64 {
+    let floor = floor.max(MIN_AUTO_CHUNK_SIZE);
+    let ceil = MAX_AUTO_CHUNK_SIZE.max(floor);
+    let scaled = file_size.div_ceil(TARGET_CHUNK_COUNT).clamp(floor, ceil);
+    // Round up to the 256 KiB quantum GCS requires for non-final chunks.
+    scaled.div_ceil(CHUNK_QUANTUM) * CHUNK_QUANTUM
+}
+
 /// Handle to an in-progress resumable upload session, persisted in SQLite
 #[derive(Debug, Clone)]
 pub struct UploadSession {
@@ -87,6 +132,7 @@ pub async fn upload_file_chunked(
     file_path: &Path,
     start_offset: u64,
     chunk_size: u64,
+    max_retries: u32,
     on_progress: &ProgressFn,
 ) -> Result<u64, UploadError> {
     let mut file = tokio::fs::File::open(file_path).await?;
@@ -107,7 +153,8 @@ pub async fn upload_file_chunked(
         let mut buf = vec![0u8; this_chunk];
         file.read_exact(&mut buf).await?;
 
-        let confirmed = upload_chunk_with_retry(backend, session, &buf, offset).await?;
+        let confirmed =
+            upload_chunk_with_retry(backend, session, &buf, offset, max_retries).await?;
         offset = confirmed;
         on_progress(offset, total);
     }
@@ -115,27 +162,41 @@ pub async fn upload_file_chunked(
     Ok(offset)
 }
 
+/// Default per-chunk retry budget for the resilient (concurrent) upload path.
+/// Near-infinite (100): a transient network blip should not lose a chunk. The
+/// backoff plateaus at `MAX_RETRY_DELAY_MS`, so 100 attempts is bounded patience
+/// (tens of minutes), not a busy-loop. Sequential "upload one by one" mode passes
+/// 0 instead, so a dead file fails fast and the queue advances.
+pub const DEFAULT_MAX_RETRIES: u32 = 100;
+
 /// Upload a single chunk with automatic retry on network errors.
-/// Uses exponential backoff: 1s → 2s → 4s → 8s → 16s (max 5 retries).
+/// Exponential backoff capped at a 30s plateau (1s, 2s, 4s, 8s, 16s, 30s, ...),
+/// up to `max_retries` attempts (0 = fail fast, no retry).
 /// Only retries on network/timeout errors, not on 4xx API errors.
 async fn upload_chunk_with_retry(
     backend: &StorageBackend,
     session: &UploadSession,
     data: &[u8],
     offset: u64,
+    max_retries: u32,
 ) -> Result<u64, UploadError> {
-    const MAX_RETRIES: u32 = 5;
     const INITIAL_DELAY_MS: u64 = 1000;
+    // Cap the exponential backoff so a large `max_retries` (near-infinite) keeps
+    // retrying at a sane fixed interval instead of overflowing the delay math
+    // (2^attempt) or sleeping for days. Backoff: 1s, 2s, 4s, 8s, 16s, then a 30s
+    // plateau.
+    const MAX_RETRY_DELAY_MS: u64 = 30_000;
 
     let mut attempt = 0;
     loop {
         match backend.upload_chunk(session, data, offset).await {
             Ok(confirmed) => return Ok(confirmed),
-            Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
+            Err(e) if is_retryable(&e) && attempt < max_retries => {
                 attempt += 1;
-                let delay = INITIAL_DELAY_MS * 2u64.pow(attempt - 1);
+                let shift = (attempt - 1).min(5);
+                let delay = (INITIAL_DELAY_MS << shift).min(MAX_RETRY_DELAY_MS);
                 tracing::warn!(
-                    "Chunk upload failed (attempt {attempt}/{MAX_RETRIES}), retrying in {delay}ms: {e}"
+                    "Chunk upload failed (attempt {attempt}/{max_retries}), retrying in {delay}ms: {e}"
                 );
                 // Wait for network recovery — poll connectivity before sleeping
                 wait_for_network(delay).await;
@@ -495,4 +556,75 @@ fn extract_all_xml_values(xml: &str, tag: &str) -> Vec<String> {
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    /// The shipped `config.chunk_size_mb` default (8), in bytes.
+    const DEFAULT_FLOOR: u64 = 8 * MIB;
+
+    #[test]
+    fn chunk_size_is_always_256kib_aligned() {
+        for size in [1_u64, 1024, 50 * MIB, 1331 * MIB, 3 * GIB, 10 * GIB] {
+            let chunk = pick_chunk_size(size, DEFAULT_FLOOR);
+            assert_eq!(
+                chunk % CHUNK_QUANTUM,
+                0,
+                "chunk {chunk} for size {size} not 256 KiB aligned"
+            );
+        }
+    }
+
+    #[test]
+    fn small_and_medium_files_use_the_floor() {
+        assert_eq!(
+            pick_chunk_size(50 * MIB, DEFAULT_FLOOR),
+            MIN_AUTO_CHUNK_SIZE
+        );
+        assert_eq!(
+            pick_chunk_size(200 * MIB, DEFAULT_FLOOR),
+            MIN_AUTO_CHUNK_SIZE
+        );
+    }
+
+    #[test]
+    fn large_files_scale_up_but_stay_capped() {
+        // ~1.24 GiB lands between the floor and the cap.
+        let chunk = pick_chunk_size(1331 * MIB, DEFAULT_FLOOR);
+        assert!(
+            chunk > MIN_AUTO_CHUNK_SIZE && chunk <= MAX_AUTO_CHUNK_SIZE,
+            "got {chunk}"
+        );
+        // Multi-GB files saturate at the cap.
+        assert_eq!(pick_chunk_size(3 * GIB, DEFAULT_FLOOR), MAX_AUTO_CHUNK_SIZE);
+        assert_eq!(
+            pick_chunk_size(10 * GIB, DEFAULT_FLOOR),
+            MAX_AUTO_CHUNK_SIZE
+        );
+    }
+
+    #[test]
+    fn chunk_count_stays_bounded_for_large_files() {
+        let size = 1331 * MIB;
+        let chunks = size.div_ceil(pick_chunk_size(size, DEFAULT_FLOOR));
+        assert!(
+            (20..=64).contains(&chunks),
+            "expected tens of chunks, got {chunks}"
+        );
+    }
+
+    #[test]
+    fn explicit_large_floor_overrides_the_cap() {
+        // chunk_size_mb = 128 -> the floor wins over the 64 MiB auto cap.
+        assert_eq!(pick_chunk_size(3 * GIB, 128 * MIB), 128 * MIB);
+    }
+
+    #[test]
+    fn zero_floor_falls_back_to_min() {
+        assert_eq!(pick_chunk_size(50 * MIB, 0), MIN_AUTO_CHUNK_SIZE);
+    }
 }

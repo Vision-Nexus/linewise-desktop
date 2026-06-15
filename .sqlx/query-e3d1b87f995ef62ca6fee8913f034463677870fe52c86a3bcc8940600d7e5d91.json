@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')\n             ORDER BY created_at ASC",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')\n             ORDER BY created_at ASC, rowid ASC",
   "describe": {
     "columns": [
       {
@@ -148,5 +148,5 @@
       false
     ]
   },
-  "hash": "f92f7b18c16348ddf52f1facb46d482686dd000593a3e0430b384b307dbf5ef6"
+  "hash": "e3d1b87f995ef62ca6fee8913f034463677870fe52c86a3bcc8940600d7e5d91"
 }

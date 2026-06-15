@@ -243,13 +243,17 @@ pub fn UploadQueue() -> Element {
         });
     };
 
-    // Confirm upload (step 2)
+    // Confirm upload (step 2). One callback drives all three triggers (the
+    // primary button + the two split-menu items); `sequential` selects the
+    // dispatch mode and is remembered (persisted to config) for next time.
     let engine_for_confirm = services.upload_engine.clone();
+    let config_for_confirm = services.config.clone();
     let app_state_for_confirm = app_state.clone();
-    let mut app_state_confirm = app_state.clone();
-    let on_confirm = move |_| {
+    let app_state_confirm = app_state.clone();
+    let confirm_cb = use_callback(move |sequential: bool| {
         let engine = engine_for_confirm.clone();
-        // Collect transcode-opted task IDs from UI signal
+        let mut app_state_write = app_state_confirm.clone();
+        // Collect transcode-opted task IDs from the UI signal.
         let transcode_ids: Vec<String> = app_state_for_confirm
             .upload_tasks
             .read()
@@ -257,11 +261,18 @@ pub fn UploadQueue() -> Element {
             .filter(|t| t.state == UploadState::Staged && t.transcode)
             .map(|t| t.id.clone())
             .collect();
+        // Remember the choice for next session (best-effort; disk only — the
+        // in-session default is the `upload_seq` signal below).
+        let mut cfg = config_for_confirm.clone();
+        cfg.upload.sequential_uploads = sequential;
+        if let Err(e) = cfg.save() {
+            tracing::warn!("Failed to persist upload mode: {e}");
+        }
         spawn(async move {
-            match engine.confirm_staged(&transcode_ids).await {
+            match engine.confirm_staged(&transcode_ids, sequential).await {
                 Ok(ids) => {
-                    tracing::info!("Confirmed {} files for upload", ids.len());
-                    let mut tasks = app_state_confirm.upload_tasks.write();
+                    tracing::info!("Confirmed {} files (sequential={sequential})", ids.len());
+                    let mut tasks = app_state_write.upload_tasks.write();
                     for task in tasks.iter_mut() {
                         if ids.contains(&task.id) {
                             task.state = UploadState::Pending;
@@ -271,7 +282,12 @@ pub fn UploadQueue() -> Element {
                 Err(e) => tracing::error!("Failed to confirm uploads: {e}"),
             }
         });
-    };
+    });
+
+    // Split "Upload" button state: the remembered dispatch mode (initial value
+    // from persisted config) and whether the options dropdown is open.
+    let mut upload_seq = use_signal(|| services.config.upload.sequential_uploads);
+    let mut show_upload_menu = use_signal(|| false);
 
     // Remove staged file
     let engine_for_remove = services.upload_engine.clone();
@@ -550,6 +566,14 @@ pub fn UploadQueue() -> Element {
         .cloned()
         .collect();
 
+    // The dispatch mode (concurrent vs one-by-one) may only change while the
+    // queue is idle. Locking it during active/queued/paused work guarantees the
+    // sequential drainer and the concurrent fan-out never run at the same time,
+    // so they can't both touch the same row. (VLP-747 Part B, decision A.)
+    let queue_active = tasks
+        .iter()
+        .any(|t| t.state.is_active() || t.state == UploadState::Paused);
+
     rsx! {
         div {
             style: "padding: 16px; border: {drop_border}; border-radius: 8px; min-height: 300px; background: {drop_background}; transition: border 0.15s, background 0.15s;",
@@ -577,12 +601,63 @@ pub fn UploadQueue() -> Element {
                                 } else {
                                     format!("Upload {staged_count} files")
                                 };
+                                let mode_hint = if *upload_seq.read() { " (one by one)" } else { "" };
+                                let menu_title = if queue_active {
+                                    "Finish or stop the current uploads to change mode"
+                                } else {
+                                    "Upload options"
+                                };
                                 rsx! {
-                                    button {
-                                        class: "btn-success",
-                                        style: "{styles::BTN_SUCCESS}",
-                                        onclick: on_confirm,
-                                        "{label}"
+                                    div {
+                                        style: "position: relative; display: inline-flex; align-items: center; gap: 2px;",
+                                        // Primary action: upload in the remembered mode.
+                                        button {
+                                            class: "btn-success",
+                                            style: "{styles::BTN_SUCCESS}",
+                                            onclick: move |_| confirm_cb.call(*upload_seq.read()),
+                                            "{label}{mode_hint}"
+                                        }
+                                        // Dropdown toggle. Locked while uploads are active so the
+                                        // dispatch strategy can't change mid-batch (which could let a
+                                        // lingering concurrent task and the sequential drainer touch
+                                        // the same row). The mode is chosen only when the queue is idle.
+                                        button {
+                                            class: "btn-success",
+                                            style: "padding-left: 9px; padding-right: 9px;",
+                                            disabled: queue_active,
+                                            title: "{menu_title}",
+                                            onclick: move |_| {
+                                                if queue_active {
+                                                    return;
+                                                }
+                                                let open = *show_upload_menu.read();
+                                                show_upload_menu.set(!open);
+                                            },
+                                            "▾"
+                                        }
+                                        if *show_upload_menu.read() && !queue_active {
+                                            div {
+                                                style: "position: absolute; top: 100%; right: 0; margin-top: 4px; background: var(--bg-tertiary); border: 1px solid var(--border-focus); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); z-index: 50; min-width: 220px; overflow: hidden;",
+                                                button {
+                                                    style: "display: block; width: 100%; text-align: left; padding: 9px 12px; background: transparent; border: none; cursor: pointer; font-size: 13px;",
+                                                    onclick: move |_| {
+                                                        upload_seq.set(false);
+                                                        show_upload_menu.set(false);
+                                                        confirm_cb.call(false);
+                                                    },
+                                                    "Upload all at once (parallel)"
+                                                }
+                                                button {
+                                                    style: "display: block; width: 100%; text-align: left; padding: 9px 12px; background: transparent; border: none; cursor: pointer; font-size: 13px; border-top: 1px solid var(--border-focus);",
+                                                    onclick: move |_| {
+                                                        upload_seq.set(true);
+                                                        show_upload_menu.set(false);
+                                                        confirm_cb.call(true);
+                                                    },
+                                                    "Upload one by one (sequential)"
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
