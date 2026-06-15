@@ -153,7 +153,8 @@ pub async fn upload_file_chunked(
         let mut buf = vec![0u8; this_chunk];
         file.read_exact(&mut buf).await?;
 
-        let confirmed = upload_chunk_with_retry(backend, session, &buf, offset, max_retries).await?;
+        let confirmed =
+            upload_chunk_with_retry(backend, session, &buf, offset, max_retries).await?;
         offset = confirmed;
         on_progress(offset, total);
     }
@@ -572,8 +573,14 @@ mod tests {
 
     #[test]
     fn small_and_medium_files_use_the_floor() {
-        assert_eq!(pick_chunk_size(50 * MIB, DEFAULT_FLOOR), MIN_AUTO_CHUNK_SIZE);
-        assert_eq!(pick_chunk_size(200 * MIB, DEFAULT_FLOOR), MIN_AUTO_CHUNK_SIZE);
+        assert_eq!(
+            pick_chunk_size(50 * MIB, DEFAULT_FLOOR),
+            MIN_AUTO_CHUNK_SIZE
+        );
+        assert_eq!(
+            pick_chunk_size(200 * MIB, DEFAULT_FLOOR),
+            MIN_AUTO_CHUNK_SIZE
+        );
     }
 
     #[test]
@@ -586,7 +593,10 @@ mod tests {
         );
         // Multi-GB files saturate at the cap.
         assert_eq!(pick_chunk_size(3 * GIB, DEFAULT_FLOOR), MAX_AUTO_CHUNK_SIZE);
-        assert_eq!(pick_chunk_size(10 * GIB, DEFAULT_FLOOR), MAX_AUTO_CHUNK_SIZE);
+        assert_eq!(
+            pick_chunk_size(10 * GIB, DEFAULT_FLOOR),
+            MAX_AUTO_CHUNK_SIZE
+        );
     }
 
     #[test]
