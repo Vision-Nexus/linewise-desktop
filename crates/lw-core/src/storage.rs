@@ -163,13 +163,15 @@ pub async fn upload_file_chunked(
 }
 
 /// Default per-chunk retry budget for the resilient (concurrent) upload path.
-/// Sequential "upload one by one" mode passes 0 so a dead file fails fast and
-/// the queue advances, instead of stalling on the backoff + connectivity poll.
-pub const DEFAULT_MAX_RETRIES: u32 = 5;
+/// Near-infinite (100): a transient network blip should not lose a chunk. The
+/// backoff plateaus at `MAX_RETRY_DELAY_MS`, so 100 attempts is bounded patience
+/// (tens of minutes), not a busy-loop. Sequential "upload one by one" mode passes
+/// 0 instead, so a dead file fails fast and the queue advances.
+pub const DEFAULT_MAX_RETRIES: u32 = 100;
 
 /// Upload a single chunk with automatic retry on network errors.
-/// Uses exponential backoff: 1s → 2s → 4s → 8s → 16s, up to `max_retries`
-/// attempts (0 = fail fast, no retry).
+/// Exponential backoff capped at a 30s plateau (1s, 2s, 4s, 8s, 16s, 30s, ...),
+/// up to `max_retries` attempts (0 = fail fast, no retry).
 /// Only retries on network/timeout errors, not on 4xx API errors.
 async fn upload_chunk_with_retry(
     backend: &StorageBackend,
@@ -179,6 +181,11 @@ async fn upload_chunk_with_retry(
     max_retries: u32,
 ) -> Result<u64, UploadError> {
     const INITIAL_DELAY_MS: u64 = 1000;
+    // Cap the exponential backoff so a large `max_retries` (near-infinite) keeps
+    // retrying at a sane fixed interval instead of overflowing the delay math
+    // (2^attempt) or sleeping for days. Backoff: 1s, 2s, 4s, 8s, 16s, then a 30s
+    // plateau.
+    const MAX_RETRY_DELAY_MS: u64 = 30_000;
 
     let mut attempt = 0;
     loop {
@@ -186,7 +193,8 @@ async fn upload_chunk_with_retry(
             Ok(confirmed) => return Ok(confirmed),
             Err(e) if is_retryable(&e) && attempt < max_retries => {
                 attempt += 1;
-                let delay = INITIAL_DELAY_MS * 2u64.pow(attempt - 1);
+                let shift = (attempt - 1).min(5);
+                let delay = (INITIAL_DELAY_MS << shift).min(MAX_RETRY_DELAY_MS);
                 tracing::warn!(
                     "Chunk upload failed (attempt {attempt}/{max_retries}), retrying in {delay}ms: {e}"
                 );
