@@ -92,6 +92,19 @@ pub fn App() -> Element {
         }
     });
 
+    // Single-instance "show" relay. When a second launch is attempted, the
+    // primary instance's background accept loop notifies here; we raise the
+    // window using the exact same calls as the tray "show" item above so the
+    // behavior is identical. Runs for the app's lifetime, one wake per signal.
+    use_future(|| async {
+        loop {
+            crate::single_instance::show_requests().notified().await;
+            let window = dioxus::desktop::window();
+            window.set_visible(true);
+            window.set_focus();
+        }
+    });
+
     let mut boot = use_signal(|| BootState::Initializing);
 
     // Startup version check. Runs once at mount, in parallel with

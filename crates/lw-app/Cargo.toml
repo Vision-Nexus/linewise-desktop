@@ -23,6 +23,7 @@ uuid = { workspace = true }
 rfd = { workspace = true }
 webbrowser = { workspace = true }
 dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
+interprocess = "2.4.2"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
