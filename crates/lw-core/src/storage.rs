@@ -257,19 +257,24 @@ pub struct GcsBackend {
 
 impl Default for GcsBackend {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
 impl GcsBackend {
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .connect_timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build reqwest client"),
-        }
+    /// Build the GCS upload client. `proxy` is the optional fixed proxy URL
+    /// from config (`ServerConfig::proxy_url`); empty/`None` keeps the
+    /// historical no-explicit-proxy behaviour. The 5-minute total timeout is
+    /// deliberately generous for large resumable chunk PUTs; the 30s connect
+    /// timeout fails a dead/wrong proxy fast instead of hanging the session.
+    pub fn new(proxy: Option<&str>) -> Self {
+        let client = crate::net::build_http_client(
+            proxy,
+            Some(std::time::Duration::from_secs(300)),
+            std::time::Duration::from_secs(30),
+        )
+        .expect("failed to build reqwest client");
+        Self { client }
     }
 
     async fn initiate_upload(

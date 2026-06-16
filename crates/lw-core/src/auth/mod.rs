@@ -29,6 +29,11 @@ pub struct AuthClientConfig {
     pub google_oauth_client_id: String,
     pub google_oauth_client_secret: String,
     pub microsoft_oauth_client_id: String,
+    /// Optional fixed HTTP proxy URL (mirrors `ServerConfig::proxy_url`).
+    /// Plumbed in so the Firebase auth client routes through the same proxy
+    /// as the API and upload clients — empty/`None` keeps the historical
+    /// no-explicit-proxy behaviour. See [`crate::net::build_http_client`].
+    pub proxy_url: Option<String>,
 }
 
 /// Firebase Auth REST API response for sign-in
@@ -98,8 +103,18 @@ pub struct AuthService {
 
 impl AuthService {
     pub fn new(config: AuthClientConfig) -> Self {
+        // Firebase auth calls are small JSON round-trips: a 60s total timeout
+        // is ample, and a 10s connect timeout fails a dead/wrong proxy fast
+        // rather than hanging sign-in / token refresh. The proxy mirrors the
+        // API and upload clients so a v2ray inbound covers the whole app.
+        let client = crate::net::build_http_client(
+            config.proxy_url.as_deref(),
+            Some(std::time::Duration::from_secs(60)),
+            std::time::Duration::from_secs(10),
+        )
+        .expect("failed to build reqwest client");
         Self {
-            client: reqwest::Client::new(),
+            client,
             config,
             tokens: Arc::new(RwLock::new(None)),
         }

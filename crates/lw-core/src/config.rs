@@ -18,6 +18,21 @@ pub struct AppConfig {
 pub struct ServerConfig {
     #[serde(default = "default_environment")]
     pub environment: Environment,
+    /// Optional fixed HTTP proxy for every outbound client (API, auth,
+    /// GCS uploads). When set to a non-empty `http://host:port` URL the
+    /// three reqwest clients route through it instead of relying on the
+    /// volatile Windows system-proxy snapshot captured at startup. Point
+    /// it at v2ray's local HTTP inbound (e.g. `http://127.0.0.1:10809`):
+    /// that endpoint is stable across GLOBAL↔RULE mode switches, so the
+    /// uploaders' retry loops recover instead of wedging until restart.
+    ///
+    /// Empty / absent = previous behaviour (no explicit proxy). SOCKS is
+    /// not supported (reqwest is built without the `socks` feature); an
+    /// invalid value is logged and ignored, never panics. `#[serde(default)]`
+    /// keeps config.toml files written before this field existed loading
+    /// cleanly, so upgrading users need no migration.
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +260,7 @@ impl Default for AppConfig {
         Self {
             server: ServerConfig {
                 environment: default_environment(),
+                proxy_url: None,
             },
             upload: UploadConfig {
                 auto_clean: false,

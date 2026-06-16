@@ -8,6 +8,7 @@ pub mod desensitize;
 pub mod error;
 pub mod logging;
 pub mod models;
+pub mod net;
 pub mod pdq;
 pub mod repair;
 pub mod storage;

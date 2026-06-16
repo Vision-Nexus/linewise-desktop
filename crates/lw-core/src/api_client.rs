@@ -16,9 +16,20 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-    pub fn new(environment: Environment, auth: Arc<AuthService>) -> Self {
+    /// Build the Linewise API client. `proxy` is the optional fixed proxy
+    /// URL from config (`ServerConfig::proxy_url`); empty/`None` keeps the
+    /// historical no-explicit-proxy behaviour. A 120s total timeout covers
+    /// the largest call (the quality-check head-byte POST, capped at 16 MiB)
+    /// on a slow link; the 10s connect timeout fails a dead/wrong proxy fast.
+    pub fn new(environment: Environment, auth: Arc<AuthService>, proxy: Option<&str>) -> Self {
+        let client = crate::net::build_http_client(
+            proxy,
+            Some(std::time::Duration::from_secs(120)),
+            std::time::Duration::from_secs(10),
+        )
+        .expect("failed to build reqwest client");
         Self {
-            client: reqwest::Client::new(),
+            client,
             base_url: environment.api_base_url().to_string(),
             auth,
         }
