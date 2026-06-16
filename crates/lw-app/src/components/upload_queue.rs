@@ -59,6 +59,7 @@ fn stage_error_toast(path: &Path, err: &UploadError) -> String {
             )
         }
         UploadError::Api { .. }
+        | UploadError::Auth { .. }
         | UploadError::GcsUpload { .. }
         | UploadError::Network(_)
         | UploadError::Io(_)

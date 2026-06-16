@@ -25,6 +25,11 @@ pub enum AuthError {
     OAuth { provider: String, message: String },
     #[error("Sign-in cancelled")]
     UserCancelled,
+    #[error(
+        "Network unreachable after {attempts} attempts while refreshing your session. \
+         Please check your internet connection, then close and reopen the app to retry."
+    )]
+    NetworkUnreachable { attempts: u32 },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +40,13 @@ pub enum UploadError {
     FileTooLarge { size: u64, max: u64 },
     #[error("API error ({status}): {message}")]
     Api { status: u16, message: String },
+    /// Authentication / session failure from `AuthService` (e.g. the Firebase
+    /// token refresh couldn't reach `securetoken.googleapis.com` — a transport
+    /// failure — or credentials were rejected). Carries the underlying message
+    /// verbatim so the UI shows the real cause and any user guidance, instead of
+    /// a misleading `API error (401)`.
+    #[error("{message}")]
+    Auth { message: String },
     #[error("GCS upload failed at byte {offset}")]
     GcsUpload {
         offset: u64,
@@ -117,6 +129,7 @@ impl UploadError {
             UploadError::FileNotFound(_)
             | UploadError::FileTooLarge { .. }
             | UploadError::Api { .. }
+            | UploadError::Auth { .. }
             | UploadError::GcsUpload { .. }
             | UploadError::Network(_)
             | UploadError::Io(_)
