@@ -29,8 +29,11 @@ impl ApiClient {
             .auth
             .get_id_token()
             .await
-            .map_err(|e| UploadError::Api {
-                status: 401,
+            // A token-fetch failure is an auth/session problem, not an HTTP 401
+            // from our API — most often the Firebase token refresh couldn't reach
+            // securetoken (a transport failure). Surface the real message via
+            // UploadError::Auth instead of mislabelling it "API error (401)".
+            .map_err(|e| UploadError::Auth {
                 message: e.to_string(),
             })?;
 
