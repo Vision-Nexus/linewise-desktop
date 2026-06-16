@@ -74,18 +74,29 @@ impl CoreServices {
         })?;
         let db = Arc::new(db);
 
+        // Optional fixed proxy (e.g. v2ray's HTTP inbound) shared by all
+        // three HTTP clients. Captured once here at startup — clients build
+        // once and live for the session, so a config change takes effect on
+        // next launch (the settings UI says so). `as_deref()` passes the
+        // borrowed &str into each constructor.
+        let proxy_url = config.server.proxy_url.clone();
         let auth = Arc::new(AuthService::new(AuthClientConfig {
             firebase_api_key: FIREBASE_API_KEY.to_string(),
             google_oauth_client_id: GOOGLE_OAUTH_CLIENT_ID.to_string(),
             google_oauth_client_secret: GOOGLE_OAUTH_CLIENT_SECRET.to_string(),
             microsoft_oauth_client_id: MICROSOFT_OAUTH_CLIENT_ID.to_string(),
+            proxy_url: proxy_url.clone(),
         }));
-        let api = Arc::new(ApiClient::new(config.server.environment, Arc::clone(&auth)));
+        let api = Arc::new(ApiClient::new(
+            config.server.environment,
+            Arc::clone(&auth),
+            proxy_url.as_deref(),
+        ));
 
         // Select storage backend based on config
         // TODO: Add S3 backend selection when China deployment is configured
         let storage = Arc::new(lw_core::storage::StorageBackend::Gcs(
-            lw_core::storage::GcsBackend::new(),
+            lw_core::storage::GcsBackend::new(proxy_url.as_deref()),
         ));
 
         // Video quality rules now live on the server. The desktop ships

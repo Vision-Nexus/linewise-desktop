@@ -1,5 +1,6 @@
 use crate::components::environment_settings::EnvironmentSettingsPane;
 use crate::components::general_settings::GeneralSettingsPane;
+use crate::components::proxy_settings::ProxySettingsPane;
 use crate::components::transcode_settings::TranscodeSettingsPane;
 use crate::components::upload_settings::UploadSettingsPane;
 use crate::components::version_banner::open_release_page;
@@ -197,6 +198,11 @@ fn AdvancedTab() -> Element {
 
             Divider {}
         }
+
+        SectionHeader { label: "Network" }
+        ProxySettingsPane {}
+
+        Divider {}
 
         SectionHeader { label: "Logging" }
         GeneralSettingsPane {}
