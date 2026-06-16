@@ -25,6 +25,11 @@ pub enum AuthError {
     OAuth { provider: String, message: String },
     #[error("Sign-in cancelled")]
     UserCancelled,
+    #[error(
+        "Network unreachable after {attempts} attempts while refreshing your session. \
+         Please check your internet connection, then close and reopen the app to retry."
+    )]
+    NetworkUnreachable { attempts: u32 },
 }
 
 #[derive(Debug, thiserror::Error)]

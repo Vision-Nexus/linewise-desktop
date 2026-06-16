@@ -66,6 +66,30 @@ struct RefreshResponse {
     expires_in: String,
 }
 
+/// Whether a token-refresh failure is worth retrying. Transport errors
+/// (couldn't reach `securetoken.googleapis.com` — DNS/TLS/connection/proxy) and
+/// server-side 5xx/429 are transient; a Firebase 4xx (e.g. invalid or revoked
+/// refresh token) is terminal and must not be retried.
+fn is_refresh_retryable(err: &AuthError) -> bool {
+    match err {
+        AuthError::Network(_) => true,
+        AuthError::Firebase { code, .. } => code
+            .parse::<u16>()
+            .map(|c| c >= 500 || c == 429)
+            .unwrap_or(false),
+        AuthError::InvalidCredentials
+        | AuthError::TokenExpired
+        | AuthError::EmailNotVerified
+        | AuthError::AccountDisabled
+        | AuthError::MfaRequired { .. }
+        | AuthError::NoStoredCredentials
+        | AuthError::Keyring(_)
+        | AuthError::OAuth { .. }
+        | AuthError::UserCancelled
+        | AuthError::NetworkUnreachable { .. } => false,
+    }
+}
+
 pub struct AuthService {
     client: reqwest::Client,
     config: AuthClientConfig,
@@ -237,37 +261,83 @@ impl AuthService {
             FIREBASE_TOKEN_URL, self.config.firebase_api_key
         );
 
+        // Token refresh sits on the critical path of every authenticated call
+        // during an upload, and the Firebase ID token expires hourly — so a
+        // single transient network blip reaching Google's securetoken endpoint
+        // must not fail a long-running upload. Retry transport errors (and
+        // server 5xx/429) with exponential backoff (1s, 2s, 4s, 8s); a real
+        // Firebase 4xx (revoked/invalid refresh token) is terminal and returned
+        // immediately. Once the budget is exhausted, surface an actionable
+        // prompt instead of a raw transport error.
+        const MAX_ATTEMPTS: u32 = 5;
+        const INITIAL_DELAY_MS: u64 = 1000;
+        const MAX_DELAY_MS: u64 = 8000;
+
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match self.try_refresh_once(&url, &refresh_token).await {
+                Ok(tokens) => {
+                    self.store_tokens(&tokens).await?;
+                    tracing::debug!(attempt, "token refreshed");
+                    return Ok(tokens);
+                }
+                Err(e) if is_refresh_retryable(&e) && attempt < MAX_ATTEMPTS => {
+                    let delay = (INITIAL_DELAY_MS << (attempt - 1)).min(MAX_DELAY_MS);
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = MAX_ATTEMPTS,
+                        delay_ms = delay,
+                        "token refresh failed, retrying: {e}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+                Err(e) if is_refresh_retryable(&e) => {
+                    tracing::warn!(attempt, "token refresh exhausted retries: {e}");
+                    return Err(AuthError::NetworkUnreachable { attempts: attempt });
+                }
+                Err(e) => {
+                    tracing::warn!(reason = %e, "token refresh failed (non-retryable)");
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// A single token-refresh attempt: POST the refresh grant and parse the
+    /// response. Transport failures surface as `AuthError::Network`; a non-2xx
+    /// Firebase response becomes `AuthError::Firebase`. The retry/backoff policy
+    /// lives in the caller, [`Self::refresh_token`].
+    async fn try_refresh_once(
+        &self,
+        url: &str,
+        refresh_token: &str,
+    ) -> Result<AuthTokens, AuthError> {
         let resp = self
             .client
-            .post(&url)
+            .post(url)
             .form(&[
                 ("grant_type", "refresh_token"),
-                ("refresh_token", &refresh_token),
+                ("refresh_token", refresh_token),
             ])
             .send()
             .await?;
 
         if !resp.status().is_success() {
             let err: FirebaseErrorResponse = resp.json().await?;
-            let auth_err = AuthError::Firebase {
+            return Err(AuthError::Firebase {
                 code: err.error.code.to_string(),
                 message: err.error.message,
-            };
-            tracing::warn!(reason = %auth_err, "token refresh failed");
-            return Err(auth_err);
+            });
         }
 
         let refresh: RefreshResponse = resp.json().await?;
         let expires_in: i64 = refresh.expires_in.parse().unwrap_or(3600);
-        let tokens = AuthTokens {
+        Ok(AuthTokens {
             id_token: refresh.id_token,
             refresh_token: refresh.refresh_token,
             expires_at: Utc::now() + Duration::seconds(expires_in),
-        };
-
-        self.store_tokens(&tokens).await?;
-        tracing::debug!("token refreshed");
-        Ok(tokens)
+        })
     }
 
     /// Get a valid ID token, refreshing if needed
