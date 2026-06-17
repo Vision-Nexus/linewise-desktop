@@ -175,6 +175,9 @@ pub fn TransferPanel() -> Element {
     let transcode_progress = app_state.transcode_progress;
     let upload_progress = app_state.upload_progress;
     let hash_progress = app_state.hash_progress;
+    // UI-derived per-task upload speed (bytes/sec), written by the resident
+    // `UploadRuntime`. Read-only here — threaded down to the uploading rows.
+    let upload_speed = app_state.upload_speed;
 
     let device_encoder_signatures: &'static [DeviceEncoderSignature] =
         video::device_encoder_signatures();
@@ -763,6 +766,7 @@ pub fn TransferPanel() -> Element {
                         transcode_progress,
                         upload_progress,
                         hash_progress,
+                        upload_speed,
                         on_remove: on_remove.clone(),
                         on_clear: on_clear.clone(),
                         on_transcode_click,
@@ -781,6 +785,7 @@ pub fn TransferPanel() -> Element {
                         device_encoder_signatures,
                         transcode_progress,
                         upload_progress,
+                        upload_speed,
                         on_remove: on_remove.clone(),
                         on_clear: on_clear.clone(),
                         on_transcode_click,

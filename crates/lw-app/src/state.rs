@@ -150,6 +150,12 @@ pub struct AppState {
     pub transcode_progress: Signal<HashMap<String, f32>>,
     pub upload_progress: Signal<HashMap<String, (u64, u64)>>,
     pub hash_progress: Signal<HashMap<String, (u64, u64)>>,
+    /// Per-task upload speed in bytes/second, derived UI-side by the resident
+    /// `UploadRuntime` from successive `Progress` events (the engine carries no
+    /// timestamp). EMA-smoothed; absent or `0.0` means "unknown" (no rate/ETA
+    /// shown yet). Updated at chunk granularity — one sample per landed chunk —
+    /// and cleared when a task reaches a terminal state.
+    pub upload_speed: Signal<HashMap<String, f64>>,
     pub projects: Signal<Vec<Project>>,
     pub tenant_projects: Signal<HashMap<String, Vec<Project>>>,
     pub is_loading: Signal<bool>,
@@ -246,6 +252,7 @@ impl AppState {
             transcode_progress: Signal::new(HashMap::new()),
             upload_progress: Signal::new(HashMap::new()),
             hash_progress: Signal::new(HashMap::new()),
+            upload_speed: Signal::new(HashMap::new()),
             projects: Signal::new(Vec::new()),
             tenant_projects: Signal::new(HashMap::new()),
             is_loading: Signal::new(false),

@@ -468,11 +468,15 @@ pub fn StagedRow(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[component]
 pub fn UploadTaskRow(
     task: UploadTask,
     transcode_progress: Signal<HashMap<String, f32>>,
     upload_progress: Signal<HashMap<String, (u64, u64)>>,
+    /// Per-task UI-derived upload speed (bytes/sec). Absent or `<= 0` means
+    /// unknown — no rate/ETA is shown. Only consulted while `Uploading`.
+    upload_speed: Signal<HashMap<String, f64>>,
     on_retry: EventHandler<String>,
     on_remove: EventHandler<String>,
     on_pause: EventHandler<String>,
@@ -629,6 +633,18 @@ pub fn UploadTaskRow(
             {
                 let show_progress = task.state.is_active() || task.state == UploadState::Paused;
                 let phase_label = phase_label(&task.state, progress_pct, uploaded_bytes, upload_total);
+                // Real-time rate + ETA, derived UI-side from successive Progress
+                // events (see `upload_runtime::sample_upload_speed`). Only on
+                // an Uploading row with a known positive rate; other states
+                // (Verifying/Transcoding/…) show no rate. During a stalled
+                // chunk the last computed rate persists until the next Progress
+                // event refreshes it — there is no UI ticker (P1 scope).
+                let bps = if task.state == UploadState::Uploading {
+                    upload_speed.read().get(&task.id).copied().unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                let speed_label = speed_eta_label(bps, uploaded_bytes, upload_total);
                 let bar_wrapper_style = if show_progress {
                     "margin-top: 6px;"
                 } else {
@@ -659,6 +675,12 @@ pub fn UploadTaskRow(
                     div {
                         style: "{label_style}",
                         "{phase_label}"
+                        if !speed_label.is_empty() {
+                            span {
+                                style: "color: var(--text-secondary); margin-left: 8px;",
+                                "{speed_label}"
+                            }
+                        }
                     }
                 }
             }
@@ -710,6 +732,25 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
         | UploadState::Completed
         | UploadState::Failed => String::new(),
     }
+}
+
+/// Build the "rate + ETA" suffix shown beside the upload phase label, e.g.
+/// `"2.0 MB/s · ETA 0:45"`. Returns an empty string when the rate is unknown
+/// (`bps <= 0`), so the caller renders nothing. ETA is appended only when the
+/// total size is known and positive; remaining bytes use a saturating
+/// subtraction so a slightly-over-total reading reads as `ETA 0:00`, not a
+/// wild value.
+fn speed_eta_label(bps: f64, uploaded: u64, total: u64) -> String {
+    if bps <= 0.0 {
+        return String::new();
+    }
+    let rate = format!("{}/s", format_size(bps as u64));
+    if total == 0 {
+        return rate;
+    }
+    let remaining = total.saturating_sub(uploaded);
+    let eta_secs = remaining as f64 / bps;
+    format!("{rate} \u{00b7} ETA {}", format_duration(eta_secs))
 }
 
 pub fn format_size(bytes: u64) -> String {

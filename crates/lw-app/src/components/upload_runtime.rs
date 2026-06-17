@@ -85,6 +85,13 @@ pub fn UploadRuntime() -> Element {
         let mut transcode_progress = app_state.transcode_progress;
         let mut upload_progress = app_state.upload_progress;
         let mut hash_progress = app_state.hash_progress;
+        let mut upload_speed = app_state.upload_speed;
+        // Per-task speed sampling state, LOCAL to this drain loop (never a
+        // signal): `(last_instant, last_bytes, ema_bps)`. The engine's
+        // `Progress` event carries no timestamp, so we time successive events
+        // here and EMA-smooth the instantaneous rate before publishing it to
+        // `upload_speed` for the rows to read.
+        let mut speed_samples: HashMap<String, (std::time::Instant, u64, f64)> = HashMap::new();
         async move {
             loop {
                 let event = {
@@ -92,6 +99,31 @@ pub fn UploadRuntime() -> Element {
                     rx.recv().await
                 };
                 let Some(event) = event else { break };
+                // PEEK by reference before the event is moved into
+                // `handle_upload_event` — that function stays as-is (no speed
+                // params). This match is a filter, not a state machine, so a
+                // `_ =>` catch-all is fine here.
+                match &event {
+                    UploadEvent::Progress {
+                        task_id,
+                        bytes_uploaded,
+                        ..
+                    } => {
+                        sample_upload_speed(
+                            &mut speed_samples,
+                            &mut upload_speed,
+                            task_id,
+                            *bytes_uploaded,
+                        );
+                    }
+                    UploadEvent::Completed { task_id }
+                    | UploadEvent::Failed { task_id, .. }
+                    | UploadEvent::DuplicateDetected { task_id, .. } => {
+                        speed_samples.remove(task_id);
+                        upload_speed.write().remove(task_id);
+                    }
+                    _ => {}
+                }
                 handle_upload_event(
                     &mut app_state,
                     &mut transcode_progress,
@@ -104,6 +136,57 @@ pub fn UploadRuntime() -> Element {
     });
 
     rsx! {}
+}
+
+/// Smallest gap between two `Progress` events that counts as a fresh speed
+/// sample. Below this the divide is noisy (and risks blowing up as `dt → 0`),
+/// so we skip and wait for the next event.
+const MIN_SAMPLE_INTERVAL_SECS: f64 = 0.2;
+/// EMA weight on the newest instantaneous rate; `1 - ALPHA` stays on the prior
+/// average. 0.3 favours stability over snappiness — fine at chunk granularity.
+const SPEED_EMA_ALPHA: f64 = 0.3;
+
+/// Fold one `Progress` observation into the per-task EMA rate and publish it.
+///
+/// `samples` holds `(last_instant, last_bytes, ema_bps)` per task, owned by the
+/// drain loop. The first observation for a task seeds the baseline and emits
+/// nothing (we have no interval yet). Subsequent observations compute an
+/// instantaneous bytes/sec over the elapsed wall-clock time and blend it into
+/// the EMA, which is then written to `upload_speed`.
+///
+/// Guards: a sub-threshold interval is ignored (too noisy); a byte count that
+/// regresses is ignored without disturbing the baseline — GCS resumable
+/// retries can reset `bytes_uploaded` mid-stream, and a negative delta is not a
+/// real rate.
+fn sample_upload_speed(
+    samples: &mut HashMap<String, (std::time::Instant, u64, f64)>,
+    upload_speed: &mut Signal<HashMap<String, f64>>,
+    task_id: &str,
+    bytes_uploaded: u64,
+) {
+    let now = std::time::Instant::now();
+    let Some(&(last_t, last_bytes, prev_ema)) = samples.get(task_id) else {
+        // First sample for this task — seed the baseline, emit nothing yet.
+        samples.insert(task_id.to_string(), (now, bytes_uploaded, 0.0));
+        return;
+    };
+    // Skip resumable byte-counter resets: a regression is not a real rate, and
+    // we keep the existing baseline so the next forward delta measures cleanly.
+    if bytes_uploaded < last_bytes {
+        return;
+    }
+    let dt = now.duration_since(last_t).as_secs_f64();
+    if dt < MIN_SAMPLE_INTERVAL_SECS {
+        return;
+    }
+    let inst_bps = (bytes_uploaded - last_bytes) as f64 / dt;
+    let ema = if prev_ema <= 0.0 {
+        inst_bps
+    } else {
+        SPEED_EMA_ALPHA * inst_bps + (1.0 - SPEED_EMA_ALPHA) * prev_ema
+    };
+    samples.insert(task_id.to_string(), (now, bytes_uploaded, ema));
+    upload_speed.write().insert(task_id.to_string(), ema);
 }
 
 /// Apply one engine event to the UI state: task list + progress maps.
