@@ -122,6 +122,15 @@ input { background: var(--input-bg) !important; color: var(--text) !important; b
 input:focus { border-color: var(--border-focus) !important; box-shadow: var(--focus-ring) !important; outline: none; }
 
 /* ── Card / row hover ────────────────────────────────────────────── */
+/* Off-screen row virtualization (Option A). Lets the engine skip layout +
+   paint for rows scrolled out of the viewport, keeping hundreds/thousands of
+   transfer rows responsive. `contain-intrinsic-size: auto 76px` gives an
+   initial height estimate and then remembers each row's real height after its
+   first render, so variable-height rows (e.g. an expanded Completed detail)
+   keep an accurate scrollbar. Applied to `.card-row` only — `.staged-row` rows
+   carry an absolutely-positioned hover popover (`.popover-panel`, 640px wide,
+   overflowing the row) that the implied paint containment would clip. */
+.card-row { content-visibility: auto; contain-intrinsic-size: auto 76px; }
 .card-row:hover { border-color: var(--border-hover) !important; box-shadow: var(--shadow-sm); }
 .staged-row:hover { background: var(--staged-hover) !important; }
 
