@@ -57,10 +57,15 @@ pub fn UploadRuntime() -> Element {
             if let Err(e) = engine.resume_pending().await {
                 tracing::warn!("Failed to resume pending uploads: {e}");
             }
-            // Load history
+            // Load history. `get_all_uploads` returns newest-first
+            // (created_at DESC); reverse to oldest-first so the in-memory queue
+            // is in add-time order. New rows are appended at the end by the
+            // `TaskAdded` handler, so the whole list stays chronological and
+            // every tab renders rows in the order files were added.
             match db.get_all_uploads().await {
-                Ok(tasks) if !tasks.is_empty() => {
+                Ok(mut tasks) if !tasks.is_empty() => {
                     tracing::info!("Loaded {} upload tasks from history", tasks.len());
+                    tasks.reverse();
                     app_state.upload_tasks.set(tasks);
                 }
                 Err(e) => tracing::warn!("Failed to load upload history: {e}"),

@@ -17,7 +17,7 @@
 use super::rows::{SectionHeader, format_size};
 use crate::state::AppState;
 use dioxus::prelude::*;
-use lw_core::models::{Project, Tenant, UploadTask};
+use lw_core::models::{Project, Tenant, UploadState, UploadTask};
 
 /// Marker string written into `error_message` by the `DuplicateDetected`
 /// reconcile so a deduped row reads as "already stored" rather than failed.
@@ -31,16 +31,25 @@ pub fn CompletedList(tasks: Vec<UploadTask>) -> Element {
     // mount starting collapsed is the right default.
     let mut expanded: Signal<Option<String>> = use_signal(|| None);
 
+    // Own the bucket filter, exactly like InProgressList / FailedList do. The
+    // panel hands the full project-scoped list to every tab, so without this
+    // the Completed tab would render in-progress and failed rows as completed.
+    let completed: Vec<UploadTask> = tasks
+        .iter()
+        .filter(|t| t.state == UploadState::Completed)
+        .cloned()
+        .collect();
+
     rsx! {
-        if tasks.is_empty() {
+        if completed.is_empty() {
             div {
                 style: "text-align: center; padding: 40px 16px; color: var(--text-muted); font-size: 13px;",
                 "Nothing completed yet"
             }
         } else {
-            SectionHeader { title: "Completed", count: tasks.len() }
+            SectionHeader { title: "Completed", count: completed.len() }
             div { style: "display: flex; flex-direction: column; gap: 6px;",
-                for task in tasks.iter() {
+                for task in completed.iter() {
                     CompletedRow {
                         key: "{task.id}",
                         task: task.clone(),
