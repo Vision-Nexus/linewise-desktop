@@ -28,6 +28,13 @@ use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload::UploadEvent;
 use std::collections::HashMap;
 
+/// Upper bound on how many events one drain round applies in a single
+/// synchronous batch. A staging burst (100 files → hundreds of events) is
+/// coalesced into one re-render per batch; this cap keeps a pathological flood
+/// from starving the renderer for an unbounded stretch — any leftovers drain on
+/// the next round.
+const MAX_EVENT_BATCH: usize = 512;
+
 #[component]
 pub fn UploadRuntime() -> Element {
     let app_state = use_context::<AppState>();
@@ -94,43 +101,68 @@ pub fn UploadRuntime() -> Element {
         let mut speed_samples: HashMap<String, (std::time::Instant, u64, f64)> = HashMap::new();
         async move {
             loop {
-                let event = {
+                // Block for at least one event, then drain everything already
+                // queued into one batch. Staging 100 files fires a burst of
+                // events (TaskAdded ×N, StateChanged, HashProgress); handling
+                // them one-await-per-event made Dioxus re-render once per
+                // event. Applying the whole burst synchronously (no `.await`
+                // between the writes below) lets Dioxus coalesce the signal
+                // writes into a single re-render per batch.
+                let mut batch = Vec::new();
+                {
                     let mut rx = event_rx.lock().await;
-                    rx.recv().await
-                };
-                let Some(event) = event else { break };
-                // PEEK by reference before the event is moved into
-                // `handle_upload_event` — that function stays as-is (no speed
-                // params). This match is a filter, not a state machine, so a
-                // `_ =>` catch-all is fine here.
-                match &event {
-                    UploadEvent::Progress {
-                        task_id,
-                        bytes_uploaded,
-                        ..
-                    } => {
-                        sample_upload_speed(
-                            &mut speed_samples,
-                            &mut upload_speed,
+                    match rx.recv().await {
+                        Some(ev) => batch.push(ev),
+                        None => break,
+                    }
+                    while batch.len() < MAX_EVENT_BATCH {
+                        match rx.try_recv() {
+                            Ok(ev) => batch.push(ev),
+                            // Empty (nothing more queued right now) or
+                            // Disconnected — stop draining this round. A
+                            // disconnect is observed on the next `recv().await`
+                            // above, which returns `None` and breaks the loop.
+                            Err(_) => break,
+                        }
+                    }
+                } // lock released before processing — never held across a write
+
+                // Process the whole batch synchronously. No `.await` inside
+                // this loop, so all the signal writes coalesce into one render.
+                for event in batch {
+                    // PEEK by reference before the event is moved into
+                    // `handle_upload_event` — that function stays as-is (no
+                    // speed params). This match is a filter, not a state
+                    // machine, so a `_ =>` catch-all is fine here.
+                    match &event {
+                        UploadEvent::Progress {
                             task_id,
-                            *bytes_uploaded,
-                        );
+                            bytes_uploaded,
+                            ..
+                        } => {
+                            sample_upload_speed(
+                                &mut speed_samples,
+                                &mut upload_speed,
+                                task_id,
+                                *bytes_uploaded,
+                            );
+                        }
+                        UploadEvent::Completed { task_id }
+                        | UploadEvent::Failed { task_id, .. }
+                        | UploadEvent::DuplicateDetected { task_id, .. } => {
+                            speed_samples.remove(task_id);
+                            upload_speed.write().remove(task_id);
+                        }
+                        _ => {}
                     }
-                    UploadEvent::Completed { task_id }
-                    | UploadEvent::Failed { task_id, .. }
-                    | UploadEvent::DuplicateDetected { task_id, .. } => {
-                        speed_samples.remove(task_id);
-                        upload_speed.write().remove(task_id);
-                    }
-                    _ => {}
+                    handle_upload_event(
+                        &mut app_state,
+                        &mut transcode_progress,
+                        &mut upload_progress,
+                        &mut hash_progress,
+                        event,
+                    );
                 }
-                handle_upload_event(
-                    &mut app_state,
-                    &mut transcode_progress,
-                    &mut upload_progress,
-                    &mut hash_progress,
-                    event,
-                );
             }
         }
     });

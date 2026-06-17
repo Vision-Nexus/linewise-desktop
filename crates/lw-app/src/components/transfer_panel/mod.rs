@@ -756,11 +756,14 @@ pub fn TransferPanel() -> Element {
                 }
             }
 
-            // Tab body.
+            // Tab body. Only one arm renders per pass, so each consumes the
+            // single owned `tasks` Vec by value (move, not clone) — the counts
+            // above already finished borrowing it, and nothing below the match
+            // touches it.
             match active_tab {
                 PrimaryTab::InProgress => rsx! {
                     InProgressList {
-                        tasks: tasks.clone(),
+                        tasks,
                         transcode_config: transcode_config.clone(),
                         device_encoder_signatures,
                         transcode_progress,
@@ -776,11 +779,11 @@ pub fn TransferPanel() -> Element {
                     }
                 },
                 PrimaryTab::Completed => rsx! {
-                    CompletedList { tasks: tasks.clone() }
+                    CompletedList { tasks }
                 },
                 PrimaryTab::Failed => rsx! {
                     FailedList {
-                        tasks: tasks.clone(),
+                        tasks,
                         transcode_config: transcode_config.clone(),
                         device_encoder_signatures,
                         transcode_progress,

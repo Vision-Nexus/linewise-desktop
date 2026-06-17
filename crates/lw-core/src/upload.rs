@@ -187,6 +187,15 @@ pub enum UploadEvent {
     },
 }
 
+/// Cap on how many files run their staging-time quality check + hash stream
+/// concurrently. Staging 100 files at once otherwise spawns 100 background
+/// workers that each open a server `/quality-check` round-trip and a streaming
+/// BLAKE3+MD5 read — flooding the event channel and saturating the network.
+/// Throttling the QC/hash churn to a trickle keeps the row inserts (and their
+/// `TaskAdded` events) instant while the heavy work drains a few at a time.
+/// Uploads themselves are bounded separately by `upload_semaphore`.
+const MAX_CONCURRENT_STAGING: usize = 4;
+
 pub struct UploadEngine {
     db: Arc<Database>,
     api: Arc<ApiClient>,
@@ -201,6 +210,11 @@ pub struct UploadEngine {
     transcode_config: TranscodeConfig,
     chunk_size: u64,
     upload_semaphore: Arc<Semaphore>,
+    /// Caps concurrent staging-time quality-check + hash work at
+    /// [`MAX_CONCURRENT_STAGING`]. Held by each `stage_file` background worker
+    /// across its QC + hash phase only; the synchronous row insert + `TaskAdded`
+    /// emit run unbounded so every dropped file appears in the queue at once.
+    stage_semaphore: Arc<Semaphore>,
     /// Lazy-cached `whoami` snapshot for the logged-in user, populated
     /// on the first dedup check that needs it. The engine is built
     /// before login, so we can't pass it through the constructor; the
@@ -244,6 +258,7 @@ impl UploadEngine {
             transcode_config,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
+            stage_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STAGING)),
             current_user_cache: OnceCell::new(),
         }
     }
@@ -488,12 +503,19 @@ impl UploadEngine {
         let t_after_event = t_entry.elapsed();
 
         let engine = Arc::clone(self);
+        let stage_sem = Arc::clone(&self.stage_semaphore);
         let task_id = task.id.clone();
         let path_buf = path.to_path_buf();
         let tenant_id_owned = tenant_id.to_string();
         let project_id_owned = project_id.to_string();
         let filename = task.filename.clone();
         tokio::spawn(async move {
+            // Throttle the QC + hash churn to `MAX_CONCURRENT_STAGING`. The row
+            // and its `TaskAdded` event are already out (above, unbounded), so
+            // the user sees every file immediately; only the server round-trips
+            // and hash streams queue behind this permit. Held for the whole
+            // phase below and released on drop when the worker returns.
+            let _permit = stage_sem.acquire().await.expect("stage semaphore closed");
             let final_state = if is_video {
                 engine
                     .run_quality_then_hash(
@@ -741,16 +763,19 @@ impl UploadEngine {
             state: UploadState::Pending,
         });
 
-        let pending = match self.db.get_pending_uploads().await {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!(task_id, "auto-upload: get_pending_uploads failed: {e}");
+        // O(1) single-row load now that the row is `Pending` in the DB —
+        // avoids loading and scanning the entire pending set once per
+        // auto-advancing task.
+        let task = match self.db.get_upload_by_id(task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => {
+                tracing::warn!(task_id, "auto-upload: task not found after flip to PENDING");
                 return;
             }
-        };
-        let Some(task) = pending.into_iter().find(|t| t.id == task_id) else {
-            tracing::warn!(task_id, "auto-upload: task not found in PENDING set");
-            return;
+            Err(e) => {
+                tracing::warn!(task_id, "auto-upload: get_upload_by_id failed: {e}");
+                return;
+            }
         };
         self.dispatch_one(task);
     }

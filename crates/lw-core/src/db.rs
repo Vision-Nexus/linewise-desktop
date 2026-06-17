@@ -475,6 +475,24 @@ impl Database {
         Ok(rows.into_iter().map(UploadTask::from).collect())
     }
 
+    /// Load a single upload row by id. Used by the auto-advance path so a
+    /// freshly-`Pending` row can be fetched in O(1) instead of loading the
+    /// whole pending set and scanning it — staging 100 files would otherwise
+    /// run ~100 full-table loads (one per auto-advancing task).
+    pub async fn get_upload_by_id(&self, id: &str) -> Result<Option<UploadTask>, DbError> {
+        let row = sqlx::query_as!(
+            UploadRow,
+            "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
+                    document_id, session_id, bytes_uploaded, state, error_message,
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+             FROM upload_queue WHERE id = ?",
+            id,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(UploadTask::from))
+    }
+
     pub async fn get_all_uploads(&self) -> Result<Vec<UploadTask>, DbError> {
         let rows = sqlx::query_as!(
             UploadRow,
