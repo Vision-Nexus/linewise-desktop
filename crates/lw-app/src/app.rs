@@ -106,6 +106,35 @@ pub fn App() -> Element {
         }
     });
 
+    // Defensive on-screen placement. On some Windows display configurations the
+    // freshly-created window lands far off-screen (observed at -25600,-25600),
+    // so only the tray icon is visible and the app looks like it never opened.
+    // After mount, if the window is parked off-screen, recentre it on the
+    // primary monitor and show+focus it. A normal placement (x/y within sane
+    // bounds) is left untouched. The framework positions the window once at
+    // creation and doesn't move it afterwards, so doing this post-mount sticks.
+    use_future(|| async move {
+        use dioxus::desktop::tao::dpi::PhysicalPosition;
+        let window = dioxus::desktop::window();
+        // Centre on the primary monitor. The framework's initial placement is
+        // unreliable on some Windows display setups — it sometimes parks the
+        // window far off-screen (observed at -25600,-25600), leaving only the
+        // tray icon visible. Centring unconditionally after mount keeps the
+        // window reliably on-screen; the post-mount position set is not
+        // overridden by the framework afterwards.
+        if let Some(monitor) = window.primary_monitor() {
+            let mpos = monitor.position();
+            let msize = monitor.size();
+            let wsize = window.outer_size();
+            let x = mpos.x + ((msize.width as i32 - wsize.width as i32) / 2).max(0);
+            let y = mpos.y + ((msize.height as i32 - wsize.height as i32) / 2).max(0);
+            window.set_outer_position(PhysicalPosition::new(x, y));
+            tracing::info!("centred window on primary monitor at ({x}, {y})");
+        }
+        window.set_visible(true);
+        window.set_focus();
+    });
+
     // Restart trigger: any leaf component (e.g. the environment switcher
     // in settings) can call `AppState::request_restart()`, which bumps
     // `restart_token`. We watch the token and flip `boot` back to
