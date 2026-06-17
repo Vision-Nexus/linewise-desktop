@@ -143,6 +143,14 @@ pub struct AppState {
     pub selected_tenant: Signal<Option<Tenant>>,
     pub selected_project: Signal<Option<Project>>,
     pub upload_tasks: Signal<Vec<UploadTask>>,
+    /// Per-task progress maps, written by the resident `UploadRuntime`'s
+    /// single event pump and read by the transfer view. Kept out of
+    /// `upload_tasks` so a byte-level `Progress` tick doesn't churn the
+    /// whole task list. `upload_progress` is clamped monotonic in the
+    /// event handler. `Signal<T>` is `Copy`, so views take cheap handles.
+    pub transcode_progress: Signal<HashMap<String, f32>>,
+    pub upload_progress: Signal<HashMap<String, (u64, u64)>>,
+    pub hash_progress: Signal<HashMap<String, (u64, u64)>>,
     pub projects: Signal<Vec<Project>>,
     pub tenant_projects: Signal<HashMap<String, Vec<Project>>>,
     pub is_loading: Signal<bool>,
@@ -244,6 +252,9 @@ impl AppState {
             selected_tenant: Signal::new(None),
             selected_project: Signal::new(None),
             upload_tasks: Signal::new(Vec::new()),
+            transcode_progress: Signal::new(HashMap::new()),
+            upload_progress: Signal::new(HashMap::new()),
+            hash_progress: Signal::new(HashMap::new()),
             projects: Signal::new(Vec::new()),
             tenant_projects: Signal::new(HashMap::new()),
             is_loading: Signal::new(false),

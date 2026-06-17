@@ -248,6 +248,11 @@ fn AuthedShell(services: Arc<CoreServices>) -> Element {
     let is_restoring = *restoring.read();
 
     rsx! {
+        // Resident upload runtime: the single event-pump consumer + one-shot
+        // startup recovery. Mounted here (above the login/main split) so it
+        // never unmounts on navigation and binds to THIS CoreServices'
+        // event channel. Renders nothing. See upload_runtime.rs.
+        crate::components::upload_runtime::UploadRuntime {}
         if is_restoring {
             div { class: "loading-screen",
                 span { class: "spinner" }

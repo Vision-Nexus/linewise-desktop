@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 use lw_core::config::TranscodeConfig;
 use lw_core::error::UploadError;
 use lw_core::models::{UploadState, UploadTask};
-use lw_core::upload::{self, UploadEvent};
+use lw_core::upload;
 use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
 use std::collections::HashMap;
@@ -72,77 +72,14 @@ pub fn UploadQueue() -> Element {
     let app_state = use_context::<AppState>();
     let services = use_context::<CoreServices>();
 
-    // Load history from SQLite on mount, then resume in-flight work.
-    let app_state_load = app_state.clone();
-    let db_for_load = services.db.clone();
-    let engine_for_load = services.upload_engine.clone();
-    use_future(move || {
-        let db = db_for_load.clone();
-        let engine = engine_for_load.clone();
-        let mut app_state = app_state_load.clone();
-        async move {
-            // Reset stale in-progress uploads to FAILED. Does NOT touch
-            // TRANSCODING — that state is resumable via the scratch dir.
-            match db.reset_stale_uploads().await {
-                Ok(n) if n > 0 => tracing::info!("Reset {n} stale uploads to FAILED"),
-                Err(e) => tracing::warn!("Failed to reset stale uploads: {e}"),
-                _ => {}
-            }
-            // Resume any task left in a resumable state (PENDING, TRANSCODING,
-            // UPLOADING, etc). Without this, killed-mid-transcode tasks sit
-            // in the queue at 0% forever because nothing drives them forward.
-            if let Err(e) = engine.resume_pending().await {
-                tracing::warn!("Failed to resume pending uploads: {e}");
-            }
-            // Load history
-            match db.get_all_uploads().await {
-                Ok(tasks) if !tasks.is_empty() => {
-                    tracing::info!("Loaded {} upload tasks from history", tasks.len());
-                    app_state.upload_tasks.set(tasks);
-                }
-                Err(e) => tracing::warn!("Failed to load upload history: {e}"),
-                _ => {}
-            }
-        }
-    });
-
-    // Progress signals — separate from task state to avoid re-render oscillation.
-    // `upload_progress` is kept monotonic per task: once we've seen a higher
-    // bytes-uploaded value for a task id, we never regress to a lower one in
-    // the UI. This prevents two legitimate-but-confusing zero-dips: (a) the
-    // GCS resumable-session retry path at upload.rs re-initiates a session
-    // and emits a fresh Progress(0, total), and (b) a render that lands on a
-    // task before the first Progress event arrives.
-    let mut transcode_progress: Signal<HashMap<String, f32>> = use_signal(HashMap::new);
-    let mut upload_progress: Signal<HashMap<String, (u64, u64)>> = use_signal(HashMap::new);
-    // Hashing progress for rows in the `Hashing` state. The pair is
-    // `(bytes_hashed, total_bytes)`; the UI renders a determinate
-    // progress bar driven by the BLAKE3+MD5 stream emitted from
-    // `UploadEngine::stage_file`.
-    let mut hash_progress: Signal<HashMap<String, (u64, u64)>> = use_signal(HashMap::new);
-
-    // Poll upload events
-    let app_state_events = app_state.clone();
-    use_future(move || {
-        let event_rx = services.event_rx.clone();
-        let mut app_state = app_state_events.clone();
-        async move {
-            loop {
-                let event = {
-                    let mut rx = event_rx.lock().await;
-                    rx.recv().await
-                };
-                let Some(event) = event else { break };
-                handle_upload_event(
-                    &mut app_state,
-                    &mut transcode_progress,
-                    &mut upload_progress,
-                    &mut hash_progress,
-                    event,
-                );
-            }
-        }
-    });
+    // Startup recovery (reset stale / resume / load history) and the event
+    // pump now live in the resident `UploadRuntime` (see upload_runtime.rs),
+    // so they run once per session and survive view/org switches. This view
+    // only READS the shared progress maps from AppState. `Signal<T>` is Copy,
+    // so these are cheap handles passed down to the rows.
+    let transcode_progress = app_state.transcode_progress;
+    let upload_progress = app_state.upload_progress;
+    let hash_progress = app_state.hash_progress;
 
     // Transcode dialog state: Some(task_id) = dialog open for that task
     let mut transcode_dialog_task: Signal<Option<String>> = use_signal(|| None);
@@ -1541,115 +1478,8 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
     }
 }
 
-fn handle_upload_event(
-    app_state: &mut AppState,
-    transcode_progress: &mut Signal<HashMap<String, f32>>,
-    upload_progress: &mut Signal<HashMap<String, (u64, u64)>>,
-    hash_progress: &mut Signal<HashMap<String, (u64, u64)>>,
-    event: UploadEvent,
-) {
-    match event {
-        UploadEvent::TaskAdded(task) => {
-            app_state.upload_tasks.write().push(*task);
-        }
-        UploadEvent::StateChanged { task_id, state } => {
-            // Drop any in-flight hash bar once the row leaves Hashing —
-            // otherwise a freshly-Staged row keeps a stale 100% bar
-            // entry until the next add/drop.
-            if state != UploadState::Hashing {
-                hash_progress.write().remove(&task_id);
-            }
-            update_task(app_state, &task_id, |t| t.state = state);
-        }
-        UploadEvent::Progress {
-            task_id,
-            bytes_uploaded,
-            total_bytes,
-        } => {
-            // Monotonic clamp: never let the displayed bytes drop below the
-            // highest value we've already seen for this task. GCS resumable
-            // retries legitimately reset the byte counter mid-stream, but the
-            // wire-side progress never regresses — acknowledged bytes stay
-            // acknowledged across sessions.
-            let mut guard = upload_progress.write();
-            let entry = guard.entry(task_id).or_insert((0, total_bytes));
-            entry.0 = entry.0.max(bytes_uploaded);
-            entry.1 = total_bytes;
-        }
-        UploadEvent::HashProgress {
-            task_id,
-            bytes_hashed,
-            total_bytes,
-        } => {
-            hash_progress
-                .write()
-                .insert(task_id, (bytes_hashed, total_bytes));
-        }
-        UploadEvent::ValidationWarnings {
-            task_id,
-            warnings,
-            rejection_reasons,
-        } => {
-            update_task(app_state, &task_id, |t| {
-                t.validation_warnings = warnings;
-                t.rejection_reasons = rejection_reasons;
-            });
-        }
-        UploadEvent::QualityCheckPassed {
-            task_id,
-            video_info,
-            warnings,
-        } => {
-            update_task(app_state, &task_id, |t| {
-                t.video_info = video_info;
-                t.validation_warnings = warnings;
-            });
-        }
-        UploadEvent::TranscodeProgress { task_id, percent } => {
-            transcode_progress.write().insert(task_id, percent);
-        }
-        UploadEvent::TranscodeCompleted {
-            task_id,
-            transcoded_size,
-        } => {
-            transcode_progress.write().remove(&task_id);
-            update_task(app_state, &task_id, |t| {
-                t.transcoded_size = Some(transcoded_size)
-            });
-        }
-        UploadEvent::DuplicateDetected { task_id, .. } => {
-            upload_progress.write().remove(&task_id);
-            transcode_progress.write().remove(&task_id);
-            hash_progress.write().remove(&task_id);
-            update_task(app_state, &task_id, |t| {
-                t.state = UploadState::Failed;
-                t.error_message = Some("Duplicate file detected".to_string());
-            });
-        }
-        UploadEvent::Completed { task_id } => {
-            upload_progress.write().remove(&task_id);
-            transcode_progress.write().remove(&task_id);
-            hash_progress.write().remove(&task_id);
-            update_task(app_state, &task_id, |t| t.state = UploadState::Completed);
-        }
-        UploadEvent::Failed { task_id, error } => {
-            upload_progress.write().remove(&task_id);
-            transcode_progress.write().remove(&task_id);
-            hash_progress.write().remove(&task_id);
-            update_task(app_state, &task_id, |t| {
-                t.state = UploadState::Failed;
-                t.error_message = Some(error);
-            });
-        }
-    }
-}
-
-fn update_task(app_state: &mut AppState, task_id: &str, f: impl FnOnce(&mut UploadTask)) {
-    let mut tasks = app_state.upload_tasks.write();
-    if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-        f(task);
-    }
-}
+// `handle_upload_event` and `update_task` moved to `upload_runtime.rs`
+// alongside the resident event pump that calls them.
 
 // The transcode dialog, its `ButtonGroup` facade, and related constants now
 // live in `transcode_dialog.rs`.
