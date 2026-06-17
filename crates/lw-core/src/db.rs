@@ -402,14 +402,23 @@ impl Database {
 
     #[tracing::instrument(skip_all)]
     pub async fn reset_stale_uploads(&self) -> Result<u64, DbError> {
-        // HASHING and QUALITY_CHECKING are included because both
-        // workers run in-process and die with the app; the row would
-        // otherwise sit forever waiting for a verdict that no living
-        // task is going to emit. The user can re-add the file and
-        // it'll get a fresh quality check / hash run.
+        // Only the in-process staging states (HASHING, QUALITY_CHECKING) are
+        // failed here: their workers run in-process and die with the app, and
+        // there is no persisted mid-hash / mid-check progress to resume, so the
+        // row would otherwise sit forever waiting for a verdict no living task
+        // will emit (the user can re-add the file for a fresh run).
+        //
+        // The upload-pipeline states (PENDING / UPLOADING / CREATING / VERIFYING
+        // / VALIDATING / DESENSITIZING / TRANSCODING) are deliberately NOT failed.
+        // `resume_pending`, which runs right after this on startup, re-drives
+        // them cleanly: PENDING just re-dispatches, UPLOADING resumes from the
+        // confirmed GCS byte offset (`query_progress`), and the rest re-run their
+        // stage via `process_task`. Failing them here used to defeat that resume
+        // and dump a wall of false "Interrupted by app restart" rows that only
+        // trickled back via the 30s network-probe auto-retry.
         let result = sqlx::query!(
             "UPDATE upload_queue SET state = 'FAILED', error_message = 'Interrupted by app restart', updated_at = datetime('now')
-             WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'PENDING', 'HASHING', 'QUALITY_CHECKING')",
+             WHERE state IN ('HASHING', 'QUALITY_CHECKING')",
         )
         .execute(&self.pool)
         .await?;

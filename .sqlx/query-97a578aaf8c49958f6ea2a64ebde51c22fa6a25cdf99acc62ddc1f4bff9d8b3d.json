@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE upload_queue SET state = 'FAILED', error_message = 'Interrupted by app restart', updated_at = datetime('now')\n             WHERE state IN ('HASHING', 'QUALITY_CHECKING')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "97a578aaf8c49958f6ea2a64ebde51c22fa6a25cdf99acc62ddc1f4bff9d8b3d"
+}
