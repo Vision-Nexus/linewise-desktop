@@ -52,6 +52,54 @@ use lw_core::video::DeviceEncoderSignature;
 use std::path::{Path, PathBuf};
 use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
 
+/// Stage every video under `dir` into `(tenant_id, project_id)`.
+///
+/// The single folder-ingest routine shared by every click entry: the
+/// transfer-panel header button, the sidebar Upload button, and the
+/// right-click project picker. The recursive walk runs off the UI thread
+/// via `spawn_blocking` (`collect_videos_in_dir` is synchronous `std::fs`);
+/// then each video is staged through the same `stage_file` + toast-on-error
+/// path the per-file pickers use. A folder with no videos shows an info
+/// toast so the click doesn't feel like a no-op.
+///
+/// `pub(crate)` so the sidebar Upload button and the right-click project
+/// picker (item 4) can share the exact same ingest path.
+pub(crate) async fn stage_folder(
+    engine: std::sync::Arc<lw_core::upload::UploadEngine>,
+    dir: PathBuf,
+    tenant_id: String,
+    project_id: String,
+    mut app_state_for_toast: AppState,
+) {
+    let walk_dir = dir.clone();
+    let videos =
+        match tokio::task::spawn_blocking(move || upload::collect_videos_in_dir(&walk_dir)).await {
+            Ok(videos) => videos,
+            Err(join_err) => {
+                tracing::error!(dir = %dir.display(), "folder walk task panicked: {join_err}");
+                app_state_for_toast.show_toast(
+                    "Failed to scan the selected folder".to_string(),
+                    ToastKind::Error,
+                );
+                return;
+            }
+        };
+    tracing::info!(dir = %dir.display(), video_count = videos.len(), "folder picker staged videos");
+    if videos.is_empty() {
+        app_state_for_toast.show_toast(
+            "No videos found in the selected folder".to_string(),
+            ToastKind::Info,
+        );
+        return;
+    }
+    for path in videos {
+        if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
+            e.log("Stage folder video");
+            app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
+        }
+    }
+}
+
 /// Formats a staging error into a user-facing toast string. Expected
 /// rejections (the user picked a file we can't accept) get a "Cannot
 /// upload" prefix and the typed error's `Display` as the reason.
@@ -189,14 +237,17 @@ pub fn TransferPanel() -> Element {
         .filter(|t| t.state == UploadState::Staged)
         .count();
 
-    let add_files_label = match (
+    // 方案乙: every click entry is a FOLDER picker. The header button uploads
+    // a whole folder of clips to the selected project; single files stay on the
+    // drag-drop path. Label mirrors the target so the destination is obvious.
+    let upload_label = match (
         app_state.selected_tenant.read().as_ref(),
         app_state.selected_project.read().as_ref(),
     ) {
         (Some(tenant), Some(project)) => {
-            format!("Add Files to {} / {}", tenant.display_name, project.name)
+            format!("Upload to {} / {}", tenant.display_name, project.name)
         }
-        _ => "Add Files".to_string(),
+        _ => "Upload".to_string(),
     };
 
     // === Staging + action callbacks (carried over from the old queue) ===
@@ -205,7 +256,7 @@ pub fn TransferPanel() -> Element {
     let engine_for_drop = services.upload_engine.clone();
 
     let app_state_add = app_state.clone();
-    let on_add_files = move |_| {
+    let on_upload_folder = move |_| {
         let engine = engine_for_add.clone();
         let tenant_id = app_state_add
             .selected_tenant
@@ -219,22 +270,22 @@ pub fn TransferPanel() -> Element {
             .as_ref()
             .map(|p| p.id.clone())
             .unwrap_or_default();
-        let mut app_state_for_toast = app_state_add.clone();
+        let app_state_for_toast = app_state_add.clone();
 
         spawn(async move {
-            let files = rfd::AsyncFileDialog::new()
-                .set_title("Select files to upload")
-                .pick_files()
+            let folder = rfd::AsyncFileDialog::new()
+                .set_title("Select a folder of videos to upload")
+                .pick_folder()
                 .await;
-            let Some(files) = files else { return };
-            tracing::info!(file_count = files.len(), "file picker returned files");
-            for file in files {
-                let path = PathBuf::from(file.path());
-                if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
-                    e.log("Stage file");
-                    app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
-                }
-            }
+            let Some(folder) = folder else { return };
+            stage_folder(
+                engine,
+                PathBuf::from(folder.path()),
+                tenant_id,
+                project_id,
+                app_state_for_toast,
+            )
+            .await;
         });
     };
 
@@ -440,7 +491,11 @@ pub fn TransferPanel() -> Element {
         }
     };
 
-    // === Drag-and-drop staging (carried over unchanged) ===
+    // === Drag-and-drop staging ===
+    // Dropped FILES stage as before; a dropped DIRECTORY recurses for videos
+    // via the same `stage_folder` / `collect_videos_in_dir` path the folder
+    // pickers use (item 7), so dropping a folder of clips behaves identically
+    // to picking it.
     let mut is_dragging = use_signal(|| false);
     let app_state_drop = app_state.clone();
     let on_drop = move |evt: DragEvent| {
@@ -463,15 +518,20 @@ pub fn TransferPanel() -> Element {
             .unwrap_or_default();
         let mut app_state_for_toast = app_state_drop.clone();
 
-        let mut to_stage: Vec<PathBuf> = Vec::new();
+        let mut files_to_stage: Vec<PathBuf> = Vec::new();
+        let mut dirs_to_walk: Vec<PathBuf> = Vec::new();
         let mut skipped: u32 = 0;
         for file in evt.files() {
             let path = file.path();
             if path.as_os_str().is_empty() {
                 continue;
             }
-            if upload::looks_like_video(&path) {
-                to_stage.push(path);
+            // Directory first: a dropped folder recurses regardless of how its
+            // name's extension would sniff (a `.mov` bundle is still a folder).
+            if path.is_dir() {
+                dirs_to_walk.push(path);
+            } else if upload::looks_like_video(&path) {
+                files_to_stage.push(path);
             } else {
                 skipped += 1;
             }
@@ -484,16 +544,26 @@ pub fn TransferPanel() -> Element {
                 ToastKind::Info,
             );
         }
-        if to_stage.is_empty() {
+        if files_to_stage.is_empty() && dirs_to_walk.is_empty() {
             return;
         }
 
         spawn(async move {
-            for path in to_stage {
+            for path in files_to_stage {
                 if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
                     e.log("Stage dropped file");
                     app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
                 }
+            }
+            for dir in dirs_to_walk {
+                stage_folder(
+                    engine.clone(),
+                    dir,
+                    tenant_id.clone(),
+                    project_id.clone(),
+                    app_state_for_toast.clone(),
+                )
+                .await;
             }
         });
     };
@@ -530,8 +600,9 @@ pub fn TransferPanel() -> Element {
                         button {
                             class: "btn-primary",
                             style: "{styles::BTN_PRIMARY}",
-                            onclick: on_add_files,
-                            "{add_files_label}"
+                            title: "Pick a folder of videos to upload to this project",
+                            onclick: on_upload_folder,
+                            "{upload_label}"
                         }
                         if staged_count > 0 {
                             UploadButton { staged_count, confirm_cb }
@@ -541,7 +612,7 @@ pub fn TransferPanel() -> Element {
                             style: "{styles::BTN_DISABLED}",
                             disabled: true,
                             title: "Select a project in the sidebar to enable uploading",
-                            "Add Files"
+                            "Upload"
                         }
                     }
                 }

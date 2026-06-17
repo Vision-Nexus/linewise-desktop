@@ -28,6 +28,52 @@ pub fn looks_like_video(path: &Path) -> bool {
     mime_guess::from_path(path).first_or_octet_stream().type_() == mime_guess::mime::VIDEO
 }
 
+/// Recursively walk `dir` and return every video file underneath it, filtered
+/// by [`looks_like_video`]. Non-video files and entries that can't be read are
+/// skipped silently — the caller decides whether the resulting list is empty
+/// and surfaces that to the user. Symlinks are NOT followed, so a cyclic link
+/// can't trap the walk in an infinite loop.
+///
+/// This is the single folder-recursion entry shared by the sidebar Upload
+/// button, the right-click project picker, the transfer-panel header button,
+/// and folder drag-drop. It is synchronous and walks with `std::fs`; callers
+/// MUST run it off the UI thread (`tokio::task::spawn_blocking`) because a
+/// deep directory tree on a slow disk would otherwise block the renderer.
+///
+/// If `dir` is not a directory the returned vec is empty (a plain file dropped
+/// or picked is handled by the per-file staging path, not this walk).
+pub fn collect_videos_in_dir(dir: &Path) -> Vec<PathBuf> {
+    let mut videos = Vec::new();
+    collect_videos_into(dir, &mut videos);
+    videos
+}
+
+/// Depth-first worker for [`collect_videos_in_dir`]. Errors reading a
+/// directory entry are logged at `debug` and skipped rather than aborting the
+/// whole walk, so one unreadable subfolder doesn't lose the rest of the tree.
+fn collect_videos_into(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::debug!(dir = %dir.display(), "collect_videos: read_dir failed: {e}");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Use the dir entry's own file-type rather than `path.is_dir()` so we
+        // don't follow symlinks (the entry type reports the link itself).
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_videos_into(&path, out);
+        } else if file_type.is_file() && looks_like_video(&path) {
+            out.push(path);
+        }
+    }
+}
+
 /// Deferred verdict emitted by the staging-time quality check. The hash
 /// worker reads this after BLAKE3+MD5 finishes and routes the row to
 /// `Staged` or `Rejected` accordingly. We hash quality-rejected rows
@@ -1653,5 +1699,75 @@ impl UploadEngine {
             .update_upload_state(&task.id, state.clone(), None)
             .await;
         task.state = state;
+    }
+}
+
+#[cfg(test)]
+mod collect_videos_tests {
+    use super::collect_videos_in_dir;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// Build a unique temp directory tree for one test and return its root.
+    /// Caller removes it via [`cleanup`].
+    fn temp_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("lw-collect-{tag}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
+
+    fn touch(path: &PathBuf) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::File::create(path).expect("touch file");
+    }
+
+    fn cleanup(root: &PathBuf) {
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recurses_nested_dirs_and_filters_non_videos() {
+        let root = temp_root("nested");
+        touch(&root.join("a.mp4"));
+        touch(&root.join("notes.txt"));
+        touch(&root.join("sub/b.mov"));
+        touch(&root.join("sub/deeper/c.mkv"));
+        touch(&root.join("sub/readme.md"));
+
+        let mut found: Vec<String> = collect_videos_in_dir(&root)
+            .into_iter()
+            .map(|p| {
+                p.file_name()
+                    .expect("file name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        found.sort();
+        cleanup(&root);
+
+        assert_eq!(found, vec!["a.mp4", "b.mov", "c.mkv"]);
+    }
+
+    #[test]
+    fn empty_dir_yields_no_videos() {
+        let root = temp_root("empty");
+        let found = collect_videos_in_dir(&root);
+        cleanup(&root);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn non_directory_path_yields_no_videos() {
+        let root = temp_root("plainfile");
+        let file = root.join("clip.mp4");
+        touch(&file);
+        // Pointing the walk at a file (not a dir) returns empty — plain files
+        // go through the per-file staging path, not this recursion.
+        let found = collect_videos_in_dir(&file);
+        cleanup(&root);
+        assert!(found.is_empty());
     }
 }
