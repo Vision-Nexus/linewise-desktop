@@ -73,7 +73,8 @@ impl From<UploadRow> for UploadTask {
             video_info: r
                 .video_info
                 .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok()),
+                .and_then(|s| serde_json::from_str(s).ok())
+                .map(std::sync::Arc::new),
             force_upload: r.force_upload != 0,
         }
     }
@@ -171,9 +172,12 @@ impl Database {
     pub async fn insert_upload_task(&self, task: &UploadTask) -> Result<(), DbError> {
         let warnings_json = serde_json::to_string(&task.validation_warnings)?;
         let reasons_json = serde_json::to_string(&task.rejection_reasons)?;
+        // Serialize the dereferenced `&VideoInfo`, not the `Arc` itself, so we
+        // never depend on serde's `rc` feature (the field is `Arc`-wrapped only
+        // to make render-time `UploadTask` clones cheap).
         let video_info_json = task
             .video_info
-            .as_ref()
+            .as_deref()
             .map(serde_json::to_string)
             .transpose()?;
         let size = task.size as i64;
@@ -402,14 +406,23 @@ impl Database {
 
     #[tracing::instrument(skip_all)]
     pub async fn reset_stale_uploads(&self) -> Result<u64, DbError> {
-        // HASHING and QUALITY_CHECKING are included because both
-        // workers run in-process and die with the app; the row would
-        // otherwise sit forever waiting for a verdict that no living
-        // task is going to emit. The user can re-add the file and
-        // it'll get a fresh quality check / hash run.
+        // Only the in-process staging states (HASHING, QUALITY_CHECKING) are
+        // failed here: their workers run in-process and die with the app, and
+        // there is no persisted mid-hash / mid-check progress to resume, so the
+        // row would otherwise sit forever waiting for a verdict no living task
+        // will emit (the user can re-add the file for a fresh run).
+        //
+        // The upload-pipeline states (PENDING / UPLOADING / CREATING / VERIFYING
+        // / VALIDATING / DESENSITIZING / TRANSCODING) are deliberately NOT failed.
+        // `resume_pending`, which runs right after this on startup, re-drives
+        // them cleanly: PENDING just re-dispatches, UPLOADING resumes from the
+        // confirmed GCS byte offset (`query_progress`), and the rest re-run their
+        // stage via `process_task`. Failing them here used to defeat that resume
+        // and dump a wall of false "Interrupted by app restart" rows that only
+        // trickled back via the 30s network-probe auto-retry.
         let result = sqlx::query!(
             "UPDATE upload_queue SET state = 'FAILED', error_message = 'Interrupted by app restart', updated_at = datetime('now')
-             WHERE state IN ('UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'PENDING', 'HASHING', 'QUALITY_CHECKING')",
+             WHERE state IN ('HASHING', 'QUALITY_CHECKING')",
         )
         .execute(&self.pool)
         .await?;
@@ -473,6 +486,24 @@ impl Database {
             tracing::debug!(count = rows.len(), "polled pending uploads");
         }
         Ok(rows.into_iter().map(UploadTask::from).collect())
+    }
+
+    /// Load a single upload row by id. Used by the auto-advance path so a
+    /// freshly-`Pending` row can be fetched in O(1) instead of loading the
+    /// whole pending set and scanning it — staging 100 files would otherwise
+    /// run ~100 full-table loads (one per auto-advancing task).
+    pub async fn get_upload_by_id(&self, id: &str) -> Result<Option<UploadTask>, DbError> {
+        let row = sqlx::query_as!(
+            UploadRow,
+            "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
+                    document_id, session_id, bytes_uploaded, state, error_message,
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+             FROM upload_queue WHERE id = ?",
+            id,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(UploadTask::from))
     }
 
     pub async fn get_all_uploads(&self) -> Result<Vec<UploadTask>, DbError> {

@@ -23,12 +23,15 @@ pub fn TranscodeDialog(task_id: String, open: bool, on_close: EventHandler<bool>
     let mut config = use_signal(|| app_state.config.read().transcode.clone());
 
     // Find the task to show estimated output size
+    // Deref the `Arc`-wrapped stored field into a plain owned `VideoInfo` so the
+    // `&VideoInfo`-typed `estimate_transcoded_size` call below works unchanged.
+    // One clone here is fine — it runs only when the transcode sheet opens.
     let task_info = app_state
         .upload_tasks
         .read()
         .iter()
         .find(|t| t.id == task_id)
-        .and_then(|t| t.video_info.clone());
+        .and_then(|t| t.video_info.as_deref().cloned());
 
     let estimated = task_info
         .as_ref()

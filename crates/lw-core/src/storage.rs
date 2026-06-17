@@ -162,11 +162,12 @@ pub async fn upload_file_chunked(
     Ok(offset)
 }
 
-/// Default per-chunk retry budget for the resilient (concurrent) upload path.
-/// Near-infinite (100): a transient network blip should not lose a chunk. The
-/// backoff plateaus at `MAX_RETRY_DELAY_MS`, so 100 attempts is bounded patience
-/// (tens of minutes), not a busy-loop. Sequential "upload one by one" mode passes
-/// 0 instead, so a dead file fails fast and the queue advances.
+/// Default per-chunk retry budget for the bounded-parallel upload path — the
+/// only dispatch path. Near-infinite (100): a transient network blip should not
+/// lose a chunk. The backoff plateaus at `MAX_RETRY_DELAY_MS`, so 100 attempts
+/// is bounded patience (tens of minutes), not a busy-loop. Bounded concurrency
+/// keeps one dead file from starving the others, so every upload uses this full
+/// budget; there is no fast-fail mode.
 pub const DEFAULT_MAX_RETRIES: u32 = 100;
 
 /// Upload a single chunk with automatic retry on network errors.

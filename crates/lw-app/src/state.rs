@@ -113,7 +113,6 @@ impl CoreServices {
             config.transcode.clone(),
             config.upload.chunk_size_mb,
             config.upload.max_concurrent_uploads,
-            config.upload.sequential_uploads,
         ));
 
         // Spawn background auto-retry for failed uploads on network
@@ -143,6 +142,20 @@ pub struct AppState {
     pub selected_tenant: Signal<Option<Tenant>>,
     pub selected_project: Signal<Option<Project>>,
     pub upload_tasks: Signal<Vec<UploadTask>>,
+    /// Per-task progress maps, written by the resident `UploadRuntime`'s
+    /// single event pump and read by the transfer view. Kept out of
+    /// `upload_tasks` so a byte-level `Progress` tick doesn't churn the
+    /// whole task list. `upload_progress` is clamped monotonic in the
+    /// event handler. `Signal<T>` is `Copy`, so views take cheap handles.
+    pub transcode_progress: Signal<HashMap<String, f32>>,
+    pub upload_progress: Signal<HashMap<String, (u64, u64)>>,
+    pub hash_progress: Signal<HashMap<String, (u64, u64)>>,
+    /// Per-task upload speed in bytes/second, derived UI-side by the resident
+    /// `UploadRuntime` from successive `Progress` events (the engine carries no
+    /// timestamp). EMA-smoothed; absent or `0.0` means "unknown" (no rate/ETA
+    /// shown yet). Updated at chunk granularity — one sample per landed chunk —
+    /// and cleared when a task reaches a terminal state.
+    pub upload_speed: Signal<HashMap<String, f64>>,
     pub projects: Signal<Vec<Project>>,
     pub tenant_projects: Signal<HashMap<String, Vec<Project>>>,
     pub is_loading: Signal<bool>,
@@ -216,21 +229,13 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// True when the given task belongs to this scope. Used to filter the
-    /// upload queue view.
-    pub fn matches(&self, task_tenant_id: &str, task_project_id: &str) -> bool {
-        match self {
-            Scope::All => true,
-            Scope::Tenant { tenant_id } => tenant_id == task_tenant_id,
-            Scope::Project {
-                tenant_id,
-                project_id,
-            } => tenant_id == task_tenant_id && project_id == task_project_id,
-        }
-    }
-
     /// Only `Project` scope has enough context to stage new uploads; the
     /// engine needs both a tenant id AND a project id.
+    ///
+    /// The transfer panel renders globally (every org at once) and narrows
+    /// to the selected project through its own opt-in filter, so `Scope` no
+    /// longer drives a per-row view filter — it only gates whether the
+    /// current selection can be an upload *target*.
     pub fn is_uploadable(&self) -> bool {
         matches!(self, Scope::Project { .. })
     }
@@ -244,6 +249,10 @@ impl AppState {
             selected_tenant: Signal::new(None),
             selected_project: Signal::new(None),
             upload_tasks: Signal::new(Vec::new()),
+            transcode_progress: Signal::new(HashMap::new()),
+            upload_progress: Signal::new(HashMap::new()),
+            hash_progress: Signal::new(HashMap::new()),
+            upload_speed: Signal::new(HashMap::new()),
             projects: Signal::new(Vec::new()),
             tenant_projects: Signal::new(HashMap::new()),
             is_loading: Signal::new(false),
