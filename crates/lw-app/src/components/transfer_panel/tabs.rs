@@ -99,6 +99,20 @@ pub const TRANSFER_TAB_CSS: &str = r#"
     background: var(--btn-primary);
     border-color: var(--btn-primary);
 }
+.lw-upload-menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    font-size: 13px;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.lw-upload-menu-item:hover { background: var(--bg-tertiary); }
 "#;
 
 /// One button in the primary tab strip. Label carries its own count, e.g.

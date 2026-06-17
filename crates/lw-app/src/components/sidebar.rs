@@ -1,7 +1,5 @@
-use crate::components::transfer_panel::stage_folder;
 use crate::state::{AppState, CoreServices};
 use dioxus::prelude::*;
-use std::path::PathBuf;
 
 /// Group id used by the backend for vision-lab tenants. Matches
 /// `parentGroupId` values returned in `TenantInfo`. Hardcoded here on
@@ -131,53 +129,6 @@ pub fn Sidebar() -> Element {
         .and_then(|t| app_state.tenant_projects.read().get(&t.id).cloned())
         .unwrap_or_default();
 
-    // Folder-picker launcher shared by the projects-panel Upload button and the
-    // right-click project row (方案乙: the click/right-click ingest gesture is
-    // "pick a folder of clips"). Given an explicit (tenant, project) target it
-    // opens `rfd::pick_folder`, recurses for videos off the UI thread, and
-    // stages each via the shared `stage_folder` path. Taking the target as
-    // arguments keeps it unambiguous: the right-click handler sets the row as
-    // the selection first, then passes that same row's ids here.
-    let engine_for_picker = services.upload_engine.clone();
-    let app_state_for_picker = app_state.clone();
-    let launch_folder_picker = move |tenant_id: String, project_id: String| {
-        let engine = engine_for_picker.clone();
-        let app_state_toast = app_state_for_picker.clone();
-        spawn(async move {
-            let folder = rfd::AsyncFileDialog::new()
-                .set_title("Select a folder of videos to upload")
-                .pick_folder()
-                .await;
-            let Some(folder) = folder else { return };
-            stage_folder(
-                engine,
-                PathBuf::from(folder.path()),
-                tenant_id,
-                project_id,
-                app_state_toast,
-            )
-            .await;
-        });
-    };
-
-    // The projects-panel Upload button targets the currently selected project;
-    // it's only enabled when one is selected.
-    let selected_project = app_state.selected_project.read().clone();
-    let on_upload_click = {
-        let launch = launch_folder_picker.clone();
-        let selected_tenant = selected_tenant.clone();
-        let selected_project = selected_project.clone();
-        move |_| {
-            let (Some(tenant), Some(project)) =
-                (selected_tenant.as_ref(), selected_project.as_ref())
-            else {
-                return;
-            };
-            launch(tenant.id.clone(), project.id.clone());
-        }
-    };
-    let upload_enabled = selected_project.is_some();
-
     rsx! {
         div {
             class: "flex h-full shrink-0",
@@ -260,28 +211,8 @@ pub fn Sidebar() -> Element {
                     class: "w-[220px] min-w-[220px] max-w-[220px] h-full flex flex-col border-r border-border bg-background shrink-0",
 
                     div {
-                        class: "h-10 flex items-center justify-between px-4 border-b border-border shrink-0 gap-2",
+                        class: "h-10 flex items-center px-4 border-b border-border shrink-0",
                         span { class: "text-xs font-semibold text-muted-foreground uppercase tracking-wider", "Projects" }
-                        // Upload-to-selected-project button. Enabled only with a
-                        // project selected; opens a folder picker (方案乙).
-                        if upload_enabled {
-                            button {
-                                class: "shrink-0 text-[11px] font-medium px-2 py-1 rounded \
-                                        bg-primary text-primary-foreground hover:bg-primary/90 \
-                                        transition-colors cursor-pointer",
-                                title: "Upload a folder of videos to the selected project",
-                                onclick: on_upload_click,
-                                "Upload"
-                            }
-                        } else {
-                            button {
-                                class: "shrink-0 text-[11px] font-medium px-2 py-1 rounded \
-                                        bg-muted text-muted-foreground cursor-not-allowed",
-                                disabled: true,
-                                title: "Select a project to enable uploading",
-                                "Upload"
-                            }
-                        }
                     }
 
                     div {
@@ -317,12 +248,6 @@ pub fn Sidebar() -> Element {
                                 };
                                 let tenant = selected_tenant.clone().expect("checked is_some above");
                                 let project = project.clone();
-                                // Separate clones for the right-click handler so
-                                // both closures own their captures.
-                                let tenant_ctx = tenant.clone();
-                                let project_ctx = project.clone();
-                                let launch_ctx = launch_folder_picker.clone();
-                                let mut app_state_ctx = app_state.clone();
                                 rsx! {
                                     div {
                                         key: "{project.id}",
@@ -331,20 +256,6 @@ pub fn Sidebar() -> Element {
                                             app_state.selected_project.set(Some(project.clone()));
                                             let projects = app_state.tenant_projects.read().get(&tenant.id).cloned().unwrap_or_default();
                                             app_state.projects.set(projects);
-                                        },
-                                        // Right-click a project row → make it the
-                                        // selection, then open the folder picker
-                                        // for THAT project (方案乙, no menu). The
-                                        // `prevent_default` suppresses the Windows
-                                        // webview's native context menu so only
-                                        // our picker opens.
-                                        oncontextmenu: move |e: Event<MouseData>| {
-                                            e.prevent_default();
-                                            app_state_ctx.selected_tenant.set(Some(tenant_ctx.clone()));
-                                            app_state_ctx.selected_project.set(Some(project_ctx.clone()));
-                                            let projects = app_state_ctx.tenant_projects.read().get(&tenant_ctx.id).cloned().unwrap_or_default();
-                                            app_state_ctx.projects.set(projects);
-                                            launch_ctx(tenant_ctx.id.clone(), project_ctx.id.clone());
                                         },
                                         "{project.name}"
                                     }

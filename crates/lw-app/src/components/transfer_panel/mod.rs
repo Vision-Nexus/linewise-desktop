@@ -19,9 +19,13 @@
 //! Staging is auto-upload: a clip that passes QC dispatches immediately
 //! (bounded-parallel), with no manual click. The only rows that reach
 //! `Staged` are clips HELD for an opt-in transcode; the single `[Upload N]`
-//! button acts on those alone and is otherwise absent. The other staging
-//! entry points (Add Files button, drag-drop) are carried over from the old
-//! queue.
+//! button acts on those alone and is otherwise absent.
+//!
+//! Ingest is consolidated into ONE multi-function "Upload" button in the
+//! header: it opens a small menu with "Select files…" (multi-file picker,
+//! every pick staged) and "Select folder…" (recursive, videos only).
+//! Drag-drop is the third entry and behaves the same (files + folder
+//! recursion). There is no sidebar ingest.
 
 mod completed;
 mod failed;
@@ -54,17 +58,12 @@ use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
 
 /// Stage every video under `dir` into `(tenant_id, project_id)`.
 ///
-/// The single folder-ingest routine shared by every click entry: the
-/// transfer-panel header button, the sidebar Upload button, and the
-/// right-click project picker. The recursive walk runs off the UI thread
-/// via `spawn_blocking` (`collect_videos_in_dir` is synchronous `std::fs`);
-/// then each video is staged through the same `stage_file` + toast-on-error
-/// path the per-file pickers use. A folder with no videos shows an info
-/// toast so the click doesn't feel like a no-op.
-///
-/// `pub(crate)` so the sidebar Upload button and the right-click project
-/// picker (item 4) can share the exact same ingest path.
-pub(crate) async fn stage_folder(
+/// The folder-ingest routine shared by the header "Upload" menu's "Select
+/// folder…" choice and the drag-drop path. The recursive walk runs off the
+/// UI thread via `spawn_blocking` (`collect_videos_in_dir` is synchronous
+/// `std::fs`); then each video is staged via `stage_files`. A folder with no
+/// videos shows an info toast so the click doesn't feel like a no-op.
+async fn stage_folder(
     engine: std::sync::Arc<lw_core::upload::UploadEngine>,
     dir: PathBuf,
     tenant_id: String,
@@ -92,9 +91,27 @@ pub(crate) async fn stage_folder(
         );
         return;
     }
-    for path in videos {
+    stage_files(engine, videos, tenant_id, project_id, app_state_for_toast).await;
+}
+
+/// Stage each path in `paths` into `(tenant_id, project_id)`, one at a time,
+/// surfacing a toast for any staging error.
+///
+/// Shared by the header "Upload" menu's "Select files…" choice (explicit
+/// picks — every selected path is staged as-is) and by `stage_folder` (the
+/// recursive video walk). Each file goes through `stage_file`; a failure logs
+/// at the typed error's level and shows a per-file error toast, then the loop
+/// continues so one bad file doesn't abort the rest of the batch.
+async fn stage_files(
+    engine: std::sync::Arc<lw_core::upload::UploadEngine>,
+    paths: Vec<PathBuf>,
+    tenant_id: String,
+    project_id: String,
+    mut app_state_for_toast: AppState,
+) {
+    for path in paths {
         if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
-            e.log("Stage folder video");
+            e.log("Stage file");
             app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
         }
     }
@@ -237,40 +254,66 @@ pub fn TransferPanel() -> Element {
         .filter(|t| t.state == UploadState::Staged)
         .count();
 
-    // 方案乙: every click entry is a FOLDER picker. The header button uploads
-    // a whole folder of clips to the selected project; single files stay on the
-    // drag-drop path. Label mirrors the target so the destination is obvious.
-    let upload_label = match (
-        app_state.selected_tenant.read().as_ref(),
-        app_state.selected_project.read().as_ref(),
-    ) {
-        (Some(tenant), Some(project)) => {
-            format!("Upload to {} / {}", tenant.display_name, project.name)
-        }
-        _ => "Upload".to_string(),
-    };
+    // === Staging + action callbacks ===
 
-    // === Staging + action callbacks (carried over from the old queue) ===
+    // Open/close state for the header "Upload" menu (file-or-folder choices).
+    let mut upload_menu_open = use_signal(|| false);
 
-    let engine_for_add = services.upload_engine.clone();
+    let engine_for_files = services.upload_engine.clone();
+    let engine_for_folder = services.upload_engine.clone();
     let engine_for_drop = services.upload_engine.clone();
 
-    let app_state_add = app_state.clone();
-    let on_upload_folder = move |_| {
-        let engine = engine_for_add.clone();
-        let tenant_id = app_state_add
+    // "Select files…" — multi-select file picker. These are explicit picks,
+    // so every chosen path is staged as-is (no video sniff). Stages via the
+    // shared `stage_files` loop so error toasts match every other entry.
+    let app_state_files = app_state.clone();
+    let on_pick_files = move |_| {
+        upload_menu_open.set(false);
+        let engine = engine_for_files.clone();
+        let tenant_id = app_state_files
             .selected_tenant
             .read()
             .as_ref()
             .map(|t| t.id.clone())
             .unwrap_or_default();
-        let project_id = app_state_add
+        let project_id = app_state_files
             .selected_project
             .read()
             .as_ref()
             .map(|p| p.id.clone())
             .unwrap_or_default();
-        let app_state_for_toast = app_state_add.clone();
+        let app_state_for_toast = app_state_files.clone();
+
+        spawn(async move {
+            let files = rfd::AsyncFileDialog::new()
+                .set_title("Select videos to upload")
+                .pick_files()
+                .await;
+            let Some(files) = files else { return };
+            let paths: Vec<PathBuf> = files.iter().map(|f| PathBuf::from(f.path())).collect();
+            stage_files(engine, paths, tenant_id, project_id, app_state_for_toast).await;
+        });
+    };
+
+    // "Select folder…" — folder picker, recursive, videos only (via
+    // `stage_folder` / `collect_videos_in_dir`).
+    let app_state_folder = app_state.clone();
+    let on_pick_folder = move |_| {
+        upload_menu_open.set(false);
+        let engine = engine_for_folder.clone();
+        let tenant_id = app_state_folder
+            .selected_tenant
+            .read()
+            .as_ref()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let project_id = app_state_folder
+            .selected_project
+            .read()
+            .as_ref()
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
+        let app_state_for_toast = app_state_folder.clone();
 
         spawn(async move {
             let folder = rfd::AsyncFileDialog::new()
@@ -590,19 +633,53 @@ pub fn TransferPanel() -> Element {
             ondragleave: move |_| is_dragging.set(false),
             ondrop: on_drop,
 
-            // Header: title + Add Files + Upload button (held transcode clips).
+            // Header: title + the single multi-function Upload button (its menu
+            // offers files-or-folder) + the held-transcode "Upload N" button.
             div {
                 style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;",
                 h2 { style: "margin: 0; font-size: 16px;", "Transfers" }
                 div {
                     style: "display: flex; gap: 8px; align-items: center;",
                     if can_upload {
-                        button {
-                            class: "btn-primary",
-                            style: "{styles::BTN_PRIMARY}",
-                            title: "Pick a folder of videos to upload to this project",
-                            onclick: on_upload_folder,
-                            "{upload_label}"
+                        // The one ingest entry: a button that opens a small menu
+                        // with "Select files…" and "Select folder…". A
+                        // full-screen backdrop closes the menu on outside click,
+                        // mirroring the `UserMenu` popover in `title_bar.rs`.
+                        div {
+                            style: "position: relative;",
+                            button {
+                                class: "btn-primary",
+                                style: "{styles::BTN_PRIMARY}",
+                                title: "Upload videos to this project",
+                                onclick: move |_| {
+                                    let next = !*upload_menu_open.read();
+                                    upload_menu_open.set(next);
+                                },
+                                "Upload"
+                            }
+                            if *upload_menu_open.read() {
+                                div {
+                                    style: "position: fixed; inset: 0; z-index: 40;",
+                                    onclick: move |_| upload_menu_open.set(false),
+                                }
+                                div {
+                                    style: "position: absolute; top: 100%; right: 0; margin-top: 4px; \
+                                            min-width: 180px; z-index: 50; \
+                                            background: var(--bg); border: 1px solid var(--border); \
+                                            border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); \
+                                            padding: 4px;",
+                                    button {
+                                        class: "lw-upload-menu-item",
+                                        onclick: on_pick_files,
+                                        "Select files…"
+                                    }
+                                    button {
+                                        class: "lw-upload-menu-item",
+                                        onclick: on_pick_folder,
+                                        "Select folder…"
+                                    }
+                                }
+                            }
                         }
                         if staged_count > 0 {
                             UploadButton { staged_count, confirm_cb }
