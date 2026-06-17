@@ -4,6 +4,7 @@ mod app;
 mod components;
 mod hooks;
 pub mod icons;
+mod single_instance;
 mod state;
 pub mod styles;
 
@@ -82,6 +83,21 @@ fn main() {
         .init();
 
     tracing::info!("Starting Linewise Upload");
+
+    // Single-instance guard. The data dir is build-independent, so a debug
+    // build and a downloaded release share the same config.toml / linewise.db /
+    // keyring — running two at once corrupts the SQLite queue and races config
+    // writes. A second launch hands "show the window" off to the running
+    // instance (raised via the same path as the tray "show" item) and exits
+    // without opening a window. `LINEWISE_DESKTOP_ALLOW_MULTIPLE` skips the
+    // guard for development. Done after logging so the handoff is observable.
+    match single_instance::acquire() {
+        single_instance::GuardOutcome::Continue => {}
+        single_instance::GuardOutcome::AlreadyRunning => {
+            tracing::info!("Another instance is already running; exiting after raising it");
+            return;
+        }
+    }
 
     // Initialize FFmpeg library (bundled path → system fallback)
     if let Err(e) = lw_core::transcode::init() {
