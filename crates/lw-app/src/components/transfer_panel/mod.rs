@@ -1,0 +1,771 @@
+//! Global transfer panel — the main content area's resident view.
+//!
+//! Replaces the old single-scope `UploadQueue`. The panel is a pure reader
+//! of the resident upload state (`AppState::upload_tasks` + the three
+//! progress maps written by `UploadRuntime`); it owns no event pump and no
+//! startup recovery. Its structure:
+//!
+//! * **Primary tabs** `In Progress / Completed / Failed`, counts baked into
+//!   the labels (the counts ARE the summary). `Failed` carries a nested
+//!   `Quality / Network` split (see `failed.rs`).
+//! * **Global by default.** Unlike the old queue it does NOT filter by the
+//!   selected scope — uploads from every org are visible at once. An opt-in
+//!   "Only {org}/{project}" chip (default OFF) narrows the rendered list to
+//!   the selected project when the user wants it. Scope still governs the
+//!   *upload target* (`Scope::is_uploadable`), just not the view.
+//! * **Toolbar** `[Retry all]` (Network failures only) + `[Clear
+//!   completed]`.
+//!
+//! The staging entry points (Add Files button, drag-drop, the Upload
+//! split-button) are carried over unchanged from the old queue; auto-upload
+//! and the parallel-only dispatch rework land in a later change.
+
+mod completed;
+mod failed;
+mod in_progress;
+mod rows;
+mod tabs;
+
+/// Marker the `DuplicateDetected` reconcile writes into a task's
+/// `error_message` so the Completed view renders an "Already exists" badge
+/// instead of treating the row as failed. Re-exported here so the resident
+/// event handler in `upload_runtime.rs` and the Completed view share one
+/// definition.
+pub use completed::ALREADY_EXISTS_MARKER;
+
+use crate::components::transcode_dialog::TranscodeDialog;
+use crate::state::{AppState, CoreServices, ToastKind};
+use crate::styles;
+use completed::CompletedList;
+use dioxus::html::HasFileData;
+use dioxus::prelude::*;
+use failed::FailedList;
+use in_progress::InProgressList;
+use lw_core::error::UploadError;
+use lw_core::models::{UploadState, UploadTask};
+use lw_core::upload;
+use lw_core::video;
+use lw_core::video::DeviceEncoderSignature;
+use std::path::{Path, PathBuf};
+use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
+
+/// Formats a staging error into a user-facing toast string. Expected
+/// rejections (the user picked a file we can't accept) get a "Cannot
+/// upload" prefix and the typed error's `Display` as the reason.
+/// Unexpected failures (network, IO, API, DB) get a "Failed to add"
+/// prefix — they look the same to the user, but the prefix matches the
+/// log-level distinction in `UploadError::log`.
+///
+/// Note: most of these variants no longer reach this function because
+/// `stage_file` now defers the quality check (broken file, unsupported
+/// container, server offline) into a `Rejected` row whose reason renders
+/// inline in the panel. The toast path stays exhaustive so that adding
+/// a new `UploadError` still forces a deliberate routing decision, but
+/// in practice only `FileNotFound`, `Io`, and `Database` arrive here.
+fn stage_error_toast(path: &Path, err: &UploadError) -> String {
+    let filename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    match err {
+        UploadError::VideoUnplayable { .. }
+        | UploadError::Duplicate { .. }
+        | UploadError::DuplicateOnServer { .. }
+        | UploadError::FileTooLarge { .. }
+        | UploadError::FileNotFound(_)
+        | UploadError::Cancelled
+        | UploadError::QualityCheckPayloadTooLarge { .. } => {
+            format!("Cannot upload \"{filename}\": {err}")
+        }
+        UploadError::UnsupportedContainer { kind } => {
+            format!(
+                "Cannot upload \"{filename}\" ({label}): {err}",
+                label = kind.human_label(),
+            )
+        }
+        UploadError::QualityCheckOffline { .. } => {
+            format!(
+                "Cannot upload \"{filename}\": server unreachable — quality check requires a network connection"
+            )
+        }
+        UploadError::Api { .. }
+        | UploadError::Auth { .. }
+        | UploadError::GcsUpload { .. }
+        | UploadError::Network(_)
+        | UploadError::Io(_)
+        | UploadError::Database(_) => format!("Failed to add \"{filename}\": {err}"),
+    }
+}
+
+#[component]
+pub fn TransferPanel() -> Element {
+    let app_state = use_context::<AppState>();
+    let services = use_context::<CoreServices>();
+
+    // Shared progress maps owned by the resident `UploadRuntime`. `Signal<T>`
+    // is Copy, so these are cheap handles passed down to the rows.
+    let transcode_progress = app_state.transcode_progress;
+    let upload_progress = app_state.upload_progress;
+    let hash_progress = app_state.hash_progress;
+
+    let device_encoder_signatures: &'static [DeviceEncoderSignature] =
+        video::device_encoder_signatures();
+    let transcode_config = app_state.config.read().transcode.clone();
+
+    // Transcode dialog state: Some(task_id) = dialog open for that task.
+    let mut transcode_dialog_task: Signal<Option<String>> = use_signal(|| None);
+
+    // Primary tab — process-local view state, defaults to In Progress.
+    let mut tab = use_signal(|| PrimaryTab::InProgress);
+
+    // Per-project filter chip. Default OFF → the panel is global (every org's
+    // tasks). When ON and a project is selected, the rendered list narrows to
+    // that (tenant, project). This is the only place selection touches the
+    // view; the default stays global.
+    let mut only_selected = use_signal(|| false);
+
+    // Scope still drives the upload TARGET decision (and the chip label), even
+    // though it no longer filters the view by default.
+    let scope = app_state.scope();
+    let can_upload = scope.is_uploadable();
+
+    // Selected (tenant, project) ids for the opt-in narrowing + chip label.
+    let selected_tenant_id = app_state
+        .selected_tenant
+        .read()
+        .as_ref()
+        .map(|t| t.id.clone());
+    let selected_project_id = app_state
+        .selected_project
+        .read()
+        .as_ref()
+        .map(|p| p.id.clone());
+    let chip_label = match (
+        app_state.selected_tenant.read().as_ref(),
+        app_state.selected_project.read().as_ref(),
+    ) {
+        (Some(tenant), Some(project)) => {
+            format!("Only {} / {}", tenant.display_name, project.name)
+        }
+        _ => "Only selected project".to_string(),
+    };
+    // The chip only makes sense when a project is selected; otherwise there is
+    // nothing to narrow to and we keep the panel global.
+    let chip_applicable = can_upload;
+    let narrowing = *only_selected.read() && chip_applicable;
+
+    // The full task list (global). Optionally narrowed to the selected project.
+    let all_tasks = app_state.upload_tasks.read();
+    let tasks: Vec<UploadTask> = match (narrowing, &selected_tenant_id, &selected_project_id) {
+        (true, Some(tid), Some(pid)) => all_tasks
+            .iter()
+            .filter(|t| &t.tenant_id == tid && &t.project_id == pid)
+            .cloned()
+            .collect(),
+        _ => all_tasks.iter().cloned().collect(),
+    };
+    drop(all_tasks);
+
+    // Per-tab counts — computed once from the (possibly narrowed) list and
+    // baked into the tab labels.
+    let in_progress_count = tasks
+        .iter()
+        .filter(|t| PrimaryTab::InProgress.contains(&t.state))
+        .count();
+    let completed_count = tasks
+        .iter()
+        .filter(|t| PrimaryTab::Completed.contains(&t.state))
+        .count();
+    let failed_count = tasks
+        .iter()
+        .filter(|t| PrimaryTab::Failed.contains(&t.state))
+        .count();
+
+    let staged_count = tasks
+        .iter()
+        .filter(|t| t.state == UploadState::Staged)
+        .count();
+
+    let add_files_label = match (
+        app_state.selected_tenant.read().as_ref(),
+        app_state.selected_project.read().as_ref(),
+    ) {
+        (Some(tenant), Some(project)) => {
+            format!("Add Files to {} / {}", tenant.display_name, project.name)
+        }
+        _ => "Add Files".to_string(),
+    };
+
+    // === Staging + action callbacks (carried over from the old queue) ===
+
+    let engine_for_add = services.upload_engine.clone();
+    let engine_for_drop = services.upload_engine.clone();
+
+    let app_state_add = app_state.clone();
+    let on_add_files = move |_| {
+        let engine = engine_for_add.clone();
+        let tenant_id = app_state_add
+            .selected_tenant
+            .read()
+            .as_ref()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let project_id = app_state_add
+            .selected_project
+            .read()
+            .as_ref()
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
+        let mut app_state_for_toast = app_state_add.clone();
+
+        spawn(async move {
+            let files = rfd::AsyncFileDialog::new()
+                .set_title("Select files to upload")
+                .pick_files()
+                .await;
+            let Some(files) = files else { return };
+            tracing::info!(file_count = files.len(), "file picker returned files");
+            for file in files {
+                let path = PathBuf::from(file.path());
+                if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
+                    e.log("Stage file");
+                    app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
+                }
+            }
+        });
+    };
+
+    // Confirm upload (manual). Carried over unchanged; auto-upload + the
+    // parallel-only rework land in a later change. `sequential` selects the
+    // dispatch mode and is remembered (persisted to config).
+    let engine_for_confirm = services.upload_engine.clone();
+    let config_for_confirm = services.config.clone();
+    let app_state_for_confirm = app_state.clone();
+    let app_state_confirm = app_state.clone();
+    let confirm_cb = use_callback(move |sequential: bool| {
+        let engine = engine_for_confirm.clone();
+        let mut app_state_write = app_state_confirm.clone();
+        let transcode_ids: Vec<String> = app_state_for_confirm
+            .upload_tasks
+            .read()
+            .iter()
+            .filter(|t| t.state == UploadState::Staged && t.transcode)
+            .map(|t| t.id.clone())
+            .collect();
+        let mut cfg = config_for_confirm.clone();
+        cfg.upload.sequential_uploads = sequential;
+        if let Err(e) = cfg.save() {
+            tracing::warn!("Failed to persist upload mode: {e}");
+        }
+        spawn(async move {
+            match engine.confirm_staged(&transcode_ids, sequential).await {
+                Ok(ids) => {
+                    tracing::info!("Confirmed {} files (sequential={sequential})", ids.len());
+                    let mut tasks = app_state_write.upload_tasks.write();
+                    for task in tasks.iter_mut() {
+                        if ids.contains(&task.id) {
+                            task.state = UploadState::Pending;
+                        }
+                    }
+                }
+                Err(e) => tracing::error!("Failed to confirm uploads: {e}"),
+            }
+        });
+    });
+
+    let upload_seq = use_signal(|| services.config.upload.sequential_uploads);
+    let show_upload_menu = use_signal(|| false);
+
+    let engine_for_remove = services.upload_engine.clone();
+    let mut app_state_remove = app_state.clone();
+    let on_remove = move |task_id: String| {
+        let engine = engine_for_remove.clone();
+        spawn(async move {
+            if let Err(e) = engine.remove_staged(&task_id).await {
+                tracing::error!("Failed to remove staged file: {e}");
+            }
+            app_state_remove
+                .upload_tasks
+                .write()
+                .retain(|t| t.id != task_id);
+        });
+    };
+
+    let mut app_state_transcode = app_state.clone();
+    let on_transcode_click = move |task_id: String| {
+        let is_enabled = app_state_transcode
+            .upload_tasks
+            .read()
+            .iter()
+            .any(|t| t.id == task_id && t.transcode);
+        if is_enabled {
+            let mut tasks = app_state_transcode.upload_tasks.write();
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.transcode = false;
+            }
+        } else {
+            transcode_dialog_task.set(Some(task_id));
+        }
+    };
+
+    let engine_for_retry = services.upload_engine.clone();
+    let db_for_retry = services.db.clone();
+    let mut app_state_retry = app_state.clone();
+    let on_retry = move |task_id: String| {
+        let engine = engine_for_retry.clone();
+        let db = db_for_retry.clone();
+        spawn(async move {
+            let _ = db
+                .update_upload_state(&task_id, UploadState::Pending, None)
+                .await;
+            let mut tasks = app_state_retry.upload_tasks.write();
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = UploadState::Pending;
+                task.error_message = None;
+                let mut task = task.clone();
+                drop(tasks);
+                let eng = engine.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = eng.process_task(&mut task).await {
+                        e.log(format_args!("Retry of {}", task.filename));
+                    }
+                });
+            }
+        });
+    };
+
+    // Retry every Network failure at once. Reuses the single-row retry path
+    // for each `Failed` row currently rendered.
+    let on_retry_all = {
+        let on_retry = on_retry.clone();
+        let app_state_retry_all = app_state.clone();
+        move |_| {
+            let failed_ids: Vec<String> = app_state_retry_all
+                .upload_tasks
+                .read()
+                .iter()
+                .filter(|t| t.state == UploadState::Failed)
+                .map(|t| t.id.clone())
+                .collect();
+            for id in failed_ids {
+                on_retry(id);
+            }
+        }
+    };
+
+    // Force upload (super-admin bypass) for a Rejected row.
+    let engine_for_force = services.upload_engine.clone();
+    let mut app_state_force = app_state.clone();
+    let on_force_upload = move |task_id: String| {
+        let engine = engine_for_force.clone();
+        let mut tasks = app_state_force.upload_tasks.write();
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.state = UploadState::Pending;
+            task.error_message = None;
+            task.force_upload = true;
+        }
+        drop(tasks);
+        spawn(async move {
+            if let Err(e) = engine.force_upload(&task_id).await {
+                e.log(format_args!("Force-upload spawn for {task_id}"));
+            }
+        });
+    };
+
+    let db_for_pause = services.db.clone();
+    let mut app_state_pause = app_state.clone();
+    let on_pause = move |task_id: String| {
+        let db = db_for_pause.clone();
+        spawn(async move {
+            let _ = db
+                .update_upload_state(&task_id, UploadState::Paused, None)
+                .await;
+            let mut tasks = app_state_pause.upload_tasks.write();
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = UploadState::Paused;
+            }
+        });
+    };
+
+    let engine_for_resume = services.upload_engine.clone();
+    let db_for_resume = services.db.clone();
+    let mut app_state_resume = app_state.clone();
+    let on_resume = move |task_id: String| {
+        let engine = engine_for_resume.clone();
+        let db = db_for_resume.clone();
+        spawn(async move {
+            let _ = db
+                .update_upload_state(&task_id, UploadState::Pending, None)
+                .await;
+            let mut tasks = app_state_resume.upload_tasks.write();
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = UploadState::Pending;
+                task.error_message = None;
+                let mut task = task.clone();
+                drop(tasks);
+                let eng = engine.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = eng.process_task(&mut task).await {
+                        e.log(format_args!("Resume of {}", task.filename));
+                    }
+                });
+            }
+        });
+    };
+
+    let mut app_state_clear = app_state.clone();
+    let db_for_clear = services.db.clone();
+    let on_clear = move |task_id: String| {
+        let db = db_for_clear.clone();
+        spawn(async move {
+            let _ = db.delete_upload_task(&task_id).await;
+            app_state_clear
+                .upload_tasks
+                .write()
+                .retain(|t| t.id != task_id);
+        });
+    };
+
+    // Clear every Completed row (delete from DB + UI). Reuses the single-row
+    // clear path for each `Completed` row.
+    let on_clear_completed = {
+        let on_clear = on_clear.clone();
+        let app_state_clear_all = app_state.clone();
+        move |_| {
+            let completed_ids: Vec<String> = app_state_clear_all
+                .upload_tasks
+                .read()
+                .iter()
+                .filter(|t| t.state == UploadState::Completed)
+                .map(|t| t.id.clone())
+                .collect();
+            for id in completed_ids {
+                on_clear(id);
+            }
+        }
+    };
+
+    // === Drag-and-drop staging (carried over unchanged) ===
+    let mut is_dragging = use_signal(|| false);
+    let app_state_drop = app_state.clone();
+    let on_drop = move |evt: DragEvent| {
+        is_dragging.set(false);
+        if !can_upload {
+            return;
+        }
+        let engine = engine_for_drop.clone();
+        let tenant_id = app_state_drop
+            .selected_tenant
+            .read()
+            .as_ref()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let project_id = app_state_drop
+            .selected_project
+            .read()
+            .as_ref()
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
+        let mut app_state_for_toast = app_state_drop.clone();
+
+        let mut to_stage: Vec<PathBuf> = Vec::new();
+        let mut skipped: u32 = 0;
+        for file in evt.files() {
+            let path = file.path();
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            if upload::looks_like_video(&path) {
+                to_stage.push(path);
+            } else {
+                skipped += 1;
+            }
+        }
+
+        if skipped > 0 {
+            let label = if skipped == 1 { "file" } else { "files" };
+            app_state_for_toast.show_toast(
+                format!("Skipped {skipped} non-video {label}"),
+                ToastKind::Info,
+            );
+        }
+        if to_stage.is_empty() {
+            return;
+        }
+
+        spawn(async move {
+            for path in to_stage {
+                if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
+                    e.log("Stage dropped file");
+                    app_state_for_toast.show_toast(stage_error_toast(&path, &e), ToastKind::Error);
+                }
+            }
+        });
+    };
+
+    let dragging_active = *is_dragging.read() && can_upload;
+    let drop_border = if dragging_active {
+        "3px dashed var(--border-focus)"
+    } else {
+        "2px dashed transparent"
+    };
+    let drop_background = if dragging_active {
+        "var(--bg-tertiary)"
+    } else {
+        "transparent"
+    };
+
+    // The dispatch mode (concurrent vs one-by-one) may only change while the
+    // queue is idle. Locking it during active/queued/paused work guarantees
+    // the sequential drainer and the concurrent fan-out never run at the same
+    // time. (VLP-747 Part B, decision A.)
+    let queue_active = tasks
+        .iter()
+        .any(|t| t.state.is_active() || t.state == UploadState::Paused);
+
+    let active_tab = *tab.read();
+
+    rsx! {
+        style { "{TRANSFER_TAB_CSS}" }
+        div {
+            style: "padding: 16px; border: {drop_border}; border-radius: 8px; min-height: 300px; background: {drop_background}; transition: border 0.15s, background 0.15s;",
+            ondragover: move |evt| { evt.prevent_default(); is_dragging.set(true); },
+            ondragleave: move |_| is_dragging.set(false),
+            ondrop: on_drop,
+
+            // Header: title + Add Files + Upload split-button.
+            div {
+                style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;",
+                h2 { style: "margin: 0; font-size: 16px;", "Transfers" }
+                div {
+                    style: "display: flex; gap: 8px; align-items: center;",
+                    if can_upload {
+                        button {
+                            class: "btn-primary",
+                            style: "{styles::BTN_PRIMARY}",
+                            onclick: on_add_files,
+                            "{add_files_label}"
+                        }
+                        if staged_count > 0 {
+                            UploadSplitButton {
+                                staged_count,
+                                queue_active,
+                                upload_seq,
+                                show_upload_menu,
+                                confirm_cb,
+                            }
+                        }
+                    } else {
+                        button {
+                            style: "{styles::BTN_DISABLED}",
+                            disabled: true,
+                            title: "Select a project in the sidebar to enable uploading",
+                            "Add Files"
+                        }
+                    }
+                }
+            }
+
+            // Primary tab strip + per-project chip + toolbar.
+            div {
+                style: "display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); margin-bottom: 16px; flex-wrap: wrap; gap: 8px;",
+                div {
+                    style: "display: flex; align-items: center;",
+                    PrimaryTabButton {
+                        label: "In Progress".to_string(),
+                        count: in_progress_count,
+                        active: active_tab == PrimaryTab::InProgress,
+                        onclick: move |_| tab.set(PrimaryTab::InProgress),
+                    }
+                    PrimaryTabButton {
+                        label: "Completed".to_string(),
+                        count: completed_count,
+                        active: active_tab == PrimaryTab::Completed,
+                        onclick: move |_| tab.set(PrimaryTab::Completed),
+                    }
+                    PrimaryTabButton {
+                        label: "Failed".to_string(),
+                        count: failed_count,
+                        active: active_tab == PrimaryTab::Failed,
+                        onclick: move |_| tab.set(PrimaryTab::Failed),
+                    }
+                }
+                div {
+                    style: "display: flex; align-items: center; gap: 8px; padding-bottom: 6px;",
+                    if chip_applicable {
+                        button {
+                            class: if narrowing { "lw-subtab is-active" } else { "lw-subtab" },
+                            title: "Show only this project's transfers. Off shows every org.",
+                            onclick: move |_| {
+                                let on = *only_selected.read();
+                                only_selected.set(!on);
+                            },
+                            "{chip_label}"
+                        }
+                    }
+                    if active_tab == PrimaryTab::Failed {
+                        button {
+                            class: "btn-outline",
+                            style: "height: 26px; padding: 0 10px; font-size: 12px; border-radius: 4px; cursor: pointer; background: transparent; color: var(--text); border: 1px solid var(--border);",
+                            title: "Retry all network failures",
+                            onclick: on_retry_all,
+                            "Retry all"
+                        }
+                    }
+                    if active_tab == PrimaryTab::Completed {
+                        button {
+                            class: "btn-outline",
+                            style: "height: 26px; padding: 0 10px; font-size: 12px; border-radius: 4px; cursor: pointer; background: transparent; color: var(--text-muted); border: 1px solid var(--border);",
+                            title: "Remove all completed rows from history",
+                            onclick: on_clear_completed,
+                            "Clear completed"
+                        }
+                    }
+                }
+            }
+
+            // Tab body.
+            match active_tab {
+                PrimaryTab::InProgress => rsx! {
+                    InProgressList {
+                        tasks: tasks.clone(),
+                        transcode_config: transcode_config.clone(),
+                        device_encoder_signatures,
+                        transcode_progress,
+                        upload_progress,
+                        hash_progress,
+                        on_remove: on_remove.clone(),
+                        on_clear: on_clear.clone(),
+                        on_transcode_click,
+                        on_retry: on_retry.clone(),
+                        on_pause: on_pause.clone(),
+                        on_resume: on_resume.clone(),
+                    }
+                },
+                PrimaryTab::Completed => rsx! {
+                    CompletedList { tasks: tasks.clone() }
+                },
+                PrimaryTab::Failed => rsx! {
+                    FailedList {
+                        tasks: tasks.clone(),
+                        transcode_config: transcode_config.clone(),
+                        device_encoder_signatures,
+                        transcode_progress,
+                        upload_progress,
+                        on_remove: on_remove.clone(),
+                        on_clear: on_clear.clone(),
+                        on_transcode_click,
+                        on_retry: on_retry.clone(),
+                        on_pause: on_pause.clone(),
+                        on_resume: on_resume.clone(),
+                        on_force_upload,
+                    }
+                },
+            }
+
+            // Transcode config sheet. Mounted unconditionally so the slide-out
+            // animation can play on close; visibility is controlled by `open`.
+            {
+                let mut app_state_dialog = app_state.clone();
+                let dialog_task = transcode_dialog_task.read().clone();
+                rsx! {
+                    TranscodeDialog {
+                        task_id: dialog_task.clone().unwrap_or_default(),
+                        open: dialog_task.is_some(),
+                        on_close: move |enabled: bool| {
+                            if enabled
+                                && let Some(tid) = transcode_dialog_task.read().clone()
+                            {
+                                let mut tasks = app_state_dialog.upload_tasks.write();
+                                if let Some(task) = tasks.iter_mut().find(|t| t.id == tid) {
+                                    task.transcode = true;
+                                }
+                            }
+                            transcode_dialog_task.set(None);
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The Upload split-button: a primary action that dispatches in the
+/// remembered mode plus a dropdown to pick parallel vs sequential. Lifted
+/// into its own component so the panel's `rsx!` stays shallow. Carried over
+/// from the old queue verbatim (the parallel-only rework lands later).
+#[component]
+fn UploadSplitButton(
+    staged_count: usize,
+    queue_active: bool,
+    upload_seq: Signal<bool>,
+    show_upload_menu: Signal<bool>,
+    confirm_cb: Callback<bool>,
+) -> Element {
+    let mut upload_seq = upload_seq;
+    let mut show_upload_menu = show_upload_menu;
+    let label = if staged_count == 1 {
+        format!("Upload {staged_count} file")
+    } else {
+        format!("Upload {staged_count} files")
+    };
+    let mode_hint = if *upload_seq.read() {
+        " (one by one)"
+    } else {
+        ""
+    };
+    let menu_title = if queue_active {
+        "Finish or stop the current uploads to change mode"
+    } else {
+        "Upload options"
+    };
+
+    rsx! {
+        div {
+            style: "position: relative; display: inline-flex; align-items: center; gap: 2px;",
+            button {
+                class: "btn-success",
+                style: "{styles::BTN_SUCCESS}",
+                onclick: move |_| confirm_cb.call(*upload_seq.read()),
+                "{label}{mode_hint}"
+            }
+            button {
+                class: "btn-success",
+                style: "padding-left: 9px; padding-right: 9px;",
+                disabled: queue_active,
+                title: "{menu_title}",
+                onclick: move |_| {
+                    if queue_active {
+                        return;
+                    }
+                    let open = *show_upload_menu.read();
+                    show_upload_menu.set(!open);
+                },
+                "▾"
+            }
+            if *show_upload_menu.read() && !queue_active {
+                div {
+                    style: "position: absolute; top: 100%; right: 0; margin-top: 4px; background: var(--bg-tertiary); border: 1px solid var(--border-focus); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); z-index: 50; min-width: 220px; overflow: hidden;",
+                    button {
+                        style: "display: block; width: 100%; text-align: left; padding: 9px 12px; background: transparent; border: none; cursor: pointer; font-size: 13px;",
+                        onclick: move |_| {
+                            upload_seq.set(false);
+                            show_upload_menu.set(false);
+                            confirm_cb.call(false);
+                        },
+                        "Upload all at once (parallel)"
+                    }
+                    button {
+                        style: "display: block; width: 100%; text-align: left; padding: 9px 12px; background: transparent; border: none; cursor: pointer; font-size: 13px; border-top: 1px solid var(--border-focus);",
+                        onclick: move |_| {
+                            upload_seq.set(true);
+                            show_upload_menu.set(false);
+                            confirm_cb.call(true);
+                        },
+                        "Upload one by one (sequential)"
+                    }
+                }
+            }
+        }
+    }
+}

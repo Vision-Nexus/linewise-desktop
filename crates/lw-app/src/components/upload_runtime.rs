@@ -21,6 +21,7 @@
 //! view can read them without owning the pump. This component is the only
 //! writer of those maps.
 
+use crate::components::transfer_panel::ALREADY_EXISTS_MARKER;
 use crate::state::{AppState, CoreServices};
 use dioxus::prelude::*;
 use lw_core::models::{UploadState, UploadTask};
@@ -182,13 +183,26 @@ fn handle_upload_event(
                 t.transcoded_size = Some(transcoded_size)
             });
         }
-        UploadEvent::DuplicateDetected { task_id, .. } => {
+        UploadEvent::DuplicateDetected {
+            task_id,
+            existing_document_id,
+        } => {
+            // A duplicate means the content is already stored on the server —
+            // that is success from the user's standpoint, not a failure. Land
+            // it under Completed with an "Already exists" marker (read by the
+            // Completed view via `ALREADY_EXISTS_MARKER`) instead of in
+            // Failed/Network, where a `[Retry]` would be wrong (retrying just
+            // re-detects the same dup). We reuse `error_message` as the badge
+            // source rather than touch the engine state machine or DB schema.
+            // The existing document id is recorded on the row so the completed
+            // detail refers to the server-side copy that already exists.
             upload_progress.write().remove(&task_id);
             transcode_progress.write().remove(&task_id);
             hash_progress.write().remove(&task_id);
             update_task(app_state, &task_id, |t| {
-                t.state = UploadState::Failed;
-                t.error_message = Some("Duplicate file detected".to_string());
+                t.state = UploadState::Completed;
+                t.error_message = Some(ALREADY_EXISTS_MARKER.to_string());
+                t.document_id = Some(existing_document_id.clone());
             });
         }
         UploadEvent::Completed { task_id } => {

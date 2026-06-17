@@ -224,21 +224,13 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// True when the given task belongs to this scope. Used to filter the
-    /// upload queue view.
-    pub fn matches(&self, task_tenant_id: &str, task_project_id: &str) -> bool {
-        match self {
-            Scope::All => true,
-            Scope::Tenant { tenant_id } => tenant_id == task_tenant_id,
-            Scope::Project {
-                tenant_id,
-                project_id,
-            } => tenant_id == task_tenant_id && project_id == task_project_id,
-        }
-    }
-
     /// Only `Project` scope has enough context to stage new uploads; the
     /// engine needs both a tenant id AND a project id.
+    ///
+    /// The transfer panel renders globally (every org at once) and narrows
+    /// to the selected project through its own opt-in filter, so `Scope` no
+    /// longer drives a per-row view filter — it only gates whether the
+    /// current selection can be an upload *target*.
     pub fn is_uploadable(&self) -> bool {
         matches!(self, Scope::Project { .. })
     }

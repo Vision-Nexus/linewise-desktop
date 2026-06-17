@@ -1,5 +1,5 @@
 use crate::components::login::LoginPage;
-use crate::components::upload_queue::UploadQueue;
+use crate::components::transfer_panel::TransferPanel;
 use crate::components::version_banner::{VersionBlockedScreen, VersionUpdateBanner};
 use crate::state::{AppState, CoreServices};
 use dioxus::desktop::WindowCloseBehaviour;
@@ -430,7 +430,7 @@ fn MainView() -> Element {
 
                 main {
                     style: "flex: 1; overflow-y: auto; padding: 16px;",
-                    UploadQueue {}
+                    TransferPanel {}
                 }
             }
 
