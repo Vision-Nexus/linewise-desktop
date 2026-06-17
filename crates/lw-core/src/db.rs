@@ -73,7 +73,8 @@ impl From<UploadRow> for UploadTask {
             video_info: r
                 .video_info
                 .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok()),
+                .and_then(|s| serde_json::from_str(s).ok())
+                .map(std::sync::Arc::new),
             force_upload: r.force_upload != 0,
         }
     }
@@ -171,9 +172,12 @@ impl Database {
     pub async fn insert_upload_task(&self, task: &UploadTask) -> Result<(), DbError> {
         let warnings_json = serde_json::to_string(&task.validation_warnings)?;
         let reasons_json = serde_json::to_string(&task.rejection_reasons)?;
+        // Serialize the dereferenced `&VideoInfo`, not the `Arc` itself, so we
+        // never depend on serde's `rc` feature (the field is `Arc`-wrapped only
+        // to make render-time `UploadTask` clones cheap).
         let video_info_json = task
             .video_info
-            .as_ref()
+            .as_deref()
             .map(serde_json::to_string)
             .transpose()?;
         let size = task.size as i64;

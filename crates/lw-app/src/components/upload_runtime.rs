@@ -287,7 +287,10 @@ fn handle_upload_event(
             warnings,
         } => {
             update_task(app_state, &task_id, |t| {
-                t.video_info = video_info;
+                // The event carries a plain `Option<VideoInfo>`; the stored
+                // field is `Arc`-wrapped so later render-time task clones are
+                // cheap. Wrap on the way into the store.
+                t.video_info = video_info.map(std::sync::Arc::new);
                 t.validation_warnings = warnings;
             });
         }

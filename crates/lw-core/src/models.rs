@@ -540,8 +540,14 @@ pub struct UploadTask {
     /// Size of the transcoded artifact in bytes. `None` until transcode
     /// completes (and remains `None` if transcode was disabled for this task).
     pub transcoded_size: Option<u64>,
-    /// Video probe info (populated at staging time for video files)
-    pub video_info: Option<VideoInfo>,
+    /// Video probe info (populated at staging time for video files).
+    ///
+    /// Wrapped in `Arc` so cloning an `UploadTask` (which the transfer
+    /// panel does for every stored row on every render) bumps a refcount
+    /// instead of deep-copying the inner `metadata: Vec<(String, String)>`.
+    /// `Arc<VideoInfo>` still compares by value, so `UploadTask`'s derived
+    /// `PartialEq` (which drives row memoization) is unchanged.
+    pub video_info: Option<std::sync::Arc<VideoInfo>>,
     /// Super-admin override: when true, the upload engine skips both
     /// the cross-tenant dedup gate and the local-DB duplicate
     /// short-circuit on this task. Persisted so a re-staged row keeps

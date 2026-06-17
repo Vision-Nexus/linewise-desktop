@@ -1214,8 +1214,12 @@ impl UploadEngine {
         // already confirmed. `video_info` stays `None` for such rows
         // (the popover gets its data from the next quality check on
         // re-stage if the user wants it).
-        let video_info = if task.video_info.is_some() {
-            task.video_info.clone()
+        // Materialize a plain `Option<VideoInfo>` for the transient transcode
+        // pipeline below (`maybe_transcode` wants `&Option<VideoInfo>`). The
+        // stored field is `Arc`-wrapped; one deep clone here is fine — this is
+        // not a hot path and runs at most once per task.
+        let video_info: Option<crate::models::VideoInfo> = if task.video_info.is_some() {
+            task.video_info.as_deref().cloned()
         } else if task.mime_type.starts_with("video/") {
             self.update_state(task, UploadState::Validating).await;
             let path_buf = path.to_path_buf();

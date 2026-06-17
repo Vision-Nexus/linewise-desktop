@@ -49,7 +49,10 @@ pub fn build_video_details(
     task: &UploadTask,
     device_encoder_signatures: &'static [DeviceEncoderSignature],
 ) -> Option<VideoDetails> {
-    let info = task.video_info.as_ref()?;
+    // `.as_deref()` (not `.as_ref()`) so `info` is `&VideoInfo`, matching the
+    // `&VideoInfo`-typed `video::device_info_rows` param below. Field access
+    // would auto-deref through the `Arc`, but passing it on does not.
+    let info = task.video_info.as_deref()?;
     let codec = info.codec.to_uppercase();
     let res = format!("{}x{}", info.width, info.height);
     let fps_text = format!("{:.0}fps", info.fps);
@@ -337,7 +340,7 @@ pub fn StagedRow(
     // still opt out manually).
     let transcode_useful = task
         .video_info
-        .as_ref()
+        .as_deref()
         .map(|info| video::transcode_would_help(info, &transcode_config))
         .unwrap_or(true);
     // Master toggle gate: when the feature is disabled in global
