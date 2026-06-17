@@ -155,15 +155,6 @@ pub struct UploadEngine {
     transcode_config: TranscodeConfig,
     chunk_size: u64,
     upload_semaphore: Arc<Semaphore>,
-    /// Current batch dispatch mode, remembered from config / the last
-    /// `confirm_staged`. `true` = sequential "upload one by one"; `false` =
-    /// concurrent. Read by `do_upload` (fast-fail budget), `resume_pending`,
-    /// `force_upload`, and the auto-retry loop.
-    sequential: AtomicBool,
-    /// Single-flight guard for the sequential drainer: at most one drainer task
-    /// runs; a confirm/resume/force while it's running just (re)marks rows
-    /// PENDING and the running drainer picks them up on its next iteration.
-    seq_worker_running: AtomicBool,
     /// Lazy-cached `whoami` snapshot for the logged-in user, populated
     /// on the first dedup check that needs it. The engine is built
     /// before login, so we can't pass it through the constructor; the
@@ -196,7 +187,6 @@ impl UploadEngine {
         transcode_config: TranscodeConfig,
         chunk_size_mb: u32,
         max_concurrent: u32,
-        sequential: bool,
     ) -> Self {
         Self {
             db,
@@ -208,8 +198,6 @@ impl UploadEngine {
             transcode_config,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
-            sequential: AtomicBool::new(sequential),
-            seq_worker_running: AtomicBool::new(false),
             current_user_cache: OnceCell::new(),
         }
     }
@@ -471,8 +459,11 @@ impl UploadEngine {
                     )
                     .await
             } else {
+                // Non-video rows have no `video_info`, so the transcode-hold
+                // predicate in `run_hash_and_dedup` can never fire for them —
+                // they always auto-advance on a `Staged` settle.
                 engine
-                    .run_hash_and_dedup(&task_id, &path_buf, &tenant_id_owned, Vec::new())
+                    .run_hash_and_dedup(&task_id, &path_buf, &tenant_id_owned, Vec::new(), None)
                     .await
             };
             tracing::debug!(task_id = %task_id, ?final_state, "stage_file worker finished");
@@ -530,6 +521,9 @@ impl UploadEngine {
                         &warnings,
                     )
                     .await;
+                // Keep a copy for the transcode-hold decision at the `Staged`
+                // settle point; the event takes ownership of the original.
+                let video_info_for_hold = video_info.clone();
                 let _ = self.event_tx.send(UploadEvent::QualityCheckPassed {
                     task_id: task_id.to_string(),
                     video_info,
@@ -541,8 +535,14 @@ impl UploadEngine {
                 });
                 match post_hash {
                     PostHashVerdict::Stage => {
-                        self.run_hash_and_dedup(task_id, path, tenant_id, warnings)
-                            .await
+                        self.run_hash_and_dedup(
+                            task_id,
+                            path,
+                            tenant_id,
+                            warnings,
+                            video_info_for_hold,
+                        )
+                        .await
                     }
                     PostHashVerdict::Reject(reasons) => {
                         self.run_hash_only(task_id, path, warnings, reasons).await
@@ -573,12 +573,21 @@ impl UploadEngine {
     /// cross-tenant dedup check, and end in `Staged` or `Rejected`.
     /// Returns the terminal state for logging only — all persistence
     /// and UI events happen inside.
+    ///
+    /// On a `Staged` settle the row is auto-advanced to `Pending` and
+    /// dispatched immediately — there is no manual "Upload" step on the
+    /// happy path — UNLESS this clip is held for an opt-in transcode (see
+    /// [`Self::held_for_transcode`]), in which case it stays `Staged` and
+    /// waits for the manual confirm. `video_info` carries the quality-check
+    /// probe so the hold predicate can run; it is `None` for non-video rows
+    /// (which are never held).
     async fn run_hash_and_dedup(
         self: &Arc<Self>,
         task_id: &str,
         path: &Path,
         tenant_id: &str,
         warnings: Vec<String>,
+        video_info: Option<crate::models::VideoInfo>,
     ) -> UploadState {
         let hashes = match self.consume_hash_stream(task_id, path).await {
             Ok(h) => h,
@@ -622,8 +631,111 @@ impl UploadEngine {
             }
         };
 
-        self.settle_post_hash(task_id, final_state, warnings, rejection_reasons)
+        let settled = self
+            .settle_post_hash(task_id, final_state, warnings, rejection_reasons)
+            .await;
+
+        // Auto-upload: a row that settled to `Staged` advances straight to
+        // `Pending` and dispatches, removing the manual click between QC-pass
+        // and upload. Transcode-eligible clips are the only exception — they
+        // wait `Staged` for the opt-in transcode confirm.
+        match settled {
+            UploadState::Staged if !self.held_for_transcode(video_info.as_ref()) => {
+                self.advance_staged_and_dispatch(task_id).await;
+            }
+            UploadState::QualityChecking
+            | UploadState::Hashing
+            | UploadState::Staged
+            | UploadState::Rejected
+            | UploadState::Pending
+            | UploadState::Validating
+            | UploadState::Transcoding
+            | UploadState::Desensitizing
+            | UploadState::Creating
+            | UploadState::Uploading
+            | UploadState::Verifying
+            | UploadState::Completed
+            | UploadState::Failed
+            | UploadState::Paused => {}
+        }
+        settled
+    }
+
+    /// Whether auto-upload should HOLD this clip `Staged` for the manual
+    /// opt-in transcode flow. The hold fires iff the transcode feature is on
+    /// AND transcoding would actually shrink this specific clip — mirroring
+    /// the UI toggle gate and the `maybe_transcode` short-circuit exactly.
+    /// Re-reads (never modifies) `video::transcode_would_help`. `None`
+    /// `video_info` (non-video, or a probe that returned nothing) is never
+    /// held.
+    fn held_for_transcode(&self, video_info: Option<&crate::models::VideoInfo>) -> bool {
+        let Some(info) = video_info else {
+            return false;
+        };
+        self.transcode_config.enabled && video::transcode_would_help(info, &self.transcode_config)
+    }
+
+    /// Flip a freshly-`Staged` row to `Pending` (DB + UI event) and dispatch
+    /// it through the bounded-parallel worker. Mirrors what one iteration of
+    /// the `confirm_staged` loop does for a single task, so auto-upload and
+    /// the manual confirm share one dispatch path. Flipping to `Pending`
+    /// before the load means the manual `[Upload]` button (which reads
+    /// STAGED rows) can never also grab this row.
+    async fn advance_staged_and_dispatch(self: &Arc<Self>, task_id: &str) {
+        if let Err(e) = self
+            .db
+            .update_upload_state(task_id, UploadState::Pending, None)
             .await
+        {
+            tracing::warn!(task_id, "auto-upload: failed to mark row PENDING: {e}");
+            return;
+        }
+        let _ = self.event_tx.send(UploadEvent::StateChanged {
+            task_id: task_id.to_string(),
+            state: UploadState::Pending,
+        });
+
+        let pending = match self.db.get_pending_uploads().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(task_id, "auto-upload: get_pending_uploads failed: {e}");
+                return;
+            }
+        };
+        let Some(task) = pending.into_iter().find(|t| t.id == task_id) else {
+            tracing::warn!(task_id, "auto-upload: task not found in PENDING set");
+            return;
+        };
+        self.dispatch_one(task);
+    }
+
+    /// Spawn the bounded-parallel upload worker for one already-`Pending`
+    /// task. The single per-task dispatch path: a permit from the
+    /// `upload_semaphore` caps concurrency at `max_concurrent`, and a failure
+    /// settles the row to `Failed` with the typed error. Shared by
+    /// `confirm_staged` (manual confirm) and `advance_staged_and_dispatch`
+    /// (auto-upload) so both fan out identically. Per-task (not per-batch) so
+    /// a slow QC file never gates a fast one.
+    fn dispatch_one(self: &Arc<Self>, mut task: UploadTask) {
+        let engine = Arc::clone(self);
+        let sem = Arc::clone(&self.upload_semaphore);
+        tokio::spawn(async move {
+            let _permit = sem.acquire().await.expect("semaphore closed");
+            match engine.process_task(&mut task).await {
+                Ok(()) => tracing::info!("Upload completed: {}", task.filename),
+                Err(e) => {
+                    e.log(format_args!("Upload of {}", task.filename));
+                    let _ = engine
+                        .db
+                        .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                        .await;
+                    let _ = engine.event_tx.send(UploadEvent::Failed {
+                        task_id: task.id,
+                        error: e.to_string(),
+                    });
+                }
+            }
+        });
     }
 
     /// Hash a quality-rejected row so the MD5 is on disk for a future
@@ -920,53 +1032,24 @@ impl UploadEngine {
             state: UploadState::Pending,
         });
 
-        // Sequential mode: `force_upload_task` re-stamped `created_at`, so this
-        // row now sits at the tail of the add-ordered queue. Just (re)start the
-        // drainer — it reaches the row in turn. (Decision #5: force = queue tail.)
-        if self.sequential.load(Ordering::Relaxed) {
-            self.start_sequential_worker();
-            return Ok(());
-        }
-
         let pending = self.db.get_pending_uploads().await?;
-        let Some(mut task) = pending.into_iter().find(|t| t.id == task_id) else {
+        let Some(task) = pending.into_iter().find(|t| t.id == task_id) else {
             tracing::warn!("force_upload: task {task_id} not found in PENDING set");
             return Ok(());
         };
-
-        let engine = Arc::clone(self);
-        let sem = Arc::clone(&self.upload_semaphore);
-        tokio::spawn(async move {
-            let _permit = sem.acquire().await.expect("semaphore closed");
-            match engine.process_task(&mut task).await {
-                Ok(()) => tracing::info!("Force-upload completed: {}", task.filename),
-                Err(e) => {
-                    e.log(format_args!("Force-upload of {}", task.filename));
-                    let _ = engine
-                        .db
-                        .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
-                        .await;
-                    let _ = engine.event_tx.send(UploadEvent::Failed {
-                        task_id: task.id,
-                        error: e.to_string(),
-                    });
-                }
-            }
-        });
+        self.dispatch_one(task);
         Ok(())
     }
 
     /// Confirm staged files for upload (step 2 of two-step upload).
-    /// Moves all STAGED tasks to PENDING and starts processing.
+    /// Moves all STAGED tasks to PENDING and dispatches each through the
+    /// bounded-parallel worker. With auto-upload (PR3) this only ever acts on
+    /// clips HELD `Staged` for an opt-in transcode — everything else already
+    /// auto-advanced at QC-pass time.
     pub async fn confirm_staged(
         self: &Arc<Self>,
         transcode_task_ids: &[String],
-        sequential: bool,
     ) -> Result<Vec<String>, DbError> {
-        // Remember the chosen dispatch mode so resume / force / fast-fail all
-        // agree with this batch for the rest of the session.
-        self.sequential.store(sequential, Ordering::Relaxed);
-
         let staged = self.db.get_staged_uploads().await?;
         let mut confirmed_ids = Vec::new();
 
@@ -984,118 +1067,10 @@ impl UploadEngine {
             task.state = UploadState::Pending;
             confirmed_ids.push(task.id.clone());
 
-            // Sequential "upload one by one" mode is drained by the single
-            // worker started below (one in-flight upload, in add-order), so
-            // skip the per-task fan-out here.
-            if sequential {
-                continue;
-            }
-
-            let engine = Arc::clone(self);
-            let sem = Arc::clone(&self.upload_semaphore);
-            tokio::spawn(async move {
-                // Limit concurrent uploads
-                let _permit = sem.acquire().await.expect("semaphore closed");
-                match engine.process_task(&mut task).await {
-                    Ok(()) => tracing::info!("Upload completed: {}", task.filename),
-                    Err(e) => {
-                        e.log(format_args!("Upload of {}", task.filename));
-                        let _ = engine
-                            .db
-                            .update_upload_state(
-                                &task.id,
-                                UploadState::Failed,
-                                Some(&e.to_string()),
-                            )
-                            .await;
-                        let _ = engine.event_tx.send(UploadEvent::Failed {
-                            task_id: task.id,
-                            error: e.to_string(),
-                        });
-                    }
-                }
-            });
-        }
-
-        if sequential {
-            self.start_sequential_worker();
+            self.dispatch_one(task);
         }
 
         Ok(confirmed_ids)
-    }
-
-    /// Start the single sequential drainer if one isn't already running.
-    ///
-    /// "Upload one by one" mode processes the whole PENDING queue with **one**
-    /// in-flight upload, in add-order (`created_at ASC`), so the network isn't
-    /// split across files. A single-flight `AtomicBool` guarantees at most one
-    /// drainer: a confirm / resume / force that happens while a drain is already
-    /// running just marks rows PENDING and returns — the running drainer picks
-    /// them up on its next iteration.
-    fn start_sequential_worker(self: &Arc<Self>) {
-        if self.seq_worker_running.swap(true, Ordering::SeqCst) {
-            return; // a drainer is already running
-        }
-        let engine = Arc::clone(self);
-        tokio::spawn(async move {
-            engine.drain_sequential().await;
-        });
-    }
-
-    /// Drain the PENDING queue one file at a time, in add-order, until empty.
-    ///
-    /// On failure the row is marked `Failed` and the drainer moves on to the
-    /// next file (no retry, no blocking) — maximising how much of the batch
-    /// completes. Clears the single-flight flag on exit, then re-checks once so
-    /// a row enqueued in the tiny window between "queue looks empty" and "flag
-    /// cleared" is not stranded.
-    async fn drain_sequential(self: &Arc<Self>) {
-        loop {
-            let next = match self.db.get_pending_uploads().await {
-                Ok(rows) => rows.into_iter().next(),
-                Err(e) => {
-                    tracing::warn!("sequential drain: get_pending_uploads failed: {e}");
-                    None
-                }
-            };
-
-            let Some(mut task) = next else {
-                // Queue looks empty — release the flag, then re-check once to
-                // avoid stranding a row enqueued during the gap.
-                self.seq_worker_running.store(false, Ordering::SeqCst);
-                let still_empty = self
-                    .db
-                    .get_pending_uploads()
-                    .await
-                    .map(|rows| rows.is_empty())
-                    .unwrap_or(true);
-                if still_empty {
-                    return;
-                }
-                // Work arrived: re-acquire the flag and keep draining. If another
-                // drainer beat us to it, let it own the queue.
-                if self.seq_worker_running.swap(true, Ordering::SeqCst) {
-                    return;
-                }
-                continue;
-            };
-
-            match self.process_task(&mut task).await {
-                Ok(()) => tracing::info!("Sequential upload completed: {}", task.filename),
-                Err(e) => {
-                    e.log(format_args!("Sequential upload of {}", task.filename));
-                    let _ = self
-                        .db
-                        .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
-                        .await;
-                    let _ = self.event_tx.send(UploadEvent::Failed {
-                        task_id: task.id.clone(),
-                        error: e.to_string(),
-                    });
-                    // Skip — continue to the next file.
-                }
-            }
-        }
     }
 
     /// Remove a staged file (before upload confirmation).
@@ -1404,14 +1379,11 @@ impl UploadEngine {
         // hundreds of times and never saturate the link; `self.chunk_size` (the
         // config `chunk_size_mb`) acts as the floor. See `storage::pick_chunk_size`.
         let chunk_size = storage::pick_chunk_size(upload_size, self.chunk_size);
-        // Sequential "upload one by one" mode fails a chunk fast (no retry) so a
-        // dead file doesn't stall the single queue; concurrent mode keeps the
-        // resilient retry budget since other files keep flowing meanwhile.
-        let max_retries = if self.sequential.load(Ordering::Relaxed) {
-            0
-        } else {
-            storage::DEFAULT_MAX_RETRIES
-        };
+        // Every upload uses the full per-chunk retry budget. Bounded
+        // concurrency (the `upload_semaphore`) keeps a dead file from starving
+        // the others, so there is no fast-fail mode — flaky-network resilience
+        // comes from the retry budget + capped backoff, not from serializing.
+        let max_retries = storage::DEFAULT_MAX_RETRIES;
         tracing::info!(
             filename = %task.filename,
             upload_size,
@@ -1485,16 +1457,6 @@ impl UploadEngine {
         let tasks = self.db.get_pending_uploads().await?;
         tracing::info!("Resuming {} pending uploads", tasks.len());
 
-        // Sequential mode (remembered from config): one drainer handles the
-        // whole queue in add-order; `process_task` resumes each from its
-        // server-confirmed offset. No unbounded fan-out.
-        if self.sequential.load(Ordering::Relaxed) {
-            if !tasks.is_empty() {
-                self.start_sequential_worker();
-            }
-            return Ok(());
-        }
-
         for mut task in tasks {
             let engine = Arc::clone(self);
             let sem = Arc::clone(&self.upload_semaphore);
@@ -1557,13 +1519,6 @@ impl UploadEngine {
                     .is_ok();
 
                 if !online {
-                    continue;
-                }
-
-                // In sequential "upload one by one" mode, failures are left for
-                // the user to retry manually — don't auto-re-enqueue them, which
-                // would interleave with the ordered single-file queue.
-                if engine.sequential.load(Ordering::Relaxed) {
                     continue;
                 }
 

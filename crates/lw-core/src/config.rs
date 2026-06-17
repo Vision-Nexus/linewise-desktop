@@ -87,11 +87,12 @@ pub struct UploadConfig {
     /// it. It is no longer a fixed chunk size.
     #[serde(default = "default_chunk_size")]
     pub chunk_size_mb: u32,
-    /// Remembered batch dispatch mode for the split "Upload files" button:
-    /// `true` = upload one by one (sequential — single bandwidth, in add-order,
-    /// skip-on-failure), `false` = concurrent (default). `#[serde(default)]`
-    /// keeps config.toml files written before this field existed loading cleanly,
-    /// so upgrading users need no migration.
+    /// Inert back-compat field. The sequential ("upload one by one") dispatch
+    /// mode was removed in favour of bounded-parallel-only dispatch, but the
+    /// key is kept so a config.toml written by an older build still
+    /// deserializes cleanly. It no longer controls anything — nothing reads it
+    /// for dispatch. `#[serde(default)]` also lets configs predating the field
+    /// load without a migration.
     #[serde(default)]
     pub sequential_uploads: bool,
 }

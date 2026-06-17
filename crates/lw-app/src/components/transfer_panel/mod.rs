@@ -16,9 +16,12 @@
 //! * **Toolbar** `[Retry all]` (Network failures only) + `[Clear
 //!   completed]`.
 //!
-//! The staging entry points (Add Files button, drag-drop, the Upload
-//! split-button) are carried over unchanged from the old queue; auto-upload
-//! and the parallel-only dispatch rework land in a later change.
+//! Staging is auto-upload: a clip that passes QC dispatches immediately
+//! (bounded-parallel), with no manual click. The only rows that reach
+//! `Staged` are clips HELD for an opt-in transcode; the single `[Upload N]`
+//! button acts on those alone and is otherwise absent. The other staging
+//! entry points (Add Files button, drag-drop) are carried over from the old
+//! queue.
 
 mod completed;
 mod failed;
@@ -235,14 +238,14 @@ pub fn TransferPanel() -> Element {
         });
     };
 
-    // Confirm upload (manual). Carried over unchanged; auto-upload + the
-    // parallel-only rework land in a later change. `sequential` selects the
-    // dispatch mode and is remembered (persisted to config).
+    // Confirm upload (manual). With auto-upload (PR3) this only acts on the
+    // clips held `Staged` for an opt-in transcode — everything else already
+    // auto-advanced at QC-pass time. Dispatch is bounded-parallel only; the
+    // old sequential "one by one" mode is gone.
     let engine_for_confirm = services.upload_engine.clone();
-    let config_for_confirm = services.config.clone();
     let app_state_for_confirm = app_state.clone();
     let app_state_confirm = app_state.clone();
-    let confirm_cb = use_callback(move |sequential: bool| {
+    let confirm_cb = use_callback(move |_: ()| {
         let engine = engine_for_confirm.clone();
         let mut app_state_write = app_state_confirm.clone();
         let transcode_ids: Vec<String> = app_state_for_confirm
@@ -252,15 +255,10 @@ pub fn TransferPanel() -> Element {
             .filter(|t| t.state == UploadState::Staged && t.transcode)
             .map(|t| t.id.clone())
             .collect();
-        let mut cfg = config_for_confirm.clone();
-        cfg.upload.sequential_uploads = sequential;
-        if let Err(e) = cfg.save() {
-            tracing::warn!("Failed to persist upload mode: {e}");
-        }
         spawn(async move {
-            match engine.confirm_staged(&transcode_ids, sequential).await {
+            match engine.confirm_staged(&transcode_ids).await {
                 Ok(ids) => {
-                    tracing::info!("Confirmed {} files (sequential={sequential})", ids.len());
+                    tracing::info!("Confirmed {} files", ids.len());
                     let mut tasks = app_state_write.upload_tasks.write();
                     for task in tasks.iter_mut() {
                         if ids.contains(&task.id) {
@@ -272,9 +270,6 @@ pub fn TransferPanel() -> Element {
             }
         });
     });
-
-    let upload_seq = use_signal(|| services.config.upload.sequential_uploads);
-    let show_upload_menu = use_signal(|| false);
 
     let engine_for_remove = services.upload_engine.clone();
     let mut app_state_remove = app_state.clone();
@@ -515,14 +510,6 @@ pub fn TransferPanel() -> Element {
         "transparent"
     };
 
-    // The dispatch mode (concurrent vs one-by-one) may only change while the
-    // queue is idle. Locking it during active/queued/paused work guarantees
-    // the sequential drainer and the concurrent fan-out never run at the same
-    // time. (VLP-747 Part B, decision A.)
-    let queue_active = tasks
-        .iter()
-        .any(|t| t.state.is_active() || t.state == UploadState::Paused);
-
     let active_tab = *tab.read();
 
     rsx! {
@@ -533,7 +520,7 @@ pub fn TransferPanel() -> Element {
             ondragleave: move |_| is_dragging.set(false),
             ondrop: on_drop,
 
-            // Header: title + Add Files + Upload split-button.
+            // Header: title + Add Files + Upload button (held transcode clips).
             div {
                 style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;",
                 h2 { style: "margin: 0; font-size: 16px;", "Transfers" }
@@ -547,13 +534,7 @@ pub fn TransferPanel() -> Element {
                             "{add_files_label}"
                         }
                         if staged_count > 0 {
-                            UploadSplitButton {
-                                staged_count,
-                                queue_active,
-                                upload_seq,
-                                show_upload_menu,
-                                confirm_cb,
-                            }
+                            UploadButton { staged_count, confirm_cb }
                         }
                     } else {
                         button {
@@ -690,82 +671,24 @@ pub fn TransferPanel() -> Element {
     }
 }
 
-/// The Upload split-button: a primary action that dispatches in the
-/// remembered mode plus a dropdown to pick parallel vs sequential. Lifted
-/// into its own component so the panel's `rsx!` stays shallow. Carried over
-/// from the old queue verbatim (the parallel-only rework lands later).
+/// The Upload button: a single primary action that dispatches every held
+/// `Staged` clip (bounded-parallel). With auto-upload, the only rows that
+/// reach `Staged` are clips held for an opt-in transcode, so this button is
+/// shown solely for those (and is otherwise absent — `staged_count == 0`).
 #[component]
-fn UploadSplitButton(
-    staged_count: usize,
-    queue_active: bool,
-    upload_seq: Signal<bool>,
-    show_upload_menu: Signal<bool>,
-    confirm_cb: Callback<bool>,
-) -> Element {
-    let mut upload_seq = upload_seq;
-    let mut show_upload_menu = show_upload_menu;
+fn UploadButton(staged_count: usize, confirm_cb: Callback<()>) -> Element {
     let label = if staged_count == 1 {
         format!("Upload {staged_count} file")
     } else {
         format!("Upload {staged_count} files")
     };
-    let mode_hint = if *upload_seq.read() {
-        " (one by one)"
-    } else {
-        ""
-    };
-    let menu_title = if queue_active {
-        "Finish or stop the current uploads to change mode"
-    } else {
-        "Upload options"
-    };
 
     rsx! {
-        div {
-            style: "position: relative; display: inline-flex; align-items: center; gap: 2px;",
-            button {
-                class: "btn-success",
-                style: "{styles::BTN_SUCCESS}",
-                onclick: move |_| confirm_cb.call(*upload_seq.read()),
-                "{label}{mode_hint}"
-            }
-            button {
-                class: "btn-success",
-                style: "padding-left: 9px; padding-right: 9px;",
-                disabled: queue_active,
-                title: "{menu_title}",
-                onclick: move |_| {
-                    if queue_active {
-                        return;
-                    }
-                    let open = *show_upload_menu.read();
-                    show_upload_menu.set(!open);
-                },
-                "▾"
-            }
-            if *show_upload_menu.read() && !queue_active {
-                div {
-                    style: "position: absolute; top: 100%; right: 0; margin-top: 4px; background: var(--bg-tertiary); border: 1px solid var(--border-focus); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); z-index: 50; min-width: 220px; overflow: hidden;",
-                    button {
-                        style: "display: block; width: 100%; text-align: left; padding: 9px 12px; background: transparent; border: none; cursor: pointer; font-size: 13px;",
-                        onclick: move |_| {
-                            upload_seq.set(false);
-                            show_upload_menu.set(false);
-                            confirm_cb.call(false);
-                        },
-                        "Upload all at once (parallel)"
-                    }
-                    button {
-                        style: "display: block; width: 100%; text-align: left; padding: 9px 12px; background: transparent; border: none; cursor: pointer; font-size: 13px; border-top: 1px solid var(--border-focus);",
-                        onclick: move |_| {
-                            upload_seq.set(true);
-                            show_upload_menu.set(false);
-                            confirm_cb.call(true);
-                        },
-                        "Upload one by one (sequential)"
-                    }
-                }
-            }
+        button {
+            class: "btn-success",
+            style: "{styles::BTN_SUCCESS}",
+            onclick: move |_| confirm_cb.call(()),
+            "{label}"
         }
     }
 }
