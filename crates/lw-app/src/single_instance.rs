@@ -128,12 +128,41 @@ pub fn acquire() -> GuardOutcome {
         }
     };
 
+    // Connect-first detection: if an instance is already listening, hand off to
+    // it and exit. We probe by CONNECTING rather than interpreting a bind error,
+    // because a failed bind reports platform-specific errors that don't map to a
+    // single `ErrorKind` — notably, on Windows a name already held by another
+    // named-pipe server returns ERROR_ACCESS_DENIED (os error 5 → PermissionDenied),
+    // NOT `AddrInUse`, so the old bind-error sniffing silently let a 2nd instance
+    // launch. A successful connect is an unambiguous "an instance is already here".
+    if let Ok(mut stream) = Stream::connect(socket.name.clone()) {
+        return match write_show(&mut stream) {
+            Ok(()) => {
+                tracing::info!(
+                    "single-instance: existing instance found; signalled it to show; exiting"
+                );
+                GuardOutcome::AlreadyRunning
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "single-instance: connected to existing instance but failed to signal ({e}); launching"
+                );
+                GuardOutcome::Continue
+            }
+        };
+    }
+
+    // Nobody answered — become the primary. On Unix a crashed instance can leave
+    // a stale socket file that blocks bind; `bind_listener` reclaims it. On
+    // Windows a name still held by a live server is detected via `name_in_use`.
     match bind_listener(&socket) {
         Ok(listener) => {
             tracing::info!("single-instance: acquired lock; this is the primary instance");
             spawn_accept_loop(listener);
             GuardOutcome::Continue
         }
+        // Rare race: another instance bound between our connect probe and this
+        // bind. Hand off if we can; otherwise degrade to launching.
         Err(BindError::InUse) => signal_existing(socket.name),
         Err(BindError::Other(e)) => {
             tracing::warn!("single-instance: bind failed ({e}); launching anyway (degraded)");
@@ -167,8 +196,26 @@ fn bind_listener(socket: &SocketName) -> Result<interprocess::local_socket::List
             }
             Err(BindError::InUse)
         }
+        // Windows reports a name already owned by another named-pipe server as
+        // ERROR_ACCESS_DENIED (5) / ERROR_PIPE_BUSY (231), which do NOT surface as
+        // `AddrInUse`. Treat them as "in use" so the bind-race path hands off
+        // instead of launching a duplicate.
+        Err(e) if name_in_use(&e) => Err(BindError::InUse),
         Err(e) => Err(BindError::Other(e)),
     }
+}
+
+/// Whether a bind error means "another live server already owns this name",
+/// covering the Windows error codes that don't map to `ErrorKind::AddrInUse`.
+#[cfg(windows)]
+fn name_in_use(e: &std::io::Error) -> bool {
+    // ERROR_ACCESS_DENIED = 5, ERROR_PIPE_BUSY = 231.
+    matches!(e.raw_os_error(), Some(5) | Some(231))
+}
+
+#[cfg(not(windows))]
+fn name_in_use(_e: &std::io::Error) -> bool {
+    false
 }
 
 /// Maps a raw bind I/O error to [`BindError`] for the post-reclaim retry.
