@@ -3,7 +3,9 @@ use crate::config::Environment;
 use crate::error::UploadError;
 use crate::models::{
     CreateDocumentRequest, DigestCheckCandidate, DigestCheckRequest, DigestCheckResponse,
-    DocumentResponse, PresignedUrlResponse, Project, QualityCheckResponse, WhoAmIResponse,
+    DocumentResponse, MultipartAbortRequest, MultipartCompletePart, MultipartCompleteRequest,
+    MultipartPlan, MultipartResumePlan, MultipartResumeRequest, PresignedUrlResponse, Project,
+    QualityCheckResponse, WhoAmIResponse,
 };
 use crate::video_head::{AtomChunks, MAX_PAYLOAD_BYTES};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -189,6 +191,240 @@ impl ApiClient {
 
         tracing::debug!("upload-url issued");
         Ok(resp.json().await?)
+    }
+
+    /// POST /api/org/{tenant}/projects/{pid}/documents/{did}/multipart-upload-url
+    ///
+    /// Ask the backend to initiate a GCS XML Multipart Upload and presign one
+    /// PUT URL per part. Returns the [`MultipartPlan`] (uploadId + partSize +
+    /// presigned parts) on success.
+    ///
+    /// Returns `Ok(None)` when the backend answers **404 Not Found** — i.e.
+    /// this is a server build that predates the multipart feature. The caller
+    /// uses that as the signal to fall back to the existing resumable path
+    /// (safe rollout). Any other non-2xx is a real failure and surfaces as
+    /// [`UploadError::Api`].
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, project_id = %project_id, document_id = %document_id, total_size))]
+    pub async fn get_multipart_upload(
+        &self,
+        tenant: &str,
+        project_id: &str,
+        document_id: &str,
+        total_size: i64,
+    ) -> Result<Option<MultipartPlan>, UploadError> {
+        let headers = self.auth_headers().await?;
+        let url = format!(
+            "{}/api/org/{}/projects/{}/documents/{}/multipart-upload-url",
+            self.base_url, tenant, project_id, document_id
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .headers(headers)
+            .json(&serde_json::json!({ "totalSize": total_size }))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        // 404 = backend without the multipart feature → signal fallback.
+        if status.as_u16() == 404 {
+            tracing::info!("multipart-upload-url 404 — backend lacks MPU, falling back");
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "get_multipart_upload non-2xx"
+            );
+            return Err(UploadError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let plan: MultipartPlan = resp.json().await?;
+        tracing::info!(
+            upload_id = %plan.upload_id,
+            part_size = plan.part_size,
+            parts = plan.parts.len(),
+            "multipart-upload-url issued"
+        );
+        Ok(Some(plan))
+    }
+
+    /// POST /api/org/{tenant}/projects/{pid}/documents/{did}/multipart-upload-complete
+    ///
+    /// Finalize the MPU: hand the backend every part's `(partNumber, etag)`
+    /// so it can assemble the object. `parts` is the driver's collected
+    /// `(part_number, etag)` set; ordering does not matter (the request
+    /// carries the explicit `partNumber`), but the backend expects every part.
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, project_id = %project_id, document_id = %document_id, parts = parts.len()))]
+    pub async fn complete_multipart_upload(
+        &self,
+        tenant: &str,
+        project_id: &str,
+        document_id: &str,
+        upload_id: &str,
+        parts: &[(u32, String)],
+    ) -> Result<(), UploadError> {
+        let headers = self.auth_headers().await?;
+        let url = format!(
+            "{}/api/org/{}/projects/{}/documents/{}/multipart-upload-complete",
+            self.base_url, tenant, project_id, document_id
+        );
+        let body = MultipartCompleteRequest {
+            upload_id: upload_id.to_string(),
+            parts: parts
+                .iter()
+                .map(|(part_number, etag)| MultipartCompletePart {
+                    part_number: *part_number as i32,
+                    etag: etag.clone(),
+                })
+                .collect(),
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "complete_multipart_upload non-2xx"
+            );
+            return Err(UploadError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        tracing::info!("multipart-upload-complete ok");
+        Ok(())
+    }
+
+    /// POST /api/org/{tenant}/projects/{pid}/documents/{did}/multipart-upload-abort
+    ///
+    /// Best-effort cancellation of an initiated MPU after a terminal part
+    /// failure or a user cancel. The caller treats the result as advisory:
+    /// the goal is to release the server-side MPU so orphaned parts don't
+    /// linger, but a failed abort must not mask the original error.
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, project_id = %project_id, document_id = %document_id))]
+    pub async fn abort_multipart_upload(
+        &self,
+        tenant: &str,
+        project_id: &str,
+        document_id: &str,
+        upload_id: &str,
+    ) -> Result<(), UploadError> {
+        let headers = self.auth_headers().await?;
+        let url = format!(
+            "{}/api/org/{}/projects/{}/documents/{}/multipart-upload-abort",
+            self.base_url, tenant, project_id, document_id
+        );
+        let body = MultipartAbortRequest {
+            upload_id: upload_id.to_string(),
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "multipart-upload-abort non-2xx"
+            );
+            return Err(UploadError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        tracing::info!("multipart-upload-abort ok");
+        Ok(())
+    }
+
+    /// POST /api/org/{tenant}/projects/{pid}/documents/{did}/multipart-upload-resume
+    ///
+    /// Resume a persisted MPU after an app restart. The backend runs GCS
+    /// ListParts against `upload_id` and returns the parts still missing (with
+    /// fresh signed PUT URLs) plus the parts already durable on GCS (with their
+    /// server-reported ETags). `total_size` MUST equal the original initiate's
+    /// size so the backend re-derives the identical part layout.
+    ///
+    /// `Ok(None)` is the fallback signal, returned on **404** — which covers
+    /// both "this backend has no resume endpoint" and "GCS reports the upload
+    /// no longer exists" (`NoSuchUpload`, i.e. expired or already completed).
+    /// Either way the caller abandons the stale id and starts a fresh MPU.
+    #[tracing::instrument(skip_all, fields(tenant = %tenant, project_id = %project_id, document_id = %document_id, total_size))]
+    pub async fn resume_multipart_upload(
+        &self,
+        tenant: &str,
+        project_id: &str,
+        document_id: &str,
+        upload_id: &str,
+        total_size: i64,
+    ) -> Result<Option<MultipartResumePlan>, UploadError> {
+        let headers = self.auth_headers().await?;
+        let url = format!(
+            "{}/api/org/{}/projects/{}/documents/{}/multipart-upload-resume",
+            self.base_url, tenant, project_id, document_id
+        );
+        let body = MultipartResumeRequest {
+            upload_id: upload_id.to_string(),
+            total_size,
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        // 404 = no resume endpoint (old backend) OR NoSuchUpload (stale /
+        // already-completed) → fall back to a fresh MPU.
+        if status.as_u16() == 404 {
+            tracing::info!("multipart-upload-resume 404 — abandoning stale uploadId, fresh MPU");
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                status = status.as_u16(),
+                body = truncate(&body, 256),
+                "resume_multipart_upload non-2xx"
+            );
+            return Err(UploadError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let plan: MultipartResumePlan = resp.json().await?;
+        tracing::info!(
+            upload_id = %plan.upload_id,
+            part_size = plan.part_size,
+            remaining = plan.parts.len(),
+            completed = plan.completed_parts.len(),
+            "multipart-upload-resume issued"
+        );
+        Ok(Some(plan))
     }
 
     /// GET /api/org/{tenant}/projects/{pid}/documents/{did}

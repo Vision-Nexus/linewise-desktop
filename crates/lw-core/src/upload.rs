@@ -470,6 +470,7 @@ impl UploadEngine {
             project_id: project_id.to_string(),
             document_id: None,
             session_id: None,
+            mpu_upload_id: None,
             bytes_uploaded: 0,
             // Non-video rows skip the quality-check step entirely; the
             // server gate runs only for `video/*`. They land in
@@ -1353,6 +1354,81 @@ impl UploadEngine {
             doc.id
         };
 
+        // Stage 5 + 6 (preferred): parallel multipart (XML MPU) path.
+        //
+        // Only attempted for a fresh upload (no prior resumable session) and
+        // only on the GCS backend. MPU resume across restart is out of scope
+        // (P1): a task that already carries a resumable `session_id` stays on
+        // the resumable path below so its resume keeps working. If the backend
+        // lacks the feature (`get_multipart_upload` → 404 → `Ok(None)`) we fall
+        // through to the resumable path — a safe rollout with no client change.
+        let backend_is_gcs = matches!(self.storage.as_ref(), StorageBackend::Gcs(_));
+        if backend_is_gcs && task.session_id.is_none() {
+            // Resume path: a persisted `mpu_upload_id` means a prior MPU attempt
+            // was interrupted (app restart / crash). Ask the backend which parts
+            // already landed on GCS (ListParts) and upload only the rest.
+            if let Some(upload_id) = task.mpu_upload_id.clone()
+                && let Some(resume) = self
+                    .api
+                    .resume_multipart_upload(
+                        &task.tenant_id,
+                        &task.project_id,
+                        &doc_id,
+                        &upload_id,
+                        upload_size as i64,
+                    )
+                    .await?
+            {
+                return self
+                    .do_mpu_resume(
+                        task,
+                        resume,
+                        upload_path,
+                        upload_size,
+                        &hash,
+                        &desensitized_path,
+                        &transcoded_path,
+                    )
+                    .await;
+            }
+            // Either no persisted upload, or the persisted one is gone (404 /
+            // NoSuchUpload — expired or already completed). If we held a stale
+            // id, best-effort abort it and clear it before initiating fresh.
+            if let Some(stale) = task.mpu_upload_id.clone() {
+                let _ = self
+                    .api
+                    .abort_multipart_upload(&task.tenant_id, &task.project_id, &doc_id, &stale)
+                    .await;
+                task.mpu_upload_id = None;
+                self.db.update_upload_mpu_upload_id(&task.id, None).await?;
+            }
+
+            // Fresh MPU.
+            let plan = self
+                .api
+                .get_multipart_upload(
+                    &task.tenant_id,
+                    &task.project_id,
+                    &doc_id,
+                    upload_size as i64,
+                )
+                .await?;
+            if let Some(plan) = plan {
+                return self
+                    .do_mpu_upload(
+                        task,
+                        plan,
+                        upload_path,
+                        upload_size,
+                        &hash,
+                        &desensitized_path,
+                        &transcoded_path,
+                    )
+                    .await;
+            }
+            tracing::info!("multipart unavailable — using resumable upload path");
+        }
+
         // Stage 5: Initiate resumable session (skip if already has session_id)
         let session = if let Some(ref sid) = task.session_id {
             tracing::info!("Resuming: session already initiated, querying progress");
@@ -1482,6 +1558,22 @@ impl UploadEngine {
         task.bytes_uploaded = confirmed;
         let _ = self.db.update_upload_progress(&task.id, confirmed).await;
 
+        self.finalize_after_upload(task, hash, desensitized_path, transcoded_path)
+            .await
+    }
+
+    /// Shared Stage 7 + completion tail for both the resumable
+    /// (`do_upload`) and the parallel multipart (`do_mpu_upload`) paths:
+    /// verify the document on the server, mark the task completed, record the
+    /// file hash for future dedup, and clean up temp + (optionally) original
+    /// files. The bytes have already been fully uploaded by the caller.
+    async fn finalize_after_upload(
+        &self,
+        task: &mut UploadTask,
+        hash: &str,
+        desensitized_path: &Option<PathBuf>,
+        transcoded_path: &Option<PathBuf>,
+    ) -> Result<(), UploadError> {
         let doc_id = task.document_id.clone().unwrap_or_default();
 
         // Verify
@@ -1525,6 +1617,263 @@ impl UploadEngine {
         }
 
         Ok(())
+    }
+
+    /// Stage 6 for the parallel multipart (XML MPU) path. Maps the backend
+    /// plan into the storage layer's `PartUrl`s, drives the bounded-parallel
+    /// part PUTs, completes the MPU with the collected ETags, then runs the
+    /// shared Stage 7 + completion tail.
+    ///
+    /// The `uploadId` is persisted (`mpu_upload_id`) BEFORE any part PUT, so an
+    /// app restart mid-upload resumes this exact MPU (see the resume branch in
+    /// `process_task`) instead of re-initiating. Consequently a terminal
+    /// failure here does NOT abort the server-side MPU — the already-uploaded
+    /// parts are left intact so a retry/restart can resume them; the error is
+    /// propagated and the task lands in `Failed` with its `mpu_upload_id` kept.
+    /// (Truly-abandoned uploads are reaped by the bucket's
+    /// AbortIncompleteMultipartUpload lifecycle rule.)
+    #[allow(clippy::too_many_arguments)]
+    async fn do_mpu_upload(
+        &self,
+        task: &mut UploadTask,
+        plan: crate::models::MultipartPlan,
+        upload_path: &std::path::Path,
+        upload_size: u64,
+        hash: &str,
+        desensitized_path: &Option<PathBuf>,
+        transcoded_path: &Option<PathBuf>,
+    ) -> Result<(), UploadError> {
+        self.update_state(task, UploadState::Uploading).await;
+
+        let doc_id = task.document_id.clone().unwrap_or_default();
+        let upload_id = plan.upload_id.clone();
+
+        // Persist the uploadId before any part PUT so a crash/restart mid-upload
+        // resumes this MPU (ListParts → upload only missing parts) instead of
+        // re-initiating from zero and orphaning these parts on GCS.
+        task.mpu_upload_id = Some(upload_id.clone());
+        self.db
+            .update_upload_mpu_upload_id(&task.id, Some(&upload_id))
+            .await?;
+
+        let part_size = plan.part_size.max(0) as u64;
+        let parts: Vec<storage::PartUrl> = plan
+            .parts
+            .into_iter()
+            .map(|p| storage::PartUrl {
+                part_number: p.part_number.max(0) as u32,
+                url: p.url,
+            })
+            .collect();
+
+        let event_tx = self.event_tx.clone();
+        let task_id = task.id.clone();
+        let on_progress: storage::ProgressFn = Box::new(move |uploaded, total| {
+            let _ = event_tx.send(UploadEvent::Progress {
+                task_id: task_id.clone(),
+                bytes_uploaded: uploaded,
+                total_bytes: total,
+            });
+        });
+
+        let max_retries = storage::DEFAULT_MAX_RETRIES;
+        tracing::info!(
+            filename = %task.filename,
+            upload_size,
+            part_size,
+            parts = parts.len(),
+            max_retries,
+            "upload: parallel multipart path",
+        );
+
+        // Drive the parallel part PUTs, then complete. A failure here is NOT
+        // aborted — the persisted `mpu_upload_id` lets a retry/restart resume
+        // the already-uploaded parts (see this fn's doc comment).
+        self.run_mpu_parts_and_complete(
+            &task.tenant_id,
+            &task.project_id,
+            &doc_id,
+            &upload_id,
+            upload_path,
+            &parts,
+            part_size,
+            upload_size,
+            &[],
+            max_retries,
+            &on_progress,
+        )
+        .await?;
+
+        task.bytes_uploaded = upload_size;
+        let _ = self.db.update_upload_progress(&task.id, upload_size).await;
+
+        self.finalize_after_upload(task, hash, desensitized_path, transcoded_path)
+            .await
+    }
+
+    /// Stage 6 for a RESUMED parallel multipart upload (app restart / retry
+    /// with a persisted `mpu_upload_id`). The backend already ran GCS ListParts
+    /// and split the layout into `resume.parts` (still missing, freshly signed)
+    /// and `resume.completed_parts` (already durable on GCS, with ETags). Uploads
+    /// only the missing parts, folds in the completed ETags, completes, then runs
+    /// the shared Stage 7 tail. A transient failure is NOT aborted — the kept
+    /// `mpu_upload_id` lets the next retry/restart resume again.
+    #[allow(clippy::too_many_arguments)]
+    async fn do_mpu_resume(
+        &self,
+        task: &mut UploadTask,
+        resume: crate::models::MultipartResumePlan,
+        upload_path: &std::path::Path,
+        upload_size: u64,
+        hash: &str,
+        desensitized_path: &Option<PathBuf>,
+        transcoded_path: &Option<PathBuf>,
+    ) -> Result<(), UploadError> {
+        self.update_state(task, UploadState::Uploading).await;
+
+        let doc_id = task.document_id.clone().unwrap_or_default();
+        let upload_id = resume.upload_id.clone();
+        let part_size = resume.part_size.max(0) as u64;
+        let parts: Vec<storage::PartUrl> = resume
+            .parts
+            .into_iter()
+            .map(|p| storage::PartUrl {
+                part_number: p.part_number.max(0) as u32,
+                url: p.url,
+            })
+            .collect();
+        let completed: Vec<(u32, String)> = resume
+            .completed_parts
+            .into_iter()
+            .map(|p| (p.part_number.max(0) as u32, p.etag))
+            .collect();
+
+        // Reconcile the resumed plan against the local file: missing + done must
+        // cover exactly the deterministic part count. A mismatch (only possible
+        // if the MPU was created against a different size) can't be resumed —
+        // abandon the stale upload so the retry starts fresh instead of looping.
+        let expected_parts = if part_size == 0 {
+            0
+        } else {
+            upload_size.div_ceil(part_size)
+        };
+        let total_parts = (parts.len() + completed.len()) as u64;
+        if part_size == 0 || total_parts != expected_parts {
+            let _ = self
+                .api
+                .abort_multipart_upload(&task.tenant_id, &task.project_id, &doc_id, &upload_id)
+                .await;
+            task.mpu_upload_id = None;
+            self.db.update_upload_mpu_upload_id(&task.id, None).await?;
+            return Err(UploadError::MpuResumeFailed {
+                upload_id,
+                reason: format!(
+                    "resumed plan covers {total_parts} parts, expected {expected_parts} for {upload_size}B at {part_size}B/part"
+                ),
+            });
+        }
+
+        // Seed progress with the bytes already durable on GCS so the UI shows
+        // resumed progress instead of restarting at 0%. Approximate (per-part
+        // sizes aren't carried), capped at the file size; the part PUTs add the
+        // remainder on top via the offset closure.
+        let already_bytes = (completed.len() as u64)
+            .saturating_mul(part_size)
+            .min(upload_size);
+        let event_tx = self.event_tx.clone();
+        let task_id = task.id.clone();
+        let on_progress: storage::ProgressFn = Box::new(move |uploaded, total| {
+            let _ = event_tx.send(UploadEvent::Progress {
+                task_id: task_id.clone(),
+                bytes_uploaded: already_bytes.saturating_add(uploaded).min(total),
+                total_bytes: total,
+            });
+        });
+
+        let max_retries = storage::DEFAULT_MAX_RETRIES;
+        tracing::info!(
+            filename = %task.filename,
+            upload_size,
+            part_size,
+            remaining = parts.len(),
+            completed = completed.len(),
+            max_retries,
+            "upload: resuming parallel multipart",
+        );
+
+        self.run_mpu_parts_and_complete(
+            &task.tenant_id,
+            &task.project_id,
+            &doc_id,
+            &upload_id,
+            upload_path,
+            &parts,
+            part_size,
+            upload_size,
+            &completed,
+            max_retries,
+            &on_progress,
+        )
+        .await?;
+
+        task.bytes_uploaded = upload_size;
+        let _ = self.db.update_upload_progress(&task.id, upload_size).await;
+
+        self.finalize_after_upload(task, hash, desensitized_path, transcoded_path)
+            .await
+    }
+
+    /// Inner helper: upload `parts` in parallel and complete the MPU. Shared by
+    /// the fresh (`do_mpu_upload`) and resume (`do_mpu_resume`) paths.
+    ///
+    /// `already_completed` carries parts that were durable on GCS before this
+    /// attempt (the resume case; empty `&[]` for a fresh upload). Their ETags
+    /// are folded together with the freshly-uploaded ones so the completion
+    /// body lists the full part set GCS expects.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_mpu_parts_and_complete(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+        doc_id: &str,
+        upload_id: &str,
+        upload_path: &std::path::Path,
+        parts: &[storage::PartUrl],
+        part_size: u64,
+        upload_size: u64,
+        already_completed: &[(u32, String)],
+        max_retries: u32,
+        on_progress: &storage::ProgressFn,
+    ) -> Result<(), UploadError> {
+        let StorageBackend::Gcs(gcs) = self.storage.as_ref() else {
+            // MPU is GCS-only; the S3 path never reaches here (it has no
+            // multipart-upload-url endpoint). Treat as a structured API error
+            // rather than panicking.
+            return Err(UploadError::Api {
+                status: 500,
+                message: "multipart upload requested on a non-GCS backend".to_string(),
+            });
+        };
+        let collected = gcs
+            .upload_file_mpu(
+                upload_path,
+                parts,
+                part_size,
+                upload_size,
+                max_retries,
+                on_progress,
+            )
+            .await?;
+
+        // Fold the freshly-uploaded part ETags together with any parts that
+        // were already durable on GCS before this attempt (resume path), then
+        // complete with the full ascending set.
+        let mut all_parts: Vec<(u32, String)> = already_completed.to_vec();
+        all_parts.extend(collected);
+        all_parts.sort_by_key(|(part_number, _)| *part_number);
+        self.api
+            .complete_multipart_upload(tenant_id, project_id, doc_id, upload_id, &all_parts)
+            .await
     }
 
     /// Resume pending uploads from database

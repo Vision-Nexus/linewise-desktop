@@ -302,6 +302,107 @@ pub struct PresignedUrlResponse {
     pub fields: Option<serde_json::Value>,
 }
 
+// ── Multipart (XML MPU) parallel-upload contract ──────────────────────────
+//
+// The GCS XML Multipart Upload path: the backend initiates an MPU against the
+// object, presigns one PUT URL per part, and returns the plan. The desktop
+// PUTs the parts concurrently, collects each part's `ETag` response header,
+// and asks the backend to complete (or abort). Wire keys are camelCase exactly
+// as the linewise-api contract defines them — do NOT rely on the
+// `rename_all` default for the snake-cased Rust fields.
+
+/// Response of
+/// `POST .../documents/{documentId}/multipart-upload-url`.
+/// `{ "uploadId", "partSize", "parts": [...], "expiresAt" }`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartPlan {
+    /// Opaque GCS MPU upload id, echoed back verbatim on complete / abort.
+    pub upload_id: String,
+    /// Size in bytes of every part except the last (which is the remainder).
+    pub part_size: i64,
+    /// Presigned PUT URL per part, 1-based `partNumber` ascending.
+    pub parts: Vec<MultipartPartUrl>,
+    /// RFC3339 instant after which the presigned URLs stop working. Carried
+    /// for diagnostics/logging; the client does not gate on it (an expired
+    /// URL surfaces as a part-PUT failure that the retry loop reports).
+    pub expires_at: String,
+}
+
+/// One presigned part PUT in a [`MultipartPlan`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartPartUrl {
+    /// 1-based part index. Determines the file offset (`(n-1) * partSize`).
+    pub part_number: i32,
+    /// Signed PUT URL for this part's bytes.
+    pub url: String,
+}
+
+/// Request body for
+/// `POST .../documents/{documentId}/multipart-upload-complete`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartCompleteRequest {
+    pub upload_id: String,
+    pub parts: Vec<MultipartCompletePart>,
+}
+
+/// One `(partNumber, etag)` pair in a [`MultipartCompleteRequest`]. `etag` is
+/// the `ETag` response header from that part's PUT, sent back verbatim.
+///
+/// Also deserialized: the resume plan (`completedParts`) echoes the
+/// already-uploaded parts back in this same shape, recovered server-side from
+/// GCS ListParts, so the client can fold them into the final complete call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartCompletePart {
+    pub part_number: i32,
+    pub etag: String,
+}
+
+/// Request body for
+/// `POST .../documents/{documentId}/multipart-upload-abort`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartAbortRequest {
+    pub upload_id: String,
+}
+
+/// Request body for
+/// `POST .../documents/{documentId}/multipart-upload-resume`.
+///
+/// Sent on app restart when a task carries a persisted [`UploadTask::mpu_upload_id`].
+/// `total_size` must be the SAME byte count used on the original initiate (the
+/// effective upload size of this task's file) so the backend re-derives an
+/// identical `partSize`/part layout — otherwise part boundaries wouldn't align.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartResumeRequest {
+    pub upload_id: String,
+    pub total_size: i64,
+}
+
+/// Response of `POST .../documents/{documentId}/multipart-upload-resume`.
+/// `{ "uploadId", "partSize", "parts": [...], "completedParts": [...], "expiresAt" }`.
+///
+/// The backend ran GCS ListParts against `upload_id`, then split the full
+/// part layout into the parts still missing (`parts`, each with a freshly
+/// signed PUT URL) and the parts already durable on GCS (`completed_parts`,
+/// with their server-reported ETags). The client uploads only `parts`, folds
+/// their ETags together with `completed_parts`, and completes the MPU.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultipartResumePlan {
+    pub upload_id: String,
+    pub part_size: i64,
+    /// Parts still needing upload, 1-based `partNumber` ascending.
+    pub parts: Vec<MultipartPartUrl>,
+    /// Parts already uploaded (recovered from GCS ListParts), with their ETags.
+    pub completed_parts: Vec<MultipartCompletePart>,
+    pub expires_at: String,
+}
+
 /// Firebase Auth tokens
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthTokens {
@@ -499,6 +600,14 @@ pub struct UploadTask {
     pub project_id: String,
     pub document_id: Option<String>,
     pub session_id: Option<String>,
+    /// GCS XML Multipart Upload (MPU) `uploadId`, persisted so a parallel-chunk
+    /// upload RESUMES across an app restart instead of restarting from zero.
+    /// Set once the backend initiates the MPU (before any part PUT). On restart
+    /// a `Some` value routes the task into the resume path (ListParts → upload
+    /// only the missing parts → complete). `None` for resumable / non-GCS rows,
+    /// or once a stale upload is abandoned in favour of a fresh MPU. Mirrors
+    /// [`session_id`], which serves the same role for the resumable path.
+    pub mpu_upload_id: Option<String>,
     pub bytes_uploaded: u64,
     pub state: UploadState,
     pub error_message: Option<String>,

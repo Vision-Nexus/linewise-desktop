@@ -4,9 +4,12 @@
 //! (covers AWS S3, Alibaba OSS, Tencent COS, MinIO, etc.).
 
 use crate::error::UploadError;
-use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE};
-use std::path::Path;
+use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 /// Default chunk size: 32 MiB (must be multiple of 256 KiB for GCS).
 /// Larger chunks = fewer requests = faster for big video files.
@@ -63,6 +66,17 @@ pub struct UploadSession {
     pub session_id: String,
     pub total_size: u64,
     pub bytes_confirmed: u64,
+}
+
+/// One presigned part PUT for the parallel multipart (XML MPU) path. The
+/// storage layer stays free of the wire DTOs in `models.rs`: `upload.rs`
+/// maps each `MultipartPartUrl` from the backend plan into one of these.
+#[derive(Debug, Clone)]
+pub struct PartUrl {
+    /// 1-based part index. Determines the file offset `(part_number - 1) * part_size`.
+    pub part_number: u32,
+    /// Signed PUT URL for this part's bytes.
+    pub url: String,
 }
 
 /// Progress callback signature
@@ -170,6 +184,31 @@ pub async fn upload_file_chunked(
 /// budget; there is no fast-fail mode.
 pub const DEFAULT_MAX_RETRIES: u32 = 100;
 
+/// First retry delay (ms) for the capped exponential backoff shared by the
+/// resumable chunk path and the multipart part path.
+const INITIAL_RETRY_DELAY_MS: u64 = 1000;
+
+/// Backoff plateau (ms). Caps the exponential so a near-infinite `max_retries`
+/// keeps retrying at a sane fixed interval instead of overflowing `1s << n` or
+/// sleeping for days. Backoff: 1s, 2s, 4s, 8s, 16s, then a 30s plateau.
+const MAX_RETRY_DELAY_MS: u64 = 30_000;
+
+/// Compute the capped exponential backoff delay for a 1-based `attempt`
+/// (attempt 1 → 1s, 2 → 2s, … 6+ → 30s). Shared by both retry loops so the
+/// resumable and multipart paths back off identically.
+fn retry_delay_ms(attempt: u32) -> u64 {
+    let shift = attempt.saturating_sub(1).min(5);
+    (INITIAL_RETRY_DELAY_MS << shift).min(MAX_RETRY_DELAY_MS)
+}
+
+/// Bounded concurrency for the parallel multipart (XML MPU) upload path: the
+/// driver uploads at most this many parts at once. Six keeps a multi-GB upload
+/// saturating a fast link without fanning out to one TCP connection per part
+/// (which would thrash a slow/metered link and balloon peak RAM to
+/// `parts_in_flight * part_size`). A `const` for now; a later change can make
+/// it overridable from config.
+const MPU_PART_CONCURRENCY: usize = 6;
+
 /// Upload a single chunk with automatic retry on network errors.
 /// Exponential backoff capped at a 30s plateau (1s, 2s, 4s, 8s, 16s, 30s, ...),
 /// up to `max_retries` attempts (0 = fail fast, no retry).
@@ -181,21 +220,13 @@ async fn upload_chunk_with_retry(
     offset: u64,
     max_retries: u32,
 ) -> Result<u64, UploadError> {
-    const INITIAL_DELAY_MS: u64 = 1000;
-    // Cap the exponential backoff so a large `max_retries` (near-infinite) keeps
-    // retrying at a sane fixed interval instead of overflowing the delay math
-    // (2^attempt) or sleeping for days. Backoff: 1s, 2s, 4s, 8s, 16s, then a 30s
-    // plateau.
-    const MAX_RETRY_DELAY_MS: u64 = 30_000;
-
     let mut attempt = 0;
     loop {
         match backend.upload_chunk(session, data, offset).await {
             Ok(confirmed) => return Ok(confirmed),
             Err(e) if is_retryable(&e) && attempt < max_retries => {
                 attempt += 1;
-                let shift = (attempt - 1).min(5);
-                let delay = (INITIAL_DELAY_MS << shift).min(MAX_RETRY_DELAY_MS);
+                let delay = retry_delay_ms(attempt);
                 tracing::warn!(
                     "Chunk upload failed (attempt {attempt}/{max_retries}), retrying in {delay}ms: {e}"
                 );
@@ -374,6 +405,173 @@ impl GcsBackend {
         let _ = self.client.delete(&session.session_id).send().await?;
         Ok(())
     }
+
+    /// Upload every part of `file_path` to its presigned PUT URL concurrently
+    /// (bounded by [`MPU_PART_CONCURRENCY`]) and return `(part_number, etag)`
+    /// for each part, ready to hand to `complete_multipart_upload`.
+    ///
+    /// Each part task opens its own `tokio::fs::File`, seeks to
+    /// `(part_number - 1) * part_size`, reads exactly its slice (the last part
+    /// is the shorter remainder), and PUTs the bytes. On a 200 it reads the
+    /// `ETag` response header verbatim. Per-part retry reuses the shared capped
+    /// backoff + [`is_retryable`] policy (a part success is a plain 200 + ETag,
+    /// never a 308 — `parse_gcs_range_header` is resumable-only).
+    ///
+    /// `on_progress(confirmed, total)` fires once per part as it lands, summing
+    /// confirmed bytes across parts so the existing speed/ETA UI keeps working.
+    /// The first error aborts the remaining in-flight tasks and propagates; the
+    /// caller is responsible for the best-effort `abort_multipart_upload`.
+    #[tracing::instrument(skip_all, fields(
+        filename = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
+        total_size,
+        parts = parts.len(),
+        part_size,
+    ))]
+    pub async fn upload_file_mpu(
+        &self,
+        file_path: &Path,
+        parts: &[PartUrl],
+        part_size: u64,
+        total_size: u64,
+        max_retries: u32,
+        on_progress: &ProgressFn,
+    ) -> Result<Vec<(u32, String)>, UploadError> {
+        let semaphore = Arc::new(Semaphore::new(MPU_PART_CONCURRENCY));
+        let path: PathBuf = file_path.to_path_buf();
+        let mut join_set: JoinSet<Result<PartOutcome, UploadError>> = JoinSet::new();
+
+        for part in parts {
+            let permit_source = Arc::clone(&semaphore);
+            let client = self.client.clone();
+            let path = path.clone();
+            let part = part.clone();
+            let offset = (part.part_number.saturating_sub(1)) as u64 * part_size;
+            // Last part is the remainder; clamp so we never read past EOF.
+            let len = part_size.min(total_size.saturating_sub(offset));
+            join_set.spawn(async move {
+                // Hold a permit for the whole part so at most
+                // MPU_PART_CONCURRENCY parts are in flight (and in memory) at once.
+                let _permit = permit_source.acquire_owned().await.map_err(|_| {
+                    UploadError::MpuTaskFailed {
+                        part_number: part.part_number as i32,
+                        reason: "concurrency semaphore closed".to_string(),
+                    }
+                })?;
+                let etag =
+                    put_part_with_retry(&client, &path, &part, offset, len, max_retries).await?;
+                Ok(PartOutcome {
+                    part_number: part.part_number,
+                    etag,
+                    bytes: len,
+                })
+            });
+        }
+
+        let mut collected: Vec<(u32, String)> = Vec::with_capacity(parts.len());
+        let mut confirmed: u64 = 0;
+        while let Some(joined) = join_set.join_next().await {
+            let outcome = match joined {
+                Ok(result) => result?,
+                Err(join_err) => {
+                    // A part task panicked or was aborted. Abort the rest and
+                    // surface an attributable error.
+                    join_set.shutdown().await;
+                    return Err(UploadError::MpuTaskFailed {
+                        part_number: 0,
+                        reason: join_err.to_string(),
+                    });
+                }
+            };
+            confirmed = confirmed.saturating_add(outcome.bytes);
+            on_progress(confirmed, total_size);
+            collected.push((outcome.part_number, outcome.etag));
+        }
+
+        // Surface parts in ascending order for stable logs / completion bodies.
+        collected.sort_by_key(|(part_number, _)| *part_number);
+        Ok(collected)
+    }
+}
+
+/// Result of one successfully uploaded multipart part.
+struct PartOutcome {
+    part_number: u32,
+    etag: String,
+    bytes: u64,
+}
+
+/// PUT a single multipart part with the shared capped-backoff retry policy.
+/// Returns the verbatim `ETag` response header on success.
+async fn put_part_with_retry(
+    client: &reqwest::Client,
+    file_path: &Path,
+    part: &PartUrl,
+    offset: u64,
+    len: u64,
+    max_retries: u32,
+) -> Result<String, UploadError> {
+    let mut attempt = 0;
+    loop {
+        match put_part_once(client, file_path, part, offset, len).await {
+            Ok(etag) => return Ok(etag),
+            Err(e) if is_retryable(&e) && attempt < max_retries => {
+                attempt += 1;
+                let delay = retry_delay_ms(attempt);
+                tracing::warn!(
+                    part_number = part.part_number,
+                    "Multipart part upload failed (attempt {attempt}/{max_retries}), retrying in {delay}ms: {e}"
+                );
+                wait_for_network(delay).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Read this part's byte slice from `file_path` and PUT it to its signed URL.
+/// On a 2xx, return the `ETag` response header verbatim (the value the backend
+/// needs to complete the MPU). A missing ETag on an otherwise-successful PUT is
+/// a hard error ([`UploadError::MpuMissingEtag`]); a non-2xx maps to
+/// [`UploadError::Api`] so [`is_retryable`] can classify 5xx/429/408 as
+/// retryable and 4xx as terminal.
+async fn put_part_once(
+    client: &reqwest::Client,
+    file_path: &Path,
+    part: &PartUrl,
+    offset: u64,
+    len: u64,
+) -> Result<String, UploadError> {
+    let mut file = tokio::fs::File::open(file_path).await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    let mut buf = vec![0u8; len as usize];
+    file.read_exact(&mut buf).await?;
+
+    let resp = client
+        .put(&part.url)
+        .header(CONTENT_LENGTH, buf.len().to_string())
+        .body(buf)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(UploadError::Api {
+            status: status.as_u16(),
+            message: format!(
+                "GCS multipart part {} failed: {}",
+                part.part_number,
+                resp.text().await.unwrap_or_default()
+            ),
+        });
+    }
+
+    resp.headers()
+        .get(ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or(UploadError::MpuMissingEtag {
+            part_number: part.part_number as i32,
+        })
 }
 
 fn parse_gcs_range_header(resp: &reqwest::Response) -> Result<u64, UploadError> {

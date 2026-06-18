@@ -101,6 +101,31 @@ pub enum UploadError {
     },
     #[error("Upload cancelled")]
     Cancelled,
+    /// A part PUT in the parallel multipart (XML MPU) path completed but
+    /// returned no usable `ETag` response header. GCS always sets `ETag` on
+    /// a successful part PUT; its absence means a misbehaving proxy stripped
+    /// it or the URL pointed somewhere unexpected. Without the ETag the
+    /// backend cannot complete the MPU, so we fail the part rather than send
+    /// an empty tag. Distinct from [`Self::Api`] (which is a non-2xx) — this
+    /// is a 2xx with a missing header.
+    #[error("Multipart part {part_number}: upload succeeded but no ETag header was returned")]
+    MpuMissingEtag { part_number: i32 },
+    /// A multipart part task could not be joined (the spawned tokio task
+    /// panicked or was aborted). Carries the part number and the join-error
+    /// rendering so the failure is attributable rather than a generic
+    /// "upload failed". Not a transport error — surfaced separately so it is
+    /// never mistaken for a retryable network blip.
+    #[error("Multipart part {part_number}: upload task did not complete: {reason}")]
+    MpuTaskFailed { part_number: i32, reason: String },
+    /// A multipart RESUME (app restart with a persisted `uploadId`) returned a
+    /// plan that could not be reconciled with the local file — e.g. the
+    /// server-reported part layout doesn't cover the expected part count, or a
+    /// listed part falls outside the valid range. We refuse to complete with a
+    /// mismatched part set (which GCS would reject as `InvalidPart` anyway) and
+    /// surface this so the engine can abandon the stale upload and restart
+    /// fresh. Not a transport error.
+    #[error("Multipart resume {upload_id}: cannot reconcile resumed plan: {reason}")]
+    MpuResumeFailed { upload_id: String, reason: String },
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
     #[error("IO error: {0}")]
@@ -131,6 +156,9 @@ impl UploadError {
             | UploadError::Api { .. }
             | UploadError::Auth { .. }
             | UploadError::GcsUpload { .. }
+            | UploadError::MpuMissingEtag { .. }
+            | UploadError::MpuTaskFailed { .. }
+            | UploadError::MpuResumeFailed { .. }
             | UploadError::Network(_)
             | UploadError::Io(_)
             | UploadError::Database(_) => false,

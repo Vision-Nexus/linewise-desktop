@@ -156,9 +156,16 @@ fn stage_error_toast(path: &Path, err: &UploadError) -> String {
                 "Cannot upload \"{filename}\": server unreachable — quality check requires a network connection"
             )
         }
+        // The multipart variants only arise during the upload stage, not
+        // staging, so they never actually reach this toast path — but the
+        // match stays exhaustive, so route them with the other unexpected
+        // failures.
         UploadError::Api { .. }
         | UploadError::Auth { .. }
         | UploadError::GcsUpload { .. }
+        | UploadError::MpuMissingEtag { .. }
+        | UploadError::MpuTaskFailed { .. }
+        | UploadError::MpuResumeFailed { .. }
         | UploadError::Network(_)
         | UploadError::Io(_)
         | UploadError::Database(_) => format!("Failed to add \"{filename}\": {err}"),
