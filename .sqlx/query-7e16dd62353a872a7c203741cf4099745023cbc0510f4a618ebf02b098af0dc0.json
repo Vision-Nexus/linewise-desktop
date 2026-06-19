@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state = 'FAILED'\n               AND retry_count < 10\n               AND (error_message LIKE '%Network%'\n                    OR error_message LIKE '%timeout%'\n                    OR error_message LIKE '%no healthy upstream%'\n                    OR error_message LIKE '%Interrupted%'\n                    OR error_message LIKE '%error sending request%')\n             ORDER BY created_at ASC\n             LIMIT 20",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -49,73 +49,78 @@
         "type_info": "Text"
       },
       {
-        "name": "bytes_uploaded",
+        "name": "mpu_upload_id",
         "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "bytes_uploaded",
+        "ordinal": 10,
         "type_info": "Integer"
       },
       {
         "name": "state",
-        "ordinal": 10,
-        "type_info": "Text"
-      },
-      {
-        "name": "error_message",
         "ordinal": 11,
         "type_info": "Text"
       },
       {
-        "name": "hash",
+        "name": "error_message",
         "ordinal": 12,
         "type_info": "Text"
       },
       {
-        "name": "source_md5",
+        "name": "hash",
         "ordinal": 13,
         "type_info": "Text"
       },
       {
-        "name": "source_crc32c",
+        "name": "source_md5",
         "ordinal": 14,
         "type_info": "Text"
       },
       {
-        "name": "source_sha256_head_256kib",
+        "name": "source_crc32c",
         "ordinal": 15,
         "type_info": "Text"
       },
       {
-        "name": "validation_warnings",
+        "name": "source_sha256_head_256kib",
         "ordinal": 16,
         "type_info": "Text"
       },
       {
-        "name": "rejection_reasons",
+        "name": "validation_warnings",
         "ordinal": 17,
         "type_info": "Text"
       },
       {
-        "name": "retry_count",
+        "name": "rejection_reasons",
         "ordinal": 18,
+        "type_info": "Text"
+      },
+      {
+        "name": "retry_count",
+        "ordinal": 19,
         "type_info": "Integer"
       },
       {
         "name": "video_info",
-        "ordinal": 19,
+        "ordinal": 20,
         "type_info": "Text"
       },
       {
         "name": "transcode",
-        "ordinal": 20,
-        "type_info": "Integer"
-      },
-      {
-        "name": "transcoded_size",
         "ordinal": 21,
         "type_info": "Integer"
       },
       {
-        "name": "force_upload",
+        "name": "transcoded_size",
         "ordinal": 22,
+        "type_info": "Integer"
+      },
+      {
+        "name": "force_upload",
+        "ordinal": 23,
         "type_info": "Integer"
       }
     ],
@@ -130,6 +135,7 @@
       false,
       false,
       false,
+      true,
       true,
       true,
       false,
@@ -148,5 +154,5 @@
       false
     ]
   },
-  "hash": "4a05bc969734b5a0416927876918965409b364f2b0893770d1e75e891aca6ed3"
+  "hash": "7e16dd62353a872a7c203741cf4099745023cbc0510f4a618ebf02b098af0dc0"
 }

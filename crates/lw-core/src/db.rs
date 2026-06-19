@@ -24,6 +24,7 @@ struct UploadRow {
     project_id: Option<String>,
     document_id: Option<String>,
     session_id: Option<String>,
+    mpu_upload_id: Option<String>,
     bytes_uploaded: Option<i64>,
     state: Option<String>,
     error_message: Option<String>,
@@ -58,6 +59,7 @@ impl From<UploadRow> for UploadTask {
             project_id: r.project_id.unwrap_or_default(),
             document_id: r.document_id,
             session_id: r.session_id,
+            mpu_upload_id: r.mpu_upload_id,
             bytes_uploaded: r.bytes_uploaded.unwrap_or(0) as u64,
             state: UploadState::parse(r.state.as_deref().unwrap_or("PENDING")),
             error_message: r.error_message,
@@ -292,6 +294,27 @@ impl Database {
         Ok(())
     }
 
+    /// Persist the GCS XML Multipart Upload (MPU) `uploadId` for a task so a
+    /// parallel-chunk upload can RESUME across an app restart instead of
+    /// restarting from zero. Called once, right after the backend initiates
+    /// the MPU and before any part PUT. Mirrors [`update_upload_session_id`].
+    /// Pass `None` to clear it (e.g. when a stale/expired upload is abandoned
+    /// and we fall back to a fresh MPU).
+    pub async fn update_upload_mpu_upload_id(
+        &self,
+        id: &str,
+        mpu_upload_id: Option<&str>,
+    ) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE upload_queue SET mpu_upload_id = ?, updated_at = datetime('now') WHERE id = ?",
+            mpu_upload_id,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Record the transcoded artifact size. Called once transcoding completes
     /// so the UI can render "original → transcoded" bytes even across restarts.
     pub async fn update_upload_transcoded_size(
@@ -438,7 +461,7 @@ impl Database {
         let rows = sqlx::query_as!(
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
-                    document_id, session_id, bytes_uploaded, state, error_message,
+                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
                     hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
              WHERE state = 'FAILED'
@@ -460,7 +483,7 @@ impl Database {
         let rows = sqlx::query_as!(
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
-                    document_id, session_id, bytes_uploaded, state, error_message,
+                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
                     hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
         )
@@ -474,7 +497,7 @@ impl Database {
         let rows = sqlx::query_as!(
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
-                    document_id, session_id, bytes_uploaded, state, error_message,
+                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
                     hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue
              WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
@@ -496,7 +519,7 @@ impl Database {
         let row = sqlx::query_as!(
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
-                    document_id, session_id, bytes_uploaded, state, error_message,
+                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
                     hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue WHERE id = ?",
             id,
@@ -510,7 +533,7 @@ impl Database {
         let rows = sqlx::query_as!(
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
-                    document_id, session_id, bytes_uploaded, state, error_message,
+                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
                     hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
              FROM upload_queue ORDER BY created_at DESC LIMIT 100",
         )
