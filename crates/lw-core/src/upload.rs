@@ -104,6 +104,24 @@ enum DedupVerdict {
     Reject(String),
 }
 
+/// Outcome of the mandatory pre-create dedup gate (`precreate_dedup`), run
+/// immediately before every `create_document`. Stops the create call from
+/// minting a second document for content that already has one.
+enum PreCreate {
+    /// No duplicate — create a new document.
+    Create,
+    /// An existing document for this content was found and is safe to reuse:
+    /// the in-flight orphan a lost create-response left behind, or an abandoned
+    /// same-user upload (gcs_uri still null). Adopt its id and upload to it.
+    Adopt(String),
+    /// A concurrent sibling task — possibly in a second app instance sharing
+    /// this SQLite DB — is already uploading this exact content. Defer to it.
+    AlreadyInFlight { existing_id: String },
+    /// A duplicate already exists in the tenant (completed, cross-tenant, or
+    /// perceptual). Settle `Rejected` with this reason instead of creating.
+    Rejected(String),
+}
+
 /// Render a user-facing rejection line for a PDQ near-duplicate hit. Mirrors
 /// the exact-dedup "already uploaded" wording but flags the perceptual nature
 /// so the user understands it's a re-encode / re-mux of footage already in the
@@ -1090,6 +1108,63 @@ impl UploadEngine {
         None
     }
 
+    /// The mandatory dedup gate run immediately before every `create_document`
+    /// (see the invariant at the Stage-4 call site). Two layers:
+    ///
+    ///   1. **Local** — a concurrent sibling task for this exact content
+    ///      (possibly in a second app instance sharing this SQLite DB) is
+    ///      already uploading. Only the deterministic winner (MIN created_at,id)
+    ///      creates; the rest defer (`AlreadyInFlight`). The server cannot see a
+    ///      sibling that has not created its document yet, so this catches the
+    ///      both-pre-create race the server check misses.
+    ///   2. **Server** — `dedup_verdict` (`POST /digest-checks`) finds an
+    ///      existing document for this content: the in-flight orphan a lost
+    ///      create-response left behind (→ `Adopt`, since it is gcs_uri-null and
+    ///      same-user) or a completed/cross-tenant/perceptual duplicate
+    ///      (→ `Rejected`).
+    ///
+    /// `force_upload` bypasses the gate (the super-admin asked for a copy). A
+    /// row missing any server digest leg can't be checked server-side, so it
+    /// falls through to `Create` (the local layer still applies).
+    async fn precreate_dedup(
+        &self,
+        task: &UploadTask,
+        hash: &str,
+        pdq_frames: Vec<PdqFrameWire>,
+    ) -> PreCreate {
+        if task.force_upload {
+            return PreCreate::Create;
+        }
+        if let Ok(Some((winner_id, winner_doc))) = self.db.find_inflight_sibling_winner(hash).await
+            && winner_id != task.id
+        {
+            return PreCreate::AlreadyInFlight {
+                existing_id: winner_doc.unwrap_or(winner_id),
+            };
+        }
+        let (Some(md5_hex), Some(crc32c_b64), Some(sha256_head_256kib_hex)) = (
+            task.source_md5.clone(),
+            task.source_crc32c.clone(),
+            task.source_sha256_head_256kib.clone(),
+        ) else {
+            return PreCreate::Create;
+        };
+        let hashes = dedup::FileHashes {
+            blake3_hex: hash.to_string(),
+            md5_hex,
+            crc32c_b64,
+            sha256_head_256kib_hex,
+        };
+        match self
+            .dedup_verdict(&task.tenant_id, &hashes, pdq_frames, &task.filename)
+            .await
+        {
+            DedupVerdict::Allow => PreCreate::Create,
+            DedupVerdict::Reuse(existing_id) => PreCreate::Adopt(existing_id),
+            DedupVerdict::Reject(reason) => PreCreate::Rejected(reason),
+        }
+    }
+
     /// Super-admin override: flip `force_upload` on a `Rejected` task,
     /// reset it to `Pending`, and spawn the upload worker. The worker
     /// reads `task.force_upload` in Stage 1 and skips the local-DB
@@ -1197,30 +1272,10 @@ impl UploadEngine {
                 });
                 return Err(UploadError::Duplicate { existing_id });
             }
-
-            // In-flight de-dup: among all NON-terminal upload-queue rows for this
-            // exact content (the SQLite DB is shared across app instances, so a
-            // sibling owned by a second instance is visible here too), only the
-            // earliest-created row uploads — the rest defer here as duplicates
-            // instead of each creating a new document and racing two resumable
-            // sessions onto the same GCS object. The winner is deterministic
-            // (MIN created_at,id); every row persists its hash at staging
-            // (`consume_hash_stream`) well before this check, so the winner is
-            // stable across the racing rows.
-            if !task.force_upload
-                && let Ok(Some((winner_id, winner_doc))) = self
-                    .db
-                    .find_inflight_sibling_winner(&hashes.blake3_hex)
-                    .await
-                && winner_id != task.id
-            {
-                let existing_id = winner_doc.unwrap_or(winner_id);
-                let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
-                    task_id: task.id.clone(),
-                    existing_document_id: existing_id.clone(),
-                });
-                return Err(UploadError::Duplicate { existing_id });
-            }
+            // The in-flight sibling de-dup that used to sit here ran only for
+            // rows that need rehashing. It now lives in the pre-create gate in
+            // Stage 4 (`precreate_dedup`) so it guards *every* path to create —
+            // happy path, auto-retry, and resume — not just rehashed rows.
         }
         // Set unconditionally above: either the row arrived from `Hashing`
         // with `task.hash` populated by `consume_hash_stream`, or the
@@ -1336,46 +1391,92 @@ impl UploadEngine {
             // carried from staging to avoid a DB column / migration — the source
             // file is local and unchanged, so the frames are identical.
             let pdq_frames = pdq::compute_pdq_frames(path).await;
-            let doc = self
-                .api
-                .create_document(
-                    &task.tenant_id,
-                    &task.project_id,
-                    &CreateDocumentRequest {
-                        collection: "documents".to_string(),
-                        description: task.filename.clone(),
-                        metadata: CreateDocumentMeta {
-                            filename: task.filename.clone(),
-                            size: Some(upload_size as i64),
-                            mime_type: task.mime_type.clone(),
-                        },
-                        model_name: None,
-                        folder: None,
-                        // Top-level on the request, NOT inside metadata —
-                        // the backend persists this to a dedicated
-                        // `document_digests.original_digest` JSONB column
-                        // with strict regex validation per leg; placing
-                        // it under `metadata` would silently drop the
-                        // value because `DocumentMeta` does not declare
-                        // these keys. All three legs come from the same
-                        // single I/O pass at staging time (or the Stage
-                        // 1 rehash fallback above) so they're guaranteed
-                        // self-consistent.
-                        digest: Some(Digest {
-                            md5: task.source_md5.clone(),
-                            crc32c: task.source_crc32c.clone(),
-                            sha256_head_256kib: task.source_sha256_head_256kib.clone(),
-                        }),
-                        // Persisted to `public.document_frame_hashes` so this
-                        // upload becomes a near-duplicate match target. Omitted
-                        // while PDQ is disabled / nothing decoded.
-                        pdq_frames: (!pdq_frames.is_empty()).then_some(pdq_frames),
-                    },
-                )
-                .await?;
-            task.document_id = Some(doc.id.clone());
-            self.db.update_upload_document_id(&task.id, &doc.id).await?;
-            doc.id
+
+            // INVARIANT: every `create_document` is immediately preceded by a
+            // fresh dedup check. This is the one choke point that runs on *every*
+            // path to create — happy path, auto-retry, and resume — unlike the
+            // staging check (which ran once, before this row's own document
+            // existed) and the Stage-1 checks (which only fire for rows that need
+            // rehashing). It adopts the in-flight orphan a lost create-response
+            // left behind (instead of minting a second document) and skips
+            // creating when a duplicate has appeared since staging.
+            match self.precreate_dedup(task, &hash, pdq_frames.clone()).await {
+                PreCreate::Adopt(existing_id) => {
+                    tracing::info!(
+                        existing_id,
+                        "pre-create dedup: adopting existing document instead of creating a duplicate"
+                    );
+                    task.document_id = Some(existing_id.clone());
+                    self.db
+                        .update_upload_document_id(&task.id, &existing_id)
+                        .await?;
+                    existing_id
+                }
+                PreCreate::AlreadyInFlight { existing_id } => {
+                    let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
+                        task_id: task.id.clone(),
+                        existing_document_id: existing_id.clone(),
+                    });
+                    return Err(UploadError::Duplicate { existing_id });
+                }
+                PreCreate::Rejected(reason) => {
+                    tracing::info!(
+                        reason,
+                        "pre-create dedup: duplicate already exists; settling Rejected without creating"
+                    );
+                    self.settle_post_hash(
+                        &task.id,
+                        UploadState::Rejected,
+                        Vec::new(),
+                        vec![reason],
+                    )
+                    .await;
+                    return Ok(());
+                }
+                PreCreate::Create => {
+                    let doc = self
+                        .api
+                        .create_document(
+                            &task.tenant_id,
+                            &task.project_id,
+                            &CreateDocumentRequest {
+                                collection: "documents".to_string(),
+                                description: task.filename.clone(),
+                                metadata: CreateDocumentMeta {
+                                    filename: task.filename.clone(),
+                                    size: Some(upload_size as i64),
+                                    mime_type: task.mime_type.clone(),
+                                },
+                                model_name: None,
+                                folder: None,
+                                // Top-level on the request, NOT inside metadata —
+                                // the backend persists this to a dedicated
+                                // `document_digests.original_digest` JSONB column
+                                // with strict regex validation per leg; placing
+                                // it under `metadata` would silently drop the
+                                // value because `DocumentMeta` does not declare
+                                // these keys. All three legs come from the same
+                                // single I/O pass at staging time (or the Stage
+                                // 1 rehash fallback above) so they're guaranteed
+                                // self-consistent.
+                                digest: Some(Digest {
+                                    md5: task.source_md5.clone(),
+                                    crc32c: task.source_crc32c.clone(),
+                                    sha256_head_256kib: task.source_sha256_head_256kib.clone(),
+                                }),
+                                // Persisted to `public.document_frame_hashes` so
+                                // this upload becomes a near-duplicate match
+                                // target. Omitted while PDQ is disabled / nothing
+                                // decoded.
+                                pdq_frames: (!pdq_frames.is_empty()).then_some(pdq_frames),
+                            },
+                        )
+                        .await?;
+                    task.document_id = Some(doc.id.clone());
+                    self.db.update_upload_document_id(&task.id, &doc.id).await?;
+                    doc.id
+                }
+            }
         };
 
         // Stage 5 + 6 (preferred): parallel multipart (XML MPU) path.
