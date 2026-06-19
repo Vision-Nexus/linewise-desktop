@@ -554,4 +554,29 @@ impl Database {
             .await?;
         Ok(row.map(|r| r.document_id))
     }
+
+    /// The earliest-created NON-terminal upload-queue row carrying this content
+    /// hash — the deterministic "winner" of an in-flight de-dup. Returns its
+    /// `(id, document_id)`. Used so that when the same file is staged more than
+    /// once (a re-add, or a second app instance — the SQLite DB is shared, so a
+    /// sibling owned by another process is visible here too), only the earliest
+    /// row uploads and the rest defer as duplicates instead of each creating a
+    /// new document. Terminal rows (Completed/Failed/Rejected/Paused) are
+    /// excluded so a finished or abandoned attempt never blocks a fresh one.
+    pub async fn find_inflight_sibling_winner(
+        &self,
+        hash: &str,
+    ) -> Result<Option<(String, Option<String>)>, DbError> {
+        let row = sqlx::query!(
+            "SELECT id AS \"id!\", document_id FROM upload_queue
+             WHERE hash = ?
+               AND state IN ('HASHING','QUALITY_CHECKING','STAGED','PENDING','VALIDATING','TRANSCODING','DESENSITIZING','CREATING','UPLOADING','VERIFYING')
+             ORDER BY created_at ASC, id ASC
+             LIMIT 1",
+            hash,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.id, r.document_id)))
+    }
 }

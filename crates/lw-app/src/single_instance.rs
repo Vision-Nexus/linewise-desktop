@@ -162,11 +162,24 @@ pub fn acquire() -> GuardOutcome {
             GuardOutcome::Continue
         }
         // Rare race: another instance bound between our connect probe and this
-        // bind. Hand off if we can; otherwise degrade to launching.
+        // bind. A live instance holds the name — hand off and exit (fail-closed).
         Err(BindError::InUse) => signal_existing(socket.name),
         Err(BindError::Other(e)) => {
-            tracing::warn!("single-instance: bind failed ({e}); launching anyway (degraded)");
-            GuardOutcome::Continue
+            // Unexpected bind error with no "in use" signal. Probe once for a
+            // live instance: hand off if one answers, otherwise launch — we have
+            // no evidence of a duplicate and must not brick a clean launch on a
+            // transient/unknown error.
+            tracing::warn!(
+                "single-instance: bind failed unexpectedly ({e}); probing for an existing instance"
+            );
+            match Stream::connect(socket.name) {
+                Ok(mut stream) => {
+                    let _ = write_show(&mut stream);
+                    tracing::info!("single-instance: an instance answered the probe; exiting");
+                    GuardOutcome::AlreadyRunning
+                }
+                Err(_) => GuardOutcome::Continue,
+            }
         }
     }
 }
@@ -271,29 +284,49 @@ fn reclaim_stale_socket(_socket: &SocketName) -> bool {
     false
 }
 
+/// Connect attempts (with backoff) when handing off to an existing instance.
+/// Reached only after `bind` reported the name in use, so a live primary holds
+/// it; the connect can transiently fail if that primary bound the name but
+/// hasn't entered its accept loop yet (the connect→bind race).
+const SIGNAL_CONNECT_ATTEMPTS: u32 = 5;
+const SIGNAL_CONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// Second-instance path: connect to the running instance, tell it to show, and
-/// report whether the hand-off succeeded.
+/// EXIT. Reached only after `bind` reported the name in use — on Windows a bound
+/// name means a live process; on Unix any stale corpse was already reclaimed —
+/// so a live primary exists and this process must NOT become a second uploader
+/// (two instances share one SQLite upload queue → duplicate uploads).
 ///
-/// A connect failure here means the name is occupied but unreachable (a race,
-/// or a corpse we couldn't reclaim). We degrade to launching rather than
-/// exiting silently — the user clicked the icon and deserves a window.
+/// A connect can transiently fail during the connect→bind race (primary bound
+/// the name but isn't accepting yet); retry with backoff. If the hand-off still
+/// can't be made we exit ANYWAY (fail-closed) — a missed "show the window" is
+/// far better than a duplicate uploader.
 fn signal_existing(name: Name<'static>) -> GuardOutcome {
-    match Stream::connect(name) {
-        Ok(mut stream) => match write_show(&mut stream) {
-            Ok(()) => {
-                tracing::info!("single-instance: signalled running instance to show; exiting");
-                GuardOutcome::AlreadyRunning
+    for attempt in 1..=SIGNAL_CONNECT_ATTEMPTS {
+        match Stream::connect(name.clone()) {
+            Ok(mut stream) => {
+                match write_show(&mut stream) {
+                    Ok(()) => tracing::info!(
+                        "single-instance: signalled running instance to show; exiting"
+                    ),
+                    Err(e) => tracing::warn!(
+                        "single-instance: connected but failed to signal ({e}); exiting (a live instance holds the lock)"
+                    ),
+                }
+                return GuardOutcome::AlreadyRunning;
             }
             Err(e) => {
-                tracing::warn!("single-instance: connected but failed to signal ({e}); launching");
-                GuardOutcome::Continue
+                tracing::debug!(
+                    "single-instance: hand-off connect attempt {attempt}/{SIGNAL_CONNECT_ATTEMPTS} failed ({e}); retrying"
+                );
+                std::thread::sleep(SIGNAL_CONNECT_BACKOFF);
             }
-        },
-        Err(e) => {
-            tracing::warn!("single-instance: name in use but connect failed ({e}); launching");
-            GuardOutcome::Continue
         }
     }
+    tracing::warn!(
+        "single-instance: name in use but hand-off unreachable after {SIGNAL_CONNECT_ATTEMPTS} attempts; exiting rather than launching a duplicate"
+    );
+    GuardOutcome::AlreadyRunning
 }
 
 /// Writes the fixed show-message and flushes it.

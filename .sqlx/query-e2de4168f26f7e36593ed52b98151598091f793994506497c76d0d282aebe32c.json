@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", document_id FROM upload_queue\n             WHERE hash = ?\n               AND state IN ('HASHING','QUALITY_CHECKING','STAGED','PENDING','VALIDATING','TRANSCODING','DESENSITIZING','CREATING','UPLOADING','VERIFYING')\n             ORDER BY created_at ASC, id ASC\n             LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "document_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "e2de4168f26f7e36593ed52b98151598091f793994506497c76d0d282aebe32c"
+}
