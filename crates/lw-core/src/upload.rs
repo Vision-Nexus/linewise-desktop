@@ -1196,6 +1196,30 @@ impl UploadEngine {
                 });
                 return Err(UploadError::Duplicate { existing_id });
             }
+
+            // In-flight de-dup: among all NON-terminal upload-queue rows for this
+            // exact content (the SQLite DB is shared across app instances, so a
+            // sibling owned by a second instance is visible here too), only the
+            // earliest-created row uploads — the rest defer here as duplicates
+            // instead of each creating a new document and racing two resumable
+            // sessions onto the same GCS object. The winner is deterministic
+            // (MIN created_at,id); every row persists its hash at staging
+            // (`consume_hash_stream`) well before this check, so the winner is
+            // stable across the racing rows.
+            if !task.force_upload
+                && let Ok(Some((winner_id, winner_doc))) = self
+                    .db
+                    .find_inflight_sibling_winner(&hashes.blake3_hex)
+                    .await
+                && winner_id != task.id
+            {
+                let existing_id = winner_doc.unwrap_or(winner_id);
+                let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
+                    task_id: task.id.clone(),
+                    existing_document_id: existing_id.clone(),
+                });
+                return Err(UploadError::Duplicate { existing_id });
+            }
         }
         // Set unconditionally above: either the row arrived from `Hashing`
         // with `task.hash` populated by `consume_hash_stream`, or the
