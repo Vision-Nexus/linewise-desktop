@@ -105,6 +105,9 @@ pub fn Sidebar() -> Element {
         });
     }));
 
+    // Real-time org search box state (filters the Orgs list below).
+    let mut org_query = use_signal(String::new);
+
     let selected_tenant = app_state.selected_tenant.read().clone();
     let selected_tenant_id = selected_tenant
         .as_ref()
@@ -129,6 +132,17 @@ pub fn Sidebar() -> Element {
         .and_then(|t| app_state.tenant_projects.read().get(&t.id).cloned())
         .unwrap_or_default();
 
+    // Real-time filter: case-insensitive substring match on the org's display
+    // name. Empty query → all orgs. Recomputed every keystroke (re-render).
+    let org_query_lc = org_query.read().trim().to_lowercase();
+    let filtered_tenants: Vec<_> = tenant_list
+        .iter()
+        .filter(|t| {
+            org_query_lc.is_empty() || t.display_name.to_lowercase().contains(&org_query_lc)
+        })
+        .cloned()
+        .collect();
+
     rsx! {
         div {
             class: "flex h-full shrink-0",
@@ -139,6 +153,20 @@ pub fn Sidebar() -> Element {
                 div {
                     class: "h-10 flex items-center px-4 border-b border-border shrink-0",
                     span { class: "text-xs font-semibold text-muted-foreground uppercase tracking-wider", "Orgs" }
+                }
+
+                div {
+                    class: "px-2 pt-2 shrink-0",
+                    input {
+                        r#type: "text",
+                        value: "{org_query}",
+                        placeholder: "Search orgs…",
+                        spellcheck: "false",
+                        autocapitalize: "off",
+                        autocorrect: "off",
+                        oninput: move |e| org_query.set(e.value()),
+                        class: "w-full px-2 py-1.5 text-sm rounded border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-ring",
+                    }
                 }
 
                 div {
@@ -164,7 +192,7 @@ pub fn Sidebar() -> Element {
                         }
                     }
 
-                    for tenant in tenant_list.iter() {
+                    for tenant in filtered_tenants.iter() {
                         {
                             let is_active = tenant.id == selected_tenant_id;
                             let active_class = if is_active {
@@ -201,6 +229,12 @@ pub fn Sidebar() -> Element {
                         div {
                             class: "px-3 py-2 text-sm text-muted-foreground italic",
                             "No orgs"
+                        }
+                    }
+                    if !tenant_list.is_empty() && filtered_tenants.is_empty() {
+                        div {
+                            class: "px-3 py-2 text-sm text-muted-foreground italic",
+                            "No matching orgs"
                         }
                     }
                 }
