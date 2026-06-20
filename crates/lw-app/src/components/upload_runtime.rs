@@ -51,6 +51,13 @@ pub fn UploadRuntime() -> Element {
         let engine = engine_for_load.clone();
         let mut app_state = app_state_load.clone();
         async move {
+            // Reclaim orphaned desensitize temp copies from a prior crash /
+            // hard-kill (the in-process Drop guard can't run on a kill). Age-gated
+            // (>30 min) so a concurrent — single-instance-guard-bypassed — instance's
+            // in-flight copy isn't deleted mid-upload; run BEFORE resume so this
+            // instance's about-to-be-rebuilt copies are never targeted.
+            lw_core::desensitize::sweep_orphaned_temp(std::time::Duration::from_secs(30 * 60));
+
             // Reset stale in-progress uploads to FAILED. Does NOT touch
             // TRANSCODING — that state is resumable via the scratch dir.
             match db.reset_stale_uploads().await {

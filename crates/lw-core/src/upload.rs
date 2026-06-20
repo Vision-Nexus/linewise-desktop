@@ -214,6 +214,43 @@ pub enum UploadEvent {
 /// Uploads themselves are bounded separately by `upload_semaphore`.
 const MAX_CONCURRENT_STAGING: usize = 4;
 
+/// RAII guard that deletes desensitize/transcode temp copies on EVERY exit of
+/// `process_task` — success, an `Err` propagated via `?`, or a panic/cancel —
+/// not only the success tail (`finalize_after_upload`). Before this, any failure
+/// between Stage 3 and finalize leaked a full-size `clean_<filename>` copy that
+/// accumulated until the disk filled (SQLite "(code 13) database or disk is
+/// full"). Deleting on a resumable `Err` is safe: the temp copies are never
+/// persisted across runs — a retried/resumed task rebuilds them from the
+/// unchanged source (desensitize re-runs on every entry; transcode resumes from
+/// its own HLS scratch dir, which this guard deliberately does NOT track).
+/// `Drop` only removes a path that still exists, so on the success path — where
+/// `finalize_after_upload` already cleaned the copies — it is a silent no-op
+/// (no double-delete warning). A hard kill can't run `Drop`;
+/// `desensitize::sweep_orphaned_temp` at startup reclaims those orphans.
+#[derive(Default)]
+struct TempCleanupGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl TempCleanupGuard {
+    /// Register a produced temp copy for cleanup-on-exit. `None` is ignored.
+    fn track(&mut self, path: Option<&Path>) {
+        if let Some(path) = path {
+            self.paths.push(path.to_path_buf());
+        }
+    }
+}
+
+impl Drop for TempCleanupGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            if path.exists() {
+                desensitize::cleanup_temp_file(path);
+            }
+        }
+    }
+}
+
 pub struct UploadEngine {
     db: Arc<Database>,
     api: Arc<ApiClient>,
@@ -1323,8 +1360,15 @@ impl UploadEngine {
             None
         };
 
+        // Temp copies produced below (the transcoded mp4 and/or the desensitized
+        // clean_<file>) are deleted on EVERY exit of this function by this guard
+        // — not just the success tail — so a failure / cancel / panic can never
+        // leak a full-size copy into %TEMP% and accumulate toward a full disk.
+        let mut temp_guard = TempCleanupGuard::default();
+
         // Stage 2.5: Transcoding (user opt-in, video files only)
         let transcoded_path = self.maybe_transcode(task, path, &video_info).await?;
+        temp_guard.track(transcoded_path.as_deref());
 
         // Stage 3: Data desensitization (skip if already transcoded — transcoding strips metadata)
         let mut desensitized_path: Option<PathBuf> = None;
@@ -1338,6 +1382,7 @@ impl UploadEngine {
                         result.output_path.display()
                     );
                     desensitized_path = Some(result.output_path);
+                    temp_guard.track(desensitized_path.as_deref());
                 }
                 Some(Err(e)) => {
                     tracing::warn!("Desensitization failed for {}: {e}", task.filename);
