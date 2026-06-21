@@ -101,6 +101,21 @@ pub enum UploadError {
     },
     #[error("Upload cancelled")]
     Cancelled,
+    /// The local file changed size between the moment its size was captured
+    /// (staging / resumable-session declaration) and the moment its bytes were
+    /// read for upload: a recording still being written, a cloud-sync
+    /// placeholder not yet materialized, or an antivirus/copy still in progress.
+    /// The size declared to GCS no longer matches the bytes on disk, so a
+    /// chunk/part read came up short or the resumable total can't be satisfied.
+    /// Retrying a moving target never converges, so this is `is_expected` — the
+    /// row settles with an actionable message and is NOT auto-retried (the
+    /// message matches none of `get_failed_retryable`'s patterns); the user
+    /// re-adds the file once it has finished writing/downloading.
+    #[error(
+        "File changed on disk during upload (expected {declared} bytes, file is now {actual}). \
+         Wait until it finishes writing or downloading, then add it again."
+    )]
+    FileChangedDuringUpload { declared: u64, actual: u64 },
     /// A part PUT in the parallel multipart (XML MPU) path completed but
     /// returned no usable `ETag` response header. GCS always sets `ETag` on
     /// a successful part PUT; its absence means a misbehaving proxy stripped
@@ -150,7 +165,8 @@ impl UploadError {
             | UploadError::VideoUnplayable { .. }
             | UploadError::UnsupportedContainer { .. }
             | UploadError::QualityCheckPayloadTooLarge { .. }
-            | UploadError::QualityCheckOffline { .. } => true,
+            | UploadError::QualityCheckOffline { .. }
+            | UploadError::FileChangedDuringUpload { .. } => true,
             UploadError::FileNotFound(_)
             | UploadError::FileTooLarge { .. }
             | UploadError::Api { .. }

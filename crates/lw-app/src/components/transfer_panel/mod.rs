@@ -142,7 +142,8 @@ fn stage_error_toast(path: &Path, err: &UploadError) -> String {
         | UploadError::FileTooLarge { .. }
         | UploadError::FileNotFound(_)
         | UploadError::Cancelled
-        | UploadError::QualityCheckPayloadTooLarge { .. } => {
+        | UploadError::QualityCheckPayloadTooLarge { .. }
+        | UploadError::FileChangedDuringUpload { .. } => {
             format!("Cannot upload \"{filename}\": {err}")
         }
         UploadError::UnsupportedContainer { kind } => {

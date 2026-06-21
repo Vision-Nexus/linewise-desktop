@@ -162,10 +162,35 @@ pub async fn upload_file_chunked(
         file.seek(std::io::SeekFrom::Start(start_offset)).await?;
     }
 
+    // `total` (the size declared to GCS for this resumable session) is
+    // immutable. If the file on disk is no longer that size, it was mutated
+    // after the size snapshot — still recording, a cloud-sync placeholder, or an
+    // AV scan — and uploading would short-read or finalize a truncated object.
+    // Bail with an actionable, non-retryable error instead of failing mid-stream.
+    let current_len = file.metadata().await?.len();
+    if current_len != total {
+        return Err(UploadError::FileChangedDuringUpload {
+            declared: total,
+            actual: current_len,
+        });
+    }
+
     while offset < total {
         let this_chunk = (total - offset).min(chunk_size) as usize;
         let mut buf = vec![0u8; this_chunk];
-        file.read_exact(&mut buf).await?;
+        // A short read means the file shrank mid-upload (the snapshot guard above
+        // only catches pre-loop drift). Surface it as a file-changed outcome
+        // rather than a bare "early eof" IO error that floods Sentry and auto-retries.
+        if let Err(e) = file.read_exact(&mut buf).await {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                let actual = file.metadata().await.map(|m| m.len()).unwrap_or(offset);
+                return Err(UploadError::FileChangedDuringUpload {
+                    declared: total,
+                    actual,
+                });
+            }
+            return Err(e.into());
+        }
 
         let confirmed =
             upload_chunk_with_retry(backend, session, &buf, offset, max_retries).await?;
@@ -247,6 +272,9 @@ fn is_retryable(err: &UploadError) -> bool {
             *status >= 500 || *status == 429 || *status == 408
         }
         UploadError::GcsUpload { .. } => true,
+        // A file that changed on disk keeps failing until the user re-adds it
+        // once stable — never auto-retry a moving target.
+        UploadError::FileChangedDuringUpload { .. } => false,
         _ => false,
     }
 }
@@ -436,6 +464,18 @@ impl GcsBackend {
         max_retries: u32,
         on_progress: &ProgressFn,
     ) -> Result<Vec<(u32, String)>, UploadError> {
+        // The part layout (per-part offsets/lengths) was computed from
+        // `total_size`. If the file is no longer that size, it was mutated after
+        // the snapshot (still recording / a cloud-sync placeholder / AV scan) and
+        // the parts no longer map to real bytes. Bail with an actionable,
+        // non-retryable error before spawning any part PUTs.
+        let current_len = tokio::fs::metadata(file_path).await?.len();
+        if current_len != total_size {
+            return Err(UploadError::FileChangedDuringUpload {
+                declared: total_size,
+                actual: current_len,
+            });
+        }
         let semaphore = Arc::new(Semaphore::new(MPU_PART_CONCURRENCY));
         let path: PathBuf = file_path.to_path_buf();
         let mut join_set: JoinSet<Result<PartOutcome, UploadError>> = JoinSet::new();
@@ -544,7 +584,18 @@ async fn put_part_once(
     let mut file = tokio::fs::File::open(file_path).await?;
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     let mut buf = vec![0u8; len as usize];
-    file.read_exact(&mut buf).await?;
+    // A short read means the file shrank since the part layout was computed —
+    // surface it as a file-changed outcome rather than a bare "early eof".
+    if let Err(e) = file.read_exact(&mut buf).await {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            let actual = file.metadata().await.map(|m| m.len()).unwrap_or(offset);
+            return Err(UploadError::FileChangedDuringUpload {
+                declared: offset + len,
+                actual,
+            });
+        }
+        return Err(e.into());
+    }
 
     let resp = client
         .put(&part.url)
