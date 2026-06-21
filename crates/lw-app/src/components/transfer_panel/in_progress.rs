@@ -82,46 +82,26 @@ pub fn InProgressList(
                 "Nothing in progress"
             }
         } else {
-            if !quality_checking.is_empty() {
-                SectionHeader { title: "Checking", count: quality_checking.len() }
+            // Section order is "closest-to-done first": actively-uploading rows
+            // are pinned to the TOP (with their live "Uploading N" count), then
+            // Preparing / Ready to Upload, then the back-of-queue Hashing /
+            // Checking. Before this, "Uploading" rendered LAST — so when a big
+            // batch was still hashing/checking, the in-flight uploads were pushed
+            // below the fold and the user had to scroll to see any upload at all.
+            if !active.is_empty() {
+                SectionHeader { title: "Uploading", count: active.len() }
                 div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in quality_checking.iter() {
-                        QualityCheckingRow {
+                    for task in active.iter() {
+                        UploadTaskRow {
                             key: "{task.id}",
                             task: task.clone(),
-                            on_remove,
-                        }
-                    }
-                }
-            }
-
-            if !hashing.is_empty() {
-                SectionHeader { title: "Hashing", count: hashing.len() }
-                div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in hashing.iter() {
-                        HashingRow {
-                            key: "{task.id}",
-                            task: task.clone(),
-                            device_encoder_signatures,
-                            hash_progress,
-                            on_remove,
-                        }
-                    }
-                }
-            }
-
-            if !staged.is_empty() {
-                SectionHeader { title: "Ready to Upload", count: staged.len() }
-                div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in staged.iter() {
-                        StagedRow {
-                            key: "{task.id}",
-                            task: task.clone(),
-                            transcode_config: transcode_config.clone(),
-                            device_encoder_signatures,
-                            on_remove,
-                            on_transcode_click,
-                            on_force_upload: None,
+                            transcode_progress,
+                            upload_progress,
+                            upload_speed,
+                            on_retry,
+                            on_remove: on_clear,
+                            on_pause,
+                            on_resume,
                         }
                     }
                 }
@@ -146,20 +126,46 @@ pub fn InProgressList(
                 }
             }
 
-            if !active.is_empty() {
-                SectionHeader { title: "Uploading", count: active.len() }
+            if !staged.is_empty() {
+                SectionHeader { title: "Ready to Upload", count: staged.len() }
                 div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in active.iter() {
-                        UploadTaskRow {
+                    for task in staged.iter() {
+                        StagedRow {
                             key: "{task.id}",
                             task: task.clone(),
-                            transcode_progress,
-                            upload_progress,
-                            upload_speed,
-                            on_retry,
-                            on_remove: on_clear,
-                            on_pause,
-                            on_resume,
+                            transcode_config: transcode_config.clone(),
+                            device_encoder_signatures,
+                            on_remove,
+                            on_transcode_click,
+                            on_force_upload: None,
+                        }
+                    }
+                }
+            }
+
+            if !hashing.is_empty() {
+                SectionHeader { title: "Hashing", count: hashing.len() }
+                div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
+                    for task in hashing.iter() {
+                        HashingRow {
+                            key: "{task.id}",
+                            task: task.clone(),
+                            device_encoder_signatures,
+                            hash_progress,
+                            on_remove,
+                        }
+                    }
+                }
+            }
+
+            if !quality_checking.is_empty() {
+                SectionHeader { title: "Checking", count: quality_checking.len() }
+                div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
+                    for task in quality_checking.iter() {
+                        QualityCheckingRow {
+                            key: "{task.id}",
+                            task: task.clone(),
+                            on_remove,
                         }
                     }
                 }
