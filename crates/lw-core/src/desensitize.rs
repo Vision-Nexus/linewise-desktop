@@ -246,3 +246,60 @@ pub fn cleanup_temp_file(path: &Path) {
         tracing::warn!("Failed to clean up temp file {}: {e}", path.display());
     }
 }
+
+/// Directory holding desensitized `clean_<filename>` copies (system %TEMP%).
+pub fn temp_dir() -> PathBuf {
+    std::env::temp_dir().join("linewise-desensitize")
+}
+
+/// Reclaim orphaned desensitized temp copies left behind when a prior upload
+/// failed / was cancelled / the app was killed before the in-process cleanup
+/// ran (a hard kill / power loss can't run a `Drop` guard). Only entries OLDER
+/// than `max_age` are removed, so an in-flight copy from a concurrent
+/// (single-instance-guard-bypassed) instance sharing %TEMP% is never deleted
+/// mid-upload. Best-effort: every error is logged and skipped. Call once at
+/// startup, BEFORE resuming pending uploads, so this instance's
+/// about-to-be-rebuilt copies are never targeted.
+pub fn sweep_orphaned_temp(max_age: std::time::Duration) {
+    let dir = temp_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return; // dir absent (nothing ever desensitized) — nothing to reclaim
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0u64;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        // `duration_since` errs if mtime is in the future (clock skew) — keep it.
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age < max_age {
+            continue;
+        }
+        let path = entry.path();
+        let file_bytes = if meta.is_file() { meta.len() } else { 0 };
+        let result = if meta.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => {
+                removed += 1;
+                bytes += file_bytes;
+            }
+            Err(e) => tracing::warn!("temp sweep: failed to remove {}: {e}", path.display()),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(
+            "temp sweep: reclaimed {removed} orphaned desensitize entr(ies) (~{} MiB) from {}",
+            bytes / 1_048_576,
+            dir.display()
+        );
+    }
+}
