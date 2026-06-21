@@ -1070,10 +1070,10 @@ impl UploadEngine {
         {
             return DedupVerdict::Reuse(reuse_id);
         }
-        let plural = if tenant_match_count == 1 { "" } else { "s" };
-        DedupVerdict::Reject(format!(
-            "Already uploaded in this tenant ({tenant_match_count} document{plural})",
-        ))
+        DedupVerdict::Reject(
+            self.tenant_match_message(tenant_id, &result.tenant_matches)
+                .await,
+        )
     }
 
     /// Build a friendly cross-tenant rejection message that names the
@@ -1102,6 +1102,68 @@ impl UploadEngine {
             [] => "You uploaded this file in another tenant".to_string(),
             [one] => format!("You uploaded this file in tenant '{one}'"),
             _ => format!("You uploaded this file in tenants: {}", names.join(", ")),
+        }
+    }
+
+    /// Friendly same-tenant "already uploaded" message that names the
+    /// organization and the project(s) the file already lives in. The
+    /// `/digest-checks` response carries `projectId`/`tenantId` per match;
+    /// this resolves them to display names — the org from the cached whoami
+    /// tenant list, each project via a `list_projects` lookup. Any resolution
+    /// failure degrades gracefully (org → "this organization", project → its
+    /// id): a cosmetic message must never change or fail the dedup verdict.
+    async fn tenant_match_message(
+        &self,
+        tenant_id: &str,
+        matches: &[crate::models::DedupCheckMatch],
+    ) -> String {
+        let count = matches.len();
+        let plural = if count == 1 { "" } else { "s" };
+
+        // Org display name (the calling tenant), best-effort via the whoami cache.
+        let org = self
+            .current_user_cache()
+            .await
+            .and_then(|c| {
+                c.tenants
+                    .iter()
+                    .find(|t| t.id.as_str() == tenant_id)
+                    .map(|t| t.display_name.clone())
+            })
+            .unwrap_or_else(|| "this organization".to_string());
+
+        // Distinct project ids from the matches, resolved to names. One
+        // `list_projects` call on this rare reject path is acceptable.
+        let mut project_ids: Vec<&str> = matches.iter().map(|m| m.project_id.as_str()).collect();
+        project_ids.sort_unstable();
+        project_ids.dedup();
+        let projects: Vec<String> = match self.api.list_projects(tenant_id).await {
+            Ok(list) => project_ids
+                .iter()
+                .map(|pid| {
+                    list.iter()
+                        .find(|p| p.id.as_str() == *pid)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| (*pid).to_string())
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    "dedup: list_projects failed building the duplicate message; using project ids: {e}"
+                );
+                project_ids.iter().map(|p| (*p).to_string()).collect()
+            }
+        };
+
+        match projects.as_slice() {
+            [] => format!("Already uploaded in '{org}' ({count} document{plural})"),
+            [one] => {
+                format!("Already uploaded in '{org}', project '{one}' ({count} document{plural})")
+            }
+            many => format!(
+                "Already uploaded in '{org}', projects: {} ({count} document{plural})",
+                many.join(", ")
+            ),
         }
     }
 
