@@ -1432,9 +1432,18 @@ impl UploadEngine {
         let transcoded_path = self.maybe_transcode(task, path, &video_info).await?;
         temp_guard.track(transcoded_path.as_deref());
 
-        // Stage 3: Data desensitization (skip if already transcoded — transcoding strips metadata)
+        // Stage 3: Data desensitization. Skipped when (a) we already
+        // transcoded (transcode output is metadata-clean), or (b) the
+        // quality-check probe shows nothing the strip would actually remove —
+        // no location/device/timestamp tag and no telemetry track (see
+        // `video::metadata_needs_strip`). (b) spares clips that are already
+        // metadata-clean (e.g. re-encoded upstream) the read-4GB +
+        // write-4GB-temp + hold-an-upload-slot cost that otherwise gates every
+        // upload — the root of the "selected N files, nothing uploads" jam.
         let mut desensitized_path: Option<PathBuf> = None;
-        if self.strip_metadata && transcoded_path.is_none() {
+        let strip_applicable = self.strip_metadata && transcoded_path.is_none();
+        let needs_strip = strip_applicable && video::metadata_needs_strip(video_info.as_ref());
+        if needs_strip {
             self.update_state(task, UploadState::Desensitizing).await;
             match desensitize::strip_metadata(path, &task.mime_type).await {
                 Some(Ok(result)) => {
@@ -1451,6 +1460,11 @@ impl UploadEngine {
                 }
                 None => {}
             }
+        } else if strip_applicable {
+            tracing::info!(
+                "desensitize: skipped for {} — probe found no location/device/timestamp/telemetry metadata to strip",
+                task.filename
+            );
         }
 
         let upload_path = transcoded_path

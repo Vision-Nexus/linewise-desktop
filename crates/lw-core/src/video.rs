@@ -143,6 +143,59 @@ pub fn transcode_would_help(info: &VideoInfo, cfg: &TranscodeConfig) -> bool {
     resolution_exceeds || fps_exceeds || bitrate_exceeds
 }
 
+/// Would `desensitize::strip_video_metadata` actually remove anything from
+/// this clip? Lets the upload pipeline SKIP the full-size stream-copy remux
+/// (and the `%TEMP%` copy + upload slot it would hold) for clips that carry
+/// nothing the strip targets — e.g. footage already re-encoded upstream
+/// whose only container tags are benign muxer boilerplate.
+///
+/// "Needs strip" mirrors exactly what the strip removes:
+///   * a telemetry / data track (GoPro GPMF, DJI CAM metadata) — the strip
+///     drops every non-A/V stream;
+///   * a location / GPS tag, a device make/model (incl. an action-cam name
+///     embedded in the `encoder` string), or a capture-time tag — all carried
+///     in the global metadata dictionary the strip clears.
+///
+/// It deliberately treats benign muxer/container tags (`encoder=Lavf…`,
+/// `major_brand`, `handler_name`, `language`) as NOT sensitive: the strip
+/// exists for location/device/timestamp privacy, not to delete the muxer
+/// signature, so deleting only that would be pure cost.
+///
+/// Fail-closed: a `None` info (the probe returned nothing, or a non-video row
+/// such as an image that has no `VideoInfo`) returns `true`, so the caller
+/// still desensitizes. We never skip on uncertainty.
+pub fn metadata_needs_strip(info: Option<&VideoInfo>) -> bool {
+    let Some(info) = info else {
+        return true;
+    };
+
+    // A non-A/V telemetry track (GPMF / DJI CAM metadata) is dropped wholesale
+    // by the strip, so its presence alone means there IS something to remove.
+    if info.telemetry.is_some() {
+        return true;
+    }
+
+    // A location / GPS tag is the highest-value field; the global-dict clear
+    // removes it. Match the namespaced QuickTime/ISO6709 variants too.
+    let has_location = info.metadata.iter().any(|(key, _)| {
+        let key = key.to_ascii_lowercase();
+        key.contains("location") || key.contains("gps") || key.contains("geo")
+    });
+    if has_location {
+        return true;
+    }
+
+    // Device identity (make / model, including an action-cam name in the
+    // `encoder` string) or capture time. Reuse the same classifier the
+    // device-info popover uses, so the skip decision matches what the UI
+    // would show — a benign muxer encoder like "Lavf61.7.100" yields empty
+    // Make / Model / Recorded and does not trip this; only `Software` would
+    // be populated, and we intentionally do not treat `Software` as sensitive.
+    device_info_rows(info, device_encoder_signatures())
+        .iter()
+        .any(|(label, value)| matches!(*label, "Make" | "Model" | "Recorded") && !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +363,86 @@ mod tests {
             .clone();
         assert!(make.is_empty(), "expected empty Make, got {make:?}");
         assert!(model.is_empty(), "expected empty Model, got {model:?}");
+    }
+
+    #[test]
+    fn needs_strip_none_is_fail_closed() {
+        // Probe returned nothing / non-video row → never skip on uncertainty.
+        assert!(metadata_needs_strip(None));
+    }
+
+    #[test]
+    fn needs_strip_false_for_reencoded_clip() {
+        // The exact benign tag set an upstream FFmpeg re-encode (`*_comp.mp4`)
+        // leaves behind: muxer/container boilerplate only, no location/device/
+        // timestamp, no telemetry. Must NOT force a remux.
+        let mut info = full_info(1280, 720, 30.0, 8_619);
+        for (k, v) in [
+            ("major_brand", "isom"),
+            ("minor_version", "512"),
+            ("compatible_brands", "isomiso2avc1mp41"),
+            ("encoder", "Lavf61.7.100"),
+            ("video/handler_name", "VideoHandler"),
+            ("video/language", "und"),
+            ("video/encoder", "Lavc61.19.100 libx264"),
+        ] {
+            info.metadata.push((k.into(), v.into()));
+        }
+        assert!(
+            !metadata_needs_strip(Some(&info)),
+            "benign muxer tags must not force a strip"
+        );
+    }
+
+    #[test]
+    fn needs_strip_empty_metadata_is_false() {
+        // No tags at all, no telemetry → nothing to strip.
+        let info = full_info(1280, 720, 30.0, 8_000);
+        assert!(!metadata_needs_strip(Some(&info)));
+    }
+
+    #[test]
+    fn needs_strip_true_for_gps_location() {
+        let mut info = full_info(1920, 1080, 30.0, 20_000);
+        info.metadata.push((
+            "com.apple.quicktime.location.ISO6709".into(),
+            "+37.33-122.03/".into(),
+        ));
+        assert!(metadata_needs_strip(Some(&info)));
+    }
+
+    #[test]
+    fn needs_strip_true_for_device_make_model() {
+        let mut info = full_info(1920, 1080, 30.0, 20_000);
+        info.metadata
+            .push(("com.apple.quicktime.make".into(), "Apple".into()));
+        info.metadata
+            .push(("com.apple.quicktime.model".into(), "iPhone 13 Pro".into()));
+        assert!(metadata_needs_strip(Some(&info)));
+    }
+
+    #[test]
+    fn needs_strip_true_for_actioncam_encoder() {
+        // Device name lives only in the encoder string (no make/model keys) —
+        // the GoPro / DJI case. device_info_rows splits it into Make/Model.
+        let mut info = full_info(2560, 1440, 30.0, 60_000);
+        info.metadata
+            .push(("encoder".into(), "GoPro HERO12".into()));
+        assert!(metadata_needs_strip(Some(&info)));
+    }
+
+    #[test]
+    fn needs_strip_true_for_creation_time() {
+        let mut info = full_info(1920, 1080, 30.0, 20_000);
+        info.metadata
+            .push(("creation_time".into(), "2026-06-01T10:00:00.000000Z".into()));
+        assert!(metadata_needs_strip(Some(&info)));
+    }
+
+    #[test]
+    fn needs_strip_true_for_telemetry_track() {
+        let mut info = full_info(2704, 1520, 60.0, 78_000);
+        info.telemetry = Some("GoPro telemetry (GPMF)".into());
+        assert!(metadata_needs_strip(Some(&info)));
     }
 }
