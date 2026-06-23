@@ -572,7 +572,6 @@ pub fn UploadTaskRow(
                             UploadState::Uploading
                             | UploadState::Validating
                             | UploadState::Transcoding
-                            | UploadState::Desensitizing
                             | UploadState::Creating
                             | UploadState::Verifying
                             | UploadState::Pending => rsx! {
@@ -723,7 +722,6 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
             format_size(total)
         ),
         UploadState::Validating => "Validating...".to_string(),
-        UploadState::Desensitizing => "Desensitizing...".to_string(),
         UploadState::Creating => "Creating...".to_string(),
         UploadState::Verifying => "Verifying...".to_string(),
         UploadState::Paused => "Paused".to_string(),

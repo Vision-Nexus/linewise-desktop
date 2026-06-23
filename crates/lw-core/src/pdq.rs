@@ -86,7 +86,7 @@ pub async fn compute_pdq_frames(path: &Path) -> Vec<PdqFrameWire> {
 /// timestamp. Per-frame failures are dropped via `filter_map`; the result is
 /// whatever subset hashed cleanly (possibly empty).
 fn compute_pdq_frames_blocking(path: &Path) -> Vec<PdqFrameWire> {
-    let ffmpeg = crate::desensitize::resolve_ffmpeg_binary();
+    let ffmpeg = crate::ffmpeg_util::resolve_ffmpeg_binary();
     PDQ_TIMES
         .iter()
         .filter_map(|&t| hash_frame_at(&ffmpeg, path, t))
@@ -119,7 +119,7 @@ fn hash_frame_at(ffmpeg: &OsStr, path: &Path, t: u32) -> Option<PdqFrameWire> {
 fn extract_frame_rgb24(ffmpeg: &OsStr, path: &Path, t: u32) -> Option<Vec<u8>> {
     let secs = t.to_string();
     let scale = format!("scale={PDQ_DIM}:{PDQ_DIM}");
-    let result = crate::desensitize::hidden_command(ffmpeg)
+    let result = crate::ffmpeg_util::hidden_command(ffmpeg)
         .args(["-v", "error", "-ss", secs.as_str()])
         .arg("-i")
         .arg(path)

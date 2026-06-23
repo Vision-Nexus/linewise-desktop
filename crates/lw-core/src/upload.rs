@@ -3,8 +3,8 @@ use crate::config::TranscodeConfig;
 use crate::container_kind::{self, ContainerKind};
 use crate::db::Database;
 use crate::dedup;
-use crate::desensitize;
 use crate::error::{DbError, UploadError, VideoValidationError};
+use crate::ffmpeg_util;
 use crate::models::{
     Acceptance, CreateDocumentMeta, CreateDocumentRequest, Digest, DigestCheckCandidate,
     NearDuplicateMatch, PdqFrameWire, Tenant, UploadState, UploadTask,
@@ -214,19 +214,17 @@ pub enum UploadEvent {
 /// Uploads themselves are bounded separately by `upload_semaphore`.
 const MAX_CONCURRENT_STAGING: usize = 4;
 
-/// RAII guard that deletes desensitize/transcode temp copies on EVERY exit of
+/// RAII guard that deletes the transcode temp copy on EVERY exit of
 /// `process_task` — success, an `Err` propagated via `?`, or a panic/cancel —
 /// not only the success tail (`finalize_after_upload`). Before this, any failure
-/// between Stage 3 and finalize leaked a full-size `clean_<filename>` copy that
-/// accumulated until the disk filled (SQLite "(code 13) database or disk is
-/// full"). Deleting on a resumable `Err` is safe: the temp copies are never
-/// persisted across runs — a retried/resumed task rebuilds them from the
-/// unchanged source (desensitize re-runs on every entry; transcode resumes from
-/// its own HLS scratch dir, which this guard deliberately does NOT track).
+/// between transcode and finalize leaked a full-size copy that accumulated until
+/// the disk filled (SQLite "(code 13) database or disk is full"). Deleting on a
+/// resumable `Err` is safe: the temp copy is never persisted across runs — a
+/// retried/resumed task rebuilds it from the unchanged source (transcode resumes
+/// from its own HLS scratch dir, which this guard deliberately does NOT track).
 /// `Drop` only removes a path that still exists, so on the success path — where
-/// `finalize_after_upload` already cleaned the copies — it is a silent no-op
-/// (no double-delete warning). A hard kill can't run `Drop`;
-/// `desensitize::sweep_orphaned_temp` at startup reclaims those orphans.
+/// `finalize_after_upload` already cleaned the copy — it is a silent no-op (no
+/// double-delete warning).
 #[derive(Default)]
 struct TempCleanupGuard {
     paths: Vec<PathBuf>,
@@ -245,7 +243,7 @@ impl Drop for TempCleanupGuard {
     fn drop(&mut self) {
         for path in &self.paths {
             if path.exists() {
-                desensitize::cleanup_temp_file(path);
+                ffmpeg_util::cleanup_temp_file(path);
             }
         }
     }
@@ -261,7 +259,6 @@ pub struct UploadEngine {
     /// upload task reads this exactly once, after the upload has already
     /// completed, so ordering against other work is irrelevant.
     auto_clean: AtomicBool,
-    strip_metadata: bool,
     transcode_config: TranscodeConfig,
     chunk_size: u64,
     upload_semaphore: Arc<Semaphore>,
@@ -298,7 +295,6 @@ impl UploadEngine {
         storage: Arc<StorageBackend>,
         event_tx: mpsc::UnboundedSender<UploadEvent>,
         auto_clean: bool,
-        strip_metadata: bool,
         transcode_config: TranscodeConfig,
         chunk_size_mb: u32,
         max_concurrent: u32,
@@ -309,7 +305,6 @@ impl UploadEngine {
             storage,
             event_tx,
             auto_clean: AtomicBool::new(auto_clean),
-            strip_metadata,
             transcode_config,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
@@ -774,7 +769,6 @@ impl UploadEngine {
             | UploadState::Pending
             | UploadState::Validating
             | UploadState::Transcoding
-            | UploadState::Desensitizing
             | UploadState::Creating
             | UploadState::Uploading
             | UploadState::Verifying
@@ -1422,55 +1416,17 @@ impl UploadEngine {
             None
         };
 
-        // Temp copies produced below (the transcoded mp4 and/or the desensitized
-        // clean_<file>) are deleted on EVERY exit of this function by this guard
-        // — not just the success tail — so a failure / cancel / panic can never
-        // leak a full-size copy into %TEMP% and accumulate toward a full disk.
+        // The transcoded mp4 produced below is deleted on EVERY exit of this
+        // function by this guard — not just the success tail — so a failure /
+        // cancel / panic can never leak a full-size copy into %TEMP% and
+        // accumulate toward a full disk.
         let mut temp_guard = TempCleanupGuard::default();
 
         // Stage 2.5: Transcoding (user opt-in, video files only)
         let transcoded_path = self.maybe_transcode(task, path, &video_info).await?;
         temp_guard.track(transcoded_path.as_deref());
 
-        // Stage 3: Data desensitization. Skipped when (a) we already
-        // transcoded (transcode output is metadata-clean), or (b) the
-        // quality-check probe shows nothing the strip would actually remove —
-        // no location/device/timestamp tag and no telemetry track (see
-        // `video::metadata_needs_strip`). (b) spares clips that are already
-        // metadata-clean (e.g. re-encoded upstream) the read-4GB +
-        // write-4GB-temp + hold-an-upload-slot cost that otherwise gates every
-        // upload — the root of the "selected N files, nothing uploads" jam.
-        let mut desensitized_path: Option<PathBuf> = None;
-        let strip_applicable = self.strip_metadata && transcoded_path.is_none();
-        let needs_strip = strip_applicable && video::metadata_needs_strip(video_info.as_ref());
-        if needs_strip {
-            self.update_state(task, UploadState::Desensitizing).await;
-            match desensitize::strip_metadata(path, &task.mime_type).await {
-                Some(Ok(result)) => {
-                    tracing::info!(
-                        "Metadata stripped from {}: output at {}",
-                        task.filename,
-                        result.output_path.display()
-                    );
-                    desensitized_path = Some(result.output_path);
-                    temp_guard.track(desensitized_path.as_deref());
-                }
-                Some(Err(e)) => {
-                    tracing::warn!("Desensitization failed for {}: {e}", task.filename);
-                }
-                None => {}
-            }
-        } else if strip_applicable {
-            tracing::info!(
-                "desensitize: skipped for {} — probe found no location/device/timestamp/telemetry metadata to strip",
-                task.filename
-            );
-        }
-
-        let upload_path = transcoded_path
-            .as_deref()
-            .or(desensitized_path.as_deref())
-            .unwrap_or(path);
+        let upload_path = transcoded_path.as_deref().unwrap_or(path);
         let upload_size = tokio::fs::metadata(upload_path).await?.len();
 
         // Sanity check: if this task carries a recorded `transcoded_size`
@@ -1632,7 +1588,6 @@ impl UploadEngine {
                         upload_path,
                         upload_size,
                         &hash,
-                        &desensitized_path,
                         &transcoded_path,
                     )
                     .await;
@@ -1667,7 +1622,6 @@ impl UploadEngine {
                         upload_path,
                         upload_size,
                         &hash,
-                        &desensitized_path,
                         &transcoded_path,
                     )
                     .await;
@@ -1712,7 +1666,6 @@ impl UploadEngine {
                             upload_path,
                             upload_size,
                             &hash,
-                            &desensitized_path,
                             &transcoded_path,
                         )
                         .await;
@@ -1742,7 +1695,6 @@ impl UploadEngine {
             upload_path,
             upload_size,
             &hash,
-            &desensitized_path,
             &transcoded_path,
         )
         .await
@@ -1756,7 +1708,6 @@ impl UploadEngine {
         upload_path: &std::path::Path,
         upload_size: u64,
         hash: &str,
-        desensitized_path: &Option<PathBuf>,
         transcoded_path: &Option<PathBuf>,
     ) -> Result<(), UploadError> {
         self.update_state(task, UploadState::Uploading).await;
@@ -1804,7 +1755,7 @@ impl UploadEngine {
         task.bytes_uploaded = confirmed;
         let _ = self.db.update_upload_progress(&task.id, confirmed).await;
 
-        self.finalize_after_upload(task, hash, desensitized_path, transcoded_path)
+        self.finalize_after_upload(task, hash, transcoded_path)
             .await
     }
 
@@ -1817,7 +1768,6 @@ impl UploadEngine {
         &self,
         task: &mut UploadTask,
         hash: &str,
-        desensitized_path: &Option<PathBuf>,
         transcoded_path: &Option<PathBuf>,
     ) -> Result<(), UploadError> {
         let doc_id = task.document_id.clone().unwrap_or_default();
@@ -1847,12 +1797,9 @@ impl UploadEngine {
             )
             .await;
 
-        // Clean up temp files
-        if let Some(dp) = desensitized_path {
-            desensitize::cleanup_temp_file(dp);
-        }
+        // Clean up the transcode temp file
         if let Some(tp) = transcoded_path {
-            desensitize::cleanup_temp_file(tp);
+            ffmpeg_util::cleanup_temp_file(tp);
         }
 
         // Auto-clean original file
@@ -1886,7 +1833,6 @@ impl UploadEngine {
         upload_path: &std::path::Path,
         upload_size: u64,
         hash: &str,
-        desensitized_path: &Option<PathBuf>,
         transcoded_path: &Option<PathBuf>,
     ) -> Result<(), UploadError> {
         self.update_state(task, UploadState::Uploading).await;
@@ -1953,7 +1899,7 @@ impl UploadEngine {
         task.bytes_uploaded = upload_size;
         let _ = self.db.update_upload_progress(&task.id, upload_size).await;
 
-        self.finalize_after_upload(task, hash, desensitized_path, transcoded_path)
+        self.finalize_after_upload(task, hash, transcoded_path)
             .await
     }
 
@@ -1972,7 +1918,6 @@ impl UploadEngine {
         upload_path: &std::path::Path,
         upload_size: u64,
         hash: &str,
-        desensitized_path: &Option<PathBuf>,
         transcoded_path: &Option<PathBuf>,
     ) -> Result<(), UploadError> {
         self.update_state(task, UploadState::Uploading).await;
@@ -2065,7 +2010,7 @@ impl UploadEngine {
         task.bytes_uploaded = upload_size;
         let _ = self.db.update_upload_progress(&task.id, upload_size).await;
 
-        self.finalize_after_upload(task, hash, desensitized_path, transcoded_path)
+        self.finalize_after_upload(task, hash, transcoded_path)
             .await
     }
 
