@@ -70,6 +70,10 @@ pub enum UploadError {
     },
     #[error("Video is unplayable: {reason}")]
     VideoUnplayable { reason: String },
+    /// Embedding the user-entered capture metadata into the file (via ffmpeg)
+    /// failed before upload. Carries the ffmpeg error verbatim.
+    #[error("Failed to embed capture metadata: {message}")]
+    CaptureEmbed { message: String },
     /// The picked file's magic bytes don't match an ISO BMFF (mp4 / mov)
     /// container. The 2026-05-16 production-data sweep showed 99.98% of
     /// real customer uploads are ISO BMFF, so we reject the rest with a
@@ -177,6 +181,7 @@ impl UploadError {
             | UploadError::MpuResumeFailed { .. }
             | UploadError::Network(_)
             | UploadError::Io(_)
+            | UploadError::CaptureEmbed { .. }
             | UploadError::Database(_) => false,
         }
     }

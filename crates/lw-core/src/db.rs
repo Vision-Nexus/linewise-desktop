@@ -357,6 +357,26 @@ impl Database {
         Ok(())
     }
 
+    /// Null the four staging-time hash columns so the upload worker re-derives
+    /// the digest. Called after a Save-time capture embed rewrites the source
+    /// file in place: the staging hash was taken on the untagged bytes and no
+    /// longer matches what will be uploaded.
+    pub async fn clear_upload_hashes(&self, id: &str) -> Result<(), DbError> {
+        // Non-macro query: avoids adding a new entry to the offline `.sqlx` cache
+        // (no sqlx-cli in this environment). Static SQL + one bind, so the lost
+        // compile-time check is immaterial.
+        sqlx::query(
+            "UPDATE upload_queue
+             SET hash = NULL, source_md5 = NULL, source_crc32c = NULL,
+                 source_sha256_head_256kib = NULL, updated_at = datetime('now')
+             WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Settle the staging-time quality-check worker in one UPDATE:
     /// state + video_info + warnings + cleared error message. Used at
     /// the `QualityChecking → Hashing` transition so the popover-data

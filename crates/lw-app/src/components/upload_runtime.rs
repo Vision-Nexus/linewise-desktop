@@ -17,9 +17,9 @@
 //!    entry. Re-running `reset_stale_uploads` on a navigation would flip live
 //!    in-flight rows to FAILED.
 //!
-//! The three progress maps live in [`AppState`] (not here), so the transfer
-//! view can read them without owning the pump. This component is the only
-//! writer of those maps.
+//! The progress maps (transcode / upload / hash / capture-embed) live in
+//! [`AppState`] (not here), so the transfer view can read them without owning
+//! the pump. This component is the only writer of those maps.
 
 use crate::components::transfer_panel::ALREADY_EXISTS_MARKER;
 use crate::state::{AppState, CoreServices};
@@ -277,6 +277,22 @@ fn handle_upload_event(
             hash_progress
                 .write()
                 .insert(task_id, (bytes_hashed, total_bytes));
+        }
+        UploadEvent::CaptureEmbedProgress {
+            task_id,
+            bytes,
+            total,
+        } => {
+            // Drop the bar on completion (final tick sends bytes == total) or when
+            // the size is unknown; otherwise show the determinate rewrite progress.
+            if total == 0 || bytes >= total {
+                app_state.embed_progress.write().remove(&task_id);
+            } else {
+                app_state
+                    .embed_progress
+                    .write()
+                    .insert(task_id, (bytes, total));
+            }
         }
         UploadEvent::ValidationWarnings {
             task_id,
