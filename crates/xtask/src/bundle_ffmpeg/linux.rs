@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::bundle_ffmpeg::{
-    OPTIONAL_LIBS, REQUIRED_LIBS, SharedLibKind, copy_license_bundle, find_major_versioned,
+    OPTIONAL_LIBS, REQUIRED_LIBS, SharedLibKind, copy_exiftool_unix, copy_license_bundle,
+    exiftool_dist, find_major_versioned,
 };
 use crate::cmd::{capture, ensure_dir, run, which};
 
@@ -65,6 +66,18 @@ pub fn bundle(root: &Path, target: &str) -> Result<()> {
     set_executable(&ffmpeg_cli_dst)?;
     eprintln!("  Copied ffmpeg binary");
 
+    // ffprobe — capture-metadata read-back. Links the same av* libs as ffmpeg
+    // (Stage 2 bundles them); its own dep walk runs below alongside ffmpeg's.
+    let ffprobe_cli_src = which_path("ffprobe")?;
+    let ffprobe_cli_dst = lib_dir.join("ffprobe");
+    std::fs::copy(&ffprobe_cli_src, &ffprobe_cli_dst)?;
+    set_executable(&ffprobe_cli_dst)?;
+    eprintln!("  Copied ffprobe binary");
+
+    // ExifTool (Perl script + lib/) — runs on system perl via the script shebang.
+    let exiftool_dist = exiftool_dist()?;
+    copy_exiftool_unix(&exiftool_dist, &lib_dir)?;
+
     // Stage 2 — locate the host's FFmpeg lib directory, then bundle the
     // av* shared libraries plus everything they pull in transitively.
     // On Debian/Ubuntu, ldconfig points us at /usr/lib/x86_64-linux-gnu
@@ -97,6 +110,7 @@ pub fn bundle(root: &Path, target: &str) -> Result<()> {
     // bundled, but the CLI may pull in extra encoder libs (libfdk_aac,
     // libx265) that the av* libs themselves don't link against.
     walk_and_bundle_deps(&ffmpeg_cli_dst, &lib_dir, &mut bundled)?;
+    walk_and_bundle_deps(&ffprobe_cli_dst, &lib_dir, &mut bundled)?;
 
     // Stage 3 — patchelf RPATHs. The main binary lives at
     // /usr/bin/linewise-desktop; the libs are at /usr/lib/linewise-desktop/.
@@ -126,6 +140,15 @@ pub fn bundle(root: &Path, target: &str) -> Result<()> {
         ],
     )?;
     eprintln!("  Patched RPATH on bundled ffmpeg");
+    run(
+        "patchelf",
+        [
+            "--set-rpath".as_ref(),
+            "$ORIGIN".as_ref(),
+            ffprobe_cli_dst.as_os_str(),
+        ],
+    )?;
+    eprintln!("  Patched RPATH on bundled ffprobe");
 
     // Bundled libs also need $ORIGIN so they can find each other and
     // their transitive deps inside lib_dir. ldd against the bundled

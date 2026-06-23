@@ -1,5 +1,6 @@
 pub mod api_client;
 pub mod auth;
+pub mod capture;
 pub mod config;
 pub mod container_kind;
 pub mod db;

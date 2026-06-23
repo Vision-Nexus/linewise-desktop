@@ -8,7 +8,7 @@
 //! byte/duration formatters.
 
 use crate::components::progress::{Progress, ProgressIndicator};
-use crate::state::AppState;
+use crate::state::{AppState, CoreServices};
 use crate::styles;
 use dioxus::prelude::*;
 use lw_core::config::TranscodeConfig;
@@ -16,6 +16,36 @@ use lw_core::models::{UploadState, UploadTask};
 use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
 use std::collections::HashMap;
+
+/// Compact one-line summary of the capture metadata set for a clip, for the
+/// inline "✓ set" row. Only present fields appear, joined by " · ".
+fn capture_summary(m: &lw_core::capture::CaptureMetadata) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for v in [&m.country, &m.city, &m.site, &m.station]
+        .into_iter()
+        .flatten()
+    {
+        parts.push(v.clone());
+    }
+    if let Some(o) = &m.operator {
+        parts.push(format!("op {o}"));
+    }
+    let device = [m.make.as_deref(), m.model.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !device.is_empty() {
+        parts.push(device);
+    }
+    if let Some(fov) = m.fov {
+        parts.push(format!("{fov}\u{00B0}"));
+    }
+    if let Some(a) = &m.action {
+        parts.push(a.clone());
+    }
+    parts.join(" \u{00B7} ")
+}
 
 #[component]
 pub fn SectionHeader(title: String, count: usize) -> Element {
@@ -322,10 +352,21 @@ pub fn StagedRow(
     /// Even when present, the button only renders for users whose
     /// `system_roles` contain `admin` (see `UserInfo::is_super_admin`).
     on_force_upload: Option<EventHandler<String>>,
+    /// Open the per-file capture-metadata sheet for this clip. Capture is offered
+    /// on a `Staged` clip until it is filled OR skipped.
+    on_fill_metadata: EventHandler<String>,
+    /// Skip capture metadata for this clip: it resolves the metadata gate without
+    /// values, and the clip auto-advances to upload (unless transcode-held).
+    on_skip_metadata: EventHandler<String>,
+    /// Save-time capture-embed progress `(bytes, total)` per task; present only
+    /// while this clip's metadata is being written into its file.
+    embed_progress: Signal<HashMap<String, (u64, u64)>>,
 ) -> Element {
     let task_id = task.id.clone();
     let force_id = task.id.clone();
     let transcode_id = task.id.clone();
+    let fill_id = task.id.clone();
+    let skip_id = task.id.clone();
     let is_video = task.mime_type.starts_with("video/");
     let is_super_admin = use_context::<AppState>()
         .user_info
@@ -358,6 +399,23 @@ pub fn StagedRow(
     // quality check returns, instead of waiting for the row to land
     // in `Staged`.
     let video_details = build_video_details(&task, device_encoder_signatures);
+
+    // Required-metadata gate: a `Staged` clip whose capture metadata is neither
+    // filled NOR skipped holds here until the user resolves it (fill or Skip).
+    // Rejected rows never upload, so the prompt is suppressed for them. When
+    // filled, the recorded values are shown inline; when skipped, a muted "skipped"
+    // note shows instead. Reading `capture_rev` subscribes the row to fill/skip/
+    // batch changes so it re-renders immediately (the engine's capture maps are not
+    // reactive).
+    let _capture_rev: u64 = *use_context::<AppState>().capture_rev.read();
+    let engine = use_context::<CoreServices>().upload_engine.clone();
+    let capture = engine.capture_metadata_for(&task.id);
+    let skipped = engine.is_capture_skipped(&task.id);
+    // Save-time embed in progress for this clip → show a determinate bar and
+    // suppress the fill prompt/button until the rewrite finishes.
+    let embedding = embed_progress.read().get(&task.id).copied();
+    let needs_metadata =
+        task.state == UploadState::Staged && capture.is_none() && !skipped && embedding.is_none();
 
     let btn_style = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
     let transcode_btn_style = if transcode_on {
@@ -418,6 +476,61 @@ pub fn StagedRow(
                 VideoInfoPopover { details }
             }
 
+            // Capture metadata, when set AND not mid-write: a green confirmation
+            // line showing the recorded values, so the user can see at a glance
+            // which clips are filled and with what. Suppressed while embedding (the
+            // bar below takes over) and absent entirely when nothing is set (the
+            // "Needs metadata" warning shows instead).
+            if let Some(m) = capture.as_ref().filter(|_| embedding.is_none()) {
+                div {
+                    style: "font-size: 11px; color: var(--success, #16a34a); margin-top: 4px; padding: 3px 6px; background: var(--success-bg, rgba(22,163,74,0.1)); border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                    title: "Capture metadata written into this clip's file.",
+                    "\u{2713} {capture_summary(m)}"
+                }
+            }
+
+            // Skipped: the user opted out of capture metadata for this clip. Shown
+            // in a muted style (no values) so it reads as a resolved-but-empty state
+            // distinct from the green "filled" line. "Add metadata" stays available.
+            if skipped && capture.is_none() && embedding.is_none() {
+                div {
+                    style: "font-size: 11px; color: var(--text-muted); margin-top: 4px; padding: 3px 6px; background: var(--bg-secondary, rgba(0,0,0,0.04)); border-radius: 3px;",
+                    title: "Capture metadata was skipped for this clip — it uploads without io.visionlab tags.",
+                    "Capture metadata skipped"
+                }
+            }
+
+            // Save-time embed in progress. A determinate bar (driven by the
+            // exiftool rewrite-temp size) ONCE we have a byte count; until then —
+            // or if the rewrite-temp can't be located — an honest "Writing
+            // metadata…" line rather than a bar stuck at 0%.
+            if let Some((bytes, total)) = embedding {
+                div { style: "margin-top: 6px;",
+                    if bytes > 0 {
+                        Progress {
+                            value: (bytes as f64 / total.max(1) as f64 * 100.0).min(100.0),
+                            max: 100.0,
+                            "aria-label": "Embedding metadata",
+                            ProgressIndicator {}
+                        }
+                        div {
+                            style: "font-size: 11px; margin-top: 2px; color: var(--text-muted);",
+                            {format!(
+                                "Writing metadata — {} / {} ({:.0}%)",
+                                format_size(bytes),
+                                format_size(total),
+                                (bytes as f64 / total.max(1) as f64 * 100.0).min(100.0),
+                            )}
+                        }
+                    } else {
+                        div {
+                            style: "font-size: 11px; color: var(--text-muted);",
+                            "Writing metadata\u{2026}"
+                        }
+                    }
+                }
+            }
+
             // Reject reasons render first so they read as the headline
             // for a rejected row; advisory warnings follow underneath in
             // the warn palette.
@@ -437,6 +550,34 @@ pub fn StagedRow(
             // Action buttons
             div {
                 style: "display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 8px;",
+                if needs_metadata {
+                    span {
+                        style: "margin-right: auto; font-size: 11px; color: var(--warning); padding: 2px 6px; border-radius: 3px; background: var(--warning-bg); border: 1px solid var(--warning);",
+                        title: "Capture metadata is required before this clip uploads.",
+                        "\u{26A0} Needs metadata"
+                    }
+                }
+                if !is_rejected && embedding.is_none() {
+                    button {
+                        style: if needs_metadata {
+                            format!("{btn_style} background: var(--btn-primary); color: white; border-color: var(--btn-primary);")
+                        } else {
+                            format!("{btn_style} background: transparent; color: var(--text-secondary);")
+                        },
+                        onclick: move |_| on_fill_metadata.call(fill_id.clone()),
+                        if needs_metadata { "Add metadata" } else { "Edit metadata" }
+                    }
+                }
+                // Skip: only offered while the clip is still unresolved. Resolving by
+                // skipping auto-advances the clip to upload (capture is optional).
+                if needs_metadata {
+                    button {
+                        style: format!("{btn_style} background: transparent; color: var(--text-secondary);"),
+                        title: "Upload this clip without capture metadata.",
+                        onclick: move |_| on_skip_metadata.call(skip_id.clone()),
+                        "Skip"
+                    }
+                }
                 if show_already_ok_badge {
                     span {
                         style: "font-size: 11px; color: var(--text-secondary); padding: 2px 6px; border-radius: 3px; background: var(--bg-secondary); border: 1px solid var(--border);",

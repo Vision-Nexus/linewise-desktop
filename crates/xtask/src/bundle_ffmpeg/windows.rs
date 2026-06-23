@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-use crate::bundle_ffmpeg::copy_license_bundle;
+use crate::bundle_ffmpeg::{copy_dir_all, copy_license_bundle, exiftool_dist};
 use crate::cmd::ensure_dir;
 
 /// FFmpeg DLLs we need next to linewise-desktop.exe. The version
@@ -35,22 +35,51 @@ pub fn bundle(root: &Path, target: &str) -> Result<()> {
     eprintln!("Bundling FFmpeg from: {}", ffmpeg_dir.display());
 
     let bin_dir = ffmpeg_dir.join("bin");
-    let ffmpeg_exe = bin_dir.join("ffmpeg.exe");
-    if ffmpeg_exe.is_file() {
-        std::fs::copy(&ffmpeg_exe, release_dir.join("ffmpeg.exe"))?;
-        eprintln!("  Copied ffmpeg.exe");
-    } else {
-        eprintln!(
-            "  Warning: ffmpeg.exe not found at {}",
-            ffmpeg_exe.display()
-        );
+    for cli in ["ffmpeg.exe", "ffprobe.exe"] {
+        let src = bin_dir.join(cli);
+        if src.is_file() {
+            std::fs::copy(&src, release_dir.join(cli))?;
+            eprintln!("  Copied {cli}");
+        } else {
+            eprintln!("  Warning: {cli} not found at {}", src.display());
+        }
     }
 
     ensure_dir(&release_dir)?;
     copy_dlls(&bin_dir, &release_dir, REQUIRED_DLL_PREFIXES, true)?;
     copy_dlls(&bin_dir, &release_dir, OPTIONAL_DLL_PREFIXES, false)?;
 
-    eprintln!("Done bundling FFmpeg into {}", release_dir.display());
+    // ExifTool — the Windows STANDALONE build: `exiftool.exe` (the launcher,
+    // renamed from `exiftool(-k).exe`) PLUS its `exiftool_files/` folder, which
+    // holds the PAR-packed Perl interpreter + modules. Both must sit next to each
+    // other (no system Perl needed). EXIFTOOL_DIST is the directory holding them.
+    let exiftool_dist = exiftool_dist()?;
+    let exiftool_exe = exiftool_dist.join("exiftool.exe");
+    if !exiftool_exe.is_file() {
+        bail!(
+            "exiftool.exe not found under EXIFTOOL_DIST ({}) — Windows needs the \
+             standalone build (rename exiftool(-k).exe → exiftool.exe)",
+            exiftool_dist.display()
+        );
+    }
+    std::fs::copy(&exiftool_exe, release_dir.join("exiftool.exe"))
+        .with_context(|| format!("copy {}", exiftool_exe.display()))?;
+    eprintln!("  Copied exiftool.exe");
+
+    // The PAR cache folder ships next to the launcher in modern standalone
+    // builds. Older single-file builds don't have it — only copy when present.
+    let files_src = exiftool_dist.join("exiftool_files");
+    if files_src.is_dir() {
+        copy_dir_all(&files_src, &release_dir.join("exiftool_files"))?;
+        eprintln!("  Copied exiftool_files/");
+    } else {
+        eprintln!("  No exiftool_files/ (single-file standalone) — skipping");
+    }
+
+    eprintln!(
+        "Done bundling FFmpeg + ExifTool into {}",
+        release_dir.display()
+    );
     Ok(())
 }
 

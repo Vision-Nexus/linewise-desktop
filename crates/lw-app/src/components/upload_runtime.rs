@@ -17,9 +17,9 @@
 //!    entry. Re-running `reset_stale_uploads` on a navigation would flip live
 //!    in-flight rows to FAILED.
 //!
-//! The three progress maps live in [`AppState`] (not here), so the transfer
-//! view can read them without owning the pump. This component is the only
-//! writer of those maps.
+//! The progress maps (transcode / upload / hash / capture-embed) live in
+//! [`AppState`] (not here), so the transfer view can read them without owning
+//! the pump. This component is the only writer of those maps.
 
 use crate::components::transfer_panel::ALREADY_EXISTS_MARKER;
 use crate::state::{AppState, CoreServices};
@@ -77,6 +77,13 @@ pub fn UploadRuntime() -> Element {
                 }
                 Err(e) => tracing::warn!("Failed to load upload history: {e}"),
                 _ => {}
+            }
+            // Capture state is in-memory and lost on restart, but the tags live in
+            // the files. Read them back for staged clips so a previously-filled row
+            // shows "✓ filled" (and uploads) instead of falsely demanding metadata.
+            // Bump the UI revision so the recovered rows re-render.
+            if engine.recover_capture_for_staged().await {
+                app_state.capture_rev += 1;
             }
         }
     });
@@ -245,6 +252,12 @@ fn handle_upload_event(
             if state != UploadState::Hashing {
                 hash_progress.write().remove(&task_id);
             }
+            // A capture-embed bar only makes sense while a row is `Staged`; drop
+            // any lingering entry once it advances (or is rejected), so a missed
+            // completion tick can never leave a stuck bar on a moved row.
+            if state != UploadState::Staged {
+                app_state.embed_progress.write().remove(&task_id);
+            }
             update_task(app_state, &task_id, |t| t.state = state);
         }
         UploadEvent::Progress {
@@ -270,6 +283,22 @@ fn handle_upload_event(
             hash_progress
                 .write()
                 .insert(task_id, (bytes_hashed, total_bytes));
+        }
+        UploadEvent::CaptureEmbedProgress {
+            task_id,
+            bytes,
+            total,
+        } => {
+            // Drop the bar on completion (final tick sends bytes == total) or when
+            // the size is unknown; otherwise show the determinate rewrite progress.
+            if total == 0 || bytes >= total {
+                app_state.embed_progress.write().remove(&task_id);
+            } else {
+                app_state
+                    .embed_progress
+                    .write()
+                    .insert(task_id, (bytes, total));
+            }
         }
         UploadEvent::ValidationWarnings {
             task_id,

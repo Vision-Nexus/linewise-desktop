@@ -149,6 +149,10 @@ pub struct AppState {
     pub transcode_progress: Signal<HashMap<String, f32>>,
     pub upload_progress: Signal<HashMap<String, (u64, u64)>>,
     pub hash_progress: Signal<HashMap<String, (u64, u64)>>,
+    /// Per-task Save-time capture-embed progress `(bytes_written, total)`, driven
+    /// by `UploadEvent::CaptureEmbedProgress`. Present only while a clip's metadata
+    /// is being written into its file; the row shows a determinate bar.
+    pub embed_progress: Signal<HashMap<String, (u64, u64)>>,
     /// Per-task upload speed in bytes/second, derived UI-side by the resident
     /// `UploadRuntime` from successive `Progress` events (the engine carries no
     /// timestamp). EMA-smoothed; absent or `0.0` means "unknown" (no rate/ETA
@@ -187,6 +191,12 @@ pub struct AppState {
     /// status as unknown — both are non-blocking. `Some(Unsupported {..})`
     /// is the only state that gates rendering.
     pub version_status: Signal<Option<VersionStatus>>,
+    /// Bumped whenever per-file capture metadata changes on the upload engine
+    /// (fill / batch-apply). The engine's capture map is not reactive, so staged
+    /// rows read this signal to re-render their "✓ filled" / "Needs metadata"
+    /// state immediately after the user saves, instead of waiting for an
+    /// unrelated `upload_tasks` change.
+    pub capture_rev: Signal<u64>,
 }
 
 /// Lightweight toast notification. Only one toast lives at a time — a
@@ -251,6 +261,7 @@ impl AppState {
             transcode_progress: Signal::new(HashMap::new()),
             upload_progress: Signal::new(HashMap::new()),
             hash_progress: Signal::new(HashMap::new()),
+            embed_progress: Signal::new(HashMap::new()),
             upload_speed: Signal::new(HashMap::new()),
             projects: Signal::new(Vec::new()),
             tenant_projects: Signal::new(HashMap::new()),
@@ -264,6 +275,7 @@ impl AppState {
             config: Signal::new(AppConfig::default()),
             restart_token: Signal::new(0),
             version_status: Signal::new(None),
+            capture_rev: Signal::new(0),
         }
     }
 

@@ -16,6 +16,20 @@ pub struct WatchEvent {
 
 /// Spawns file watchers for all configured watch folders.
 /// Returns a receiver that emits WatchEvents when new files are detected.
+///
+/// NOT yet wired to staging (no caller). When wiring auto-import, the consumer
+/// MUST guard against re-staging the same file, because:
+///   1. The debouncer fires on `DebouncedEventKind::Any` — every modify, not just
+///      create. The Save-time capture embed rewrites the file IN PLACE
+///      (`capture::embed_in_place_blocking`), which is a modify event; and that
+///      rewrite changes the file's hash, so the byte-identical dedup won't suppress
+///      the re-add either.
+///   2. So the consumer should: (a) skip a path that already has an active
+///      (staged / in-progress) upload task, and (b) ignore events for files this
+///      app is mid-embedding (a short self-modification suppression window keyed by
+///      path). Without this, tagging a watched clip would re-queue it in a loop.
+/// (exiftool's own `<file>_exiftool_tmp` is filtered out by `matches_filter` since
+/// it has no video extension.)
 #[tracing::instrument(skip_all, fields(folder_count = folders.len()))]
 pub fn start_watching(
     folders: Vec<WatchFolderEntry>,
