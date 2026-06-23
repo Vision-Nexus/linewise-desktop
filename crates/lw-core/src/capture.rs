@@ -98,10 +98,26 @@ pub fn validate_fov(n: i32) -> Result<i32, String> {
 pub enum CaptureEmbedError {
     #[error("exiftool failed: {0}")]
     Exiftool(String),
+    /// The exiftool binary couldn't be found/launched. Distinct from a write
+    /// failure so the adaptive embed does NOT fall back to a local-copy retry
+    /// (the copy would hit the same missing binary) — it surfaces immediately.
+    #[error("exiftool binary not found")]
+    ExiftoolNotFound,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("invalid path: {0}")]
     InvalidPath(String),
+}
+
+/// Where the tagged bytes ended up.
+pub struct EmbedOutcome {
+    /// The file to upload (the tagged original, or a tagged local copy).
+    pub path: PathBuf,
+    /// True when `path` is a throwaway local copy the caller must clean up
+    /// (the in-place write to the source wasn't possible — read-only / full /
+    /// removable media). False when the source file itself was tagged in place
+    /// (never delete it).
+    pub is_temp_copy: bool,
 }
 
 /// Materialize the bundled UserDefined config to a stable temp path and return it.
@@ -114,34 +130,68 @@ fn config_path() -> Result<PathBuf, CaptureEmbedError> {
     Ok(path)
 }
 
-/// Embed `meta` into a **copy** of `input` (non-destructive) and return the
-/// tagged file path. The original is never modified; the tagged copy becomes the
-/// upload source.
+/// Embed `meta` into the file, adapting to the source medium:
 ///
-/// Uses ExifTool: copy → `exiftool -config <cfg> -overwrite_original
-/// -Make=… -VisionLabCountry=… … <copy>`. Blocking — call from `spawn_blocking`.
+/// 1. **In place** on `input` — one full-file rewrite (MP4 metadata always forces
+///    one; moov sits ahead of mdat), streams preserved byte-for-byte (no re-mux),
+///    via exiftool's tmp-then-atomic-rename. Leaves the source self-describing, so
+///    a re-add reads the tags back. Returns `is_temp_copy: false`.
+/// 2. **Fallback** when the in-place write fails (read-only or full removable
+///    media — USB / SD card): copy `input` to `scratch_dir` (a local volume) and
+///    tag the copy instead. The source is left untouched; the caller uploads the
+///    copy and must delete it. Returns `is_temp_copy: true`.
+///
+/// The uploaded file is tagged either way, so a later server-side backfill can
+/// re-extract the values from the GCS object regardless of which path ran.
+/// `ExiftoolNotFound` is NOT retried via the fallback (the copy would hit the
+/// same missing binary). Blocking (a multi-GB clip is a multi-second rewrite) —
+/// call from `spawn_blocking`.
 pub fn embed_capture_metadata_blocking(
     input: &Path,
     meta: &CaptureMetadata,
-) -> Result<PathBuf, CaptureEmbedError> {
-    let dir = std::env::temp_dir().join("linewise-capture");
-    std::fs::create_dir_all(&dir)?;
-    let filename = input
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "clip.mp4".to_string());
-    let output = dir.join(format!("vlmeta_{filename}"));
+    scratch_dir: &Path,
+) -> Result<EmbedOutcome, CaptureEmbedError> {
+    match write_tags_in_place(input, meta) {
+        Ok(()) => Ok(EmbedOutcome {
+            path: input.to_path_buf(),
+            is_temp_copy: false,
+        }),
+        // Missing binary: a local-copy retry would fail identically — surface now.
+        Err(CaptureEmbedError::ExiftoolNotFound) => Err(CaptureEmbedError::ExiftoolNotFound),
+        // Source not writable / out of space (USB, SD, read-only mount): tag a
+        // local copy instead and upload that.
+        Err(in_place_err) => {
+            tracing::warn!(
+                input = %input.display(),
+                "[capture] in-place embed failed ({in_place_err}); falling back to a local tagged copy"
+            );
+            std::fs::create_dir_all(scratch_dir)?;
+            let filename = input
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "clip.mp4".to_string());
+            let copy = scratch_dir.join(format!("vlmeta_{filename}"));
+            std::fs::copy(input, &copy)?;
+            write_tags_in_place(&copy, meta)?;
+            Ok(EmbedOutcome {
+                path: copy,
+                is_temp_copy: true,
+            })
+        }
+    }
+}
 
-    // Non-destructive: tag a copy, not the user's original.
-    std::fs::copy(input, &output)?;
-
+/// Run exiftool to write the capture tags into `target`, overwriting it in place
+/// (`-overwrite_original` = tmp-then-atomic-rename). Used both for the direct
+/// in-place attempt on the source and for tagging the fallback local copy.
+fn write_tags_in_place(target: &Path, meta: &CaptureMetadata) -> Result<(), CaptureEmbedError> {
     let cfg = config_path()?;
     let cfg_str = cfg
         .to_str()
         .ok_or_else(|| CaptureEmbedError::InvalidPath(cfg.display().to_string()))?;
-    let out_str = output
+    let target_str = target
         .to_str()
-        .ok_or_else(|| CaptureEmbedError::InvalidPath(output.display().to_string()))?;
+        .ok_or_else(|| CaptureEmbedError::InvalidPath(target.display().to_string()))?;
 
     // `-config` must be the first arg. ExifTool writes the registered VisionLab*
     // names into the io.visionlab.* Keys; Make/Model into the standard atoms.
@@ -170,7 +220,7 @@ pub fn embed_capture_metadata_blocking(
         push("VisionLabAction", meta.action.as_deref());
         push("VisionLabFov", fov_str.as_deref());
     }
-    args.push(out_str.into());
+    args.push(target_str.into());
 
     // One-shot exiftool invocation (NOT the persistent-process crate): `-config`
     // is a startup-only option and is silently ignored inside the crate's
@@ -181,13 +231,13 @@ pub fn embed_capture_metadata_blocking(
         .args(&args)
         .output();
     match result {
-        Ok(out) if out.status.success() => Ok(output),
+        Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(CaptureEmbedError::Exiftool(
             String::from_utf8_lossy(&out.stderr).to_string(),
         )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(CaptureEmbedError::Exiftool(
-            "exiftool binary not found".into(),
-        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(CaptureEmbedError::ExiftoolNotFound)
+        }
         Err(e) => Err(CaptureEmbedError::Io(e)),
     }
 }
@@ -296,7 +346,12 @@ mod tests {
             action: Some("Pressing piston rings".into()),
             ..Default::default()
         };
-        let tagged = embed_capture_metadata_blocking(&base, &meta).expect("embed");
+        let outcome = embed_capture_metadata_blocking(&base, &meta, &dir).expect("embed");
+        // Local temp file is writable, so the in-place path should run.
+        assert!(
+            !outcome.is_temp_copy,
+            "expected in-place tagging on local temp"
+        );
 
         let probe = std::process::Command::new("ffprobe")
             .args([
@@ -307,7 +362,7 @@ mod tests {
                 "-show_entries",
                 "format_tags",
             ])
-            .arg(&tagged)
+            .arg(&outcome.path)
             .output()
             .expect("ffprobe");
         let out = String::from_utf8_lossy(&probe.stdout);

@@ -1360,11 +1360,17 @@ impl UploadEngine {
         // the capture-tagged copy is tracked too.
         let mut temp_guard = TempCleanupGuard::default();
 
-        // Stage 0: Embed io.visionlab capture metadata (user-entered) into a tagged
-        // copy, which becomes the effective source for the rest of the pipeline.
-        // Embedding rewrites the file bytes, so we invalidate the staging-time
-        // hashes and let Stage 1 re-derive the digest from the TAGGED file — the
-        // digest of record (and `original_md5`) then matches the uploaded bytes.
+        // Stage 0: Embed io.visionlab capture metadata (user-entered). Prefer an
+        // IN-PLACE rewrite of the source (exiftool restructures the QuickTime atoms,
+        // streams preserved, no re-mux), so the source becomes self-describing and a
+        // re-add reads the tags back. If the source can't be written (read-only or
+        // full removable media — USB / SD), it falls back to tagging a local copy.
+        // Either way the upload source carries the tags, so a server-side backfill
+        // can re-extract them from the GCS object. Only a fallback COPY is tracked
+        // for temp cleanup — never the user's own (possibly in-place tagged) file.
+        // The rewrite changes the bytes, so we invalidate the staging-time hashes
+        // and let Stage 1 re-derive the digest from the tagged file (digest of
+        // record / `original_md5` then matches the uploaded bytes).
         let capture_meta = self
             .capture_metadata
             .lock()
@@ -1374,26 +1380,33 @@ impl UploadEngine {
         let source_buf = match capture_meta {
             Some(meta) if !meta.is_empty() => {
                 let input = original_buf.clone();
-                let tagged = tokio::task::spawn_blocking(move || {
-                    crate::capture::embed_capture_metadata_blocking(&input, &meta)
+                let scratch = std::env::temp_dir().join("linewise-capture");
+                let outcome = tokio::task::spawn_blocking(move || {
+                    crate::capture::embed_capture_metadata_blocking(&input, &meta, &scratch)
                 })
                 .await
                 .expect("capture embed task panicked")
                 .map_err(|e| UploadError::CaptureEmbed {
                     message: e.to_string(),
                 })?;
-                temp_guard.track(Some(&tagged));
-                // Force Stage 1 to rehash the tagged file.
+                if outcome.is_temp_copy {
+                    temp_guard.track(Some(&outcome.path));
+                }
+                // Force Stage 1 to rehash the now-tagged file.
                 task.hash = None;
                 task.source_md5 = None;
                 task.source_crc32c = None;
                 task.source_sha256_head_256kib = None;
                 tracing::info!(
-                    "[capture] embedded metadata for {} → {}",
+                    "[capture] embedded metadata for {} ({})",
                     task.filename,
-                    tagged.display()
+                    if outcome.is_temp_copy {
+                        "tagged local copy"
+                    } else {
+                        "in place"
+                    }
                 );
-                tagged
+                outcome.path
             }
             _ => original_buf.clone(),
         };
