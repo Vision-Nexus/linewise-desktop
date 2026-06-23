@@ -1,29 +1,48 @@
 //! Capture metadata (io.visionlab.* schema) embedding into the QuickTime `udta`
-//! tags of an MP4/MOV, so the backend's ffprobe extraction lifts it into
-//! `documents.metadata.capture`.
+//! tags of an MP4/MOV via **ExifTool**, so the backend's ffprobe extraction
+//! lifts it into `documents.metadata.capture`.
 //!
-//! The desktop **writes** the user-entered fields into the file; the backend is
-//! the single **reader/extractor**. Device `make`/`model` go into the standard
-//! atoms (`©mak`/`©mod`); the linewise-specific fields go under per-field
-//! `io.visionlab.*` keys. Writing uses the bundled ffmpeg CLI with
-//! `-movflags use_metadata_tags` — without that flag ffmpeg drops the
-//! non-standard keys.
+//! The desktop **writes** the user-entered fields; the backend is the single
+//! **reader/extractor**. Device `make`/`model` go into the standard atoms
+//! (`©mak`/`©mod`); the linewise-specific fields go under per-field
+//! `io.visionlab.*` keys in the QuickTime `Keys` atom, registered via an
+//! ExifTool `-config` UserDefined block. ExifTool writes them under
+//! `com.apple.quicktime.io.visionlab.*`; the backend extractor strips that
+//! prefix before matching — verified round-trip.
+//!
+//! ExifTool (not ffmpeg) is used deliberately: ffmpeg's `use_metadata_tags`
+//! handling of custom keys is unreliable; ExifTool writes them cleanly.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::desensitize::{hidden_command, resolve_ffmpeg_binary};
+use crate::desensitize::hidden_command;
 
 /// io.visionlab container schema version this client writes.
 pub const CAPTURE_SCHEMA_VERSION: i32 = 1;
 
-/// The single udta key namespace prefix the backend reads.
-const VL_PREFIX: &str = "io.visionlab.";
+/// ExifTool UserDefined config registering the `io.visionlab.*` keys under the
+/// QuickTime `Keys` table, so they can be written by their `VisionLab*` names.
+/// Materialized to a temp file and passed via `-config` (must be a startup arg).
+const VISIONLAB_CONFIG: &str = r#"%Image::ExifTool::UserDefined = (
+  'Image::ExifTool::QuickTime::Keys' => {
+    'io.visionlab.schema'   => { Name => 'VisionLabSchema' },
+    'io.visionlab.country'  => { Name => 'VisionLabCountry' },
+    'io.visionlab.city'     => { Name => 'VisionLabCity' },
+    'io.visionlab.site'     => { Name => 'VisionLabSite' },
+    'io.visionlab.station'  => { Name => 'VisionLabStation' },
+    'io.visionlab.operator' => { Name => 'VisionLabOperator' },
+    'io.visionlab.action'   => { Name => 'VisionLabAction' },
+    'io.visionlab.fov'      => { Name => 'VisionLabFov' },
+  },
+);
+1;
+"#;
 
 /// User-entered capture metadata. Held in memory only (not persisted to SQLite);
-/// embedded into the file at upload-confirm time. `None` fields are omitted from
-/// the file entirely (the backend distinguishes "absent" from "blank").
+/// embedded into the file before upload. `None` fields are omitted entirely (the
+/// backend distinguishes "absent" from "blank").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureMetadata {
     pub country: Option<String>,
@@ -74,94 +93,135 @@ pub fn validate_fov(n: i32) -> Result<i32, String> {
     }
 }
 
-/// Error embedding capture metadata via ffmpeg.
+/// Error embedding capture metadata via ExifTool.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureEmbedError {
-    #[error("ffmpeg failed: {0}")]
-    FfmpegFailed(String),
-    #[error("ffmpeg binary not available")]
-    FfmpegNotAvailable,
+    #[error("exiftool failed: {0}")]
+    Exiftool(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("invalid path: {0}")]
+    InvalidPath(String),
 }
 
-/// Embed `meta` into a copy of `input` and return the tagged file path.
+/// Materialize the bundled UserDefined config to a stable temp path and return it.
+fn config_path() -> Result<PathBuf, CaptureEmbedError> {
+    let dir = std::env::temp_dir().join("linewise-capture");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("visionlab.config");
+    // Rewrite each call — cheap, and self-heals if the temp file was cleared.
+    std::fs::write(&path, VISIONLAB_CONFIG)?;
+    Ok(path)
+}
+
+/// Embed `meta` into a **copy** of `input` (non-destructive) and return the
+/// tagged file path. The original is never modified; the tagged copy becomes the
+/// upload source.
 ///
-/// Stream-copy remux (no re-encode) writing make/model + `io.visionlab.*` with
-/// `-movflags use_metadata_tags`. The tagged copy becomes the upload source, so
-/// the caller must re-hash it before dedup / create-document (its bytes differ
-/// from the original). Blocking — call from `spawn_blocking`.
+/// Uses ExifTool: copy → `exiftool -config <cfg> -overwrite_original
+/// -Make=… -VisionLabCountry=… … <copy>`. Blocking — call from `spawn_blocking`.
 pub fn embed_capture_metadata_blocking(
     input: &Path,
     meta: &CaptureMetadata,
 ) -> Result<PathBuf, CaptureEmbedError> {
-    let temp_dir = std::env::temp_dir().join("linewise-capture");
-    std::fs::create_dir_all(&temp_dir)?;
+    let dir = std::env::temp_dir().join("linewise-capture");
+    std::fs::create_dir_all(&dir)?;
     let filename = input
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "clip.mp4".to_string());
-    let output = temp_dir.join(format!("vlmeta_{filename}"));
+    let output = dir.join(format!("vlmeta_{filename}"));
 
-    let mut cmd = hidden_command(resolve_ffmpeg_binary());
-    cmd.args(["-y", "-i"])
-        .arg(input)
-        // Preserve existing container metadata, then layer ours on top.
-        .args([
-            "-map_metadata",
-            "0",
-            "-c",
-            "copy",
-            "-movflags",
-            "use_metadata_tags",
-        ]);
+    // Non-destructive: tag a copy, not the user's original.
+    std::fs::copy(input, &output)?;
 
-    // Device → standard atoms (©mak/©mod).
-    push_meta(&mut cmd, "make", meta.make.as_deref());
-    push_meta(&mut cmd, "model", meta.model.as_deref());
-    // Schema + linewise payload → io.visionlab.* keys.
-    push_meta(
-        &mut cmd,
-        &vl("schema"),
-        Some(&CAPTURE_SCHEMA_VERSION.to_string()),
-    );
-    push_meta(&mut cmd, &vl("country"), meta.country.as_deref());
-    push_meta(&mut cmd, &vl("city"), meta.city.as_deref());
-    push_meta(&mut cmd, &vl("site"), meta.site.as_deref());
-    push_meta(&mut cmd, &vl("station"), meta.station.as_deref());
-    push_meta(&mut cmd, &vl("operator"), meta.operator.as_deref());
-    push_meta(&mut cmd, &vl("action"), meta.action.as_deref());
-    push_meta(
-        &mut cmd,
-        &vl("fov"),
-        meta.fov.map(|n| n.to_string()).as_deref(),
-    );
+    let cfg = config_path()?;
+    let cfg_str = cfg
+        .to_str()
+        .ok_or_else(|| CaptureEmbedError::InvalidPath(cfg.display().to_string()))?;
+    let out_str = output
+        .to_str()
+        .ok_or_else(|| CaptureEmbedError::InvalidPath(output.display().to_string()))?;
 
-    cmd.arg(&output);
+    // `-config` must be the first arg. ExifTool writes the registered VisionLab*
+    // names into the io.visionlab.* Keys; Make/Model into the standard atoms.
+    let mut args: Vec<String> = vec![
+        "-config".into(),
+        cfg_str.into(),
+        "-overwrite_original".into(),
+        format!("-VisionLabSchema={CAPTURE_SCHEMA_VERSION}"),
+    ];
+    let fov_str = meta.fov.map(|n| n.to_string());
+    {
+        let mut push = |flag: &str, value: Option<&str>| {
+            if let Some(v) = value
+                && !v.trim().is_empty()
+            {
+                args.push(format!("-{flag}={v}"));
+            }
+        };
+        push("Make", meta.make.as_deref());
+        push("Model", meta.model.as_deref());
+        push("VisionLabCountry", meta.country.as_deref());
+        push("VisionLabCity", meta.city.as_deref());
+        push("VisionLabSite", meta.site.as_deref());
+        push("VisionLabStation", meta.station.as_deref());
+        push("VisionLabOperator", meta.operator.as_deref());
+        push("VisionLabAction", meta.action.as_deref());
+        push("VisionLabFov", fov_str.as_deref());
+    }
+    args.push(out_str.into());
 
-    match cmd.output() {
+    // One-shot exiftool invocation (NOT the persistent-process crate): `-config`
+    // is a startup-only option and is silently ignored inside the crate's
+    // `-stay_open` session, so the custom io.visionlab.* keys never get written.
+    // A plain one-shot honours `-config` (verified). `hidden_command` suppresses
+    // the console window on Windows, mirroring the ffmpeg image-strip path.
+    let result = hidden_command(resolve_exiftool_binary())
+        .args(&args)
+        .output();
+    match result {
         Ok(out) if out.status.success() => Ok(output),
-        Ok(out) => Err(CaptureEmbedError::FfmpegFailed(
+        Ok(out) => Err(CaptureEmbedError::Exiftool(
             String::from_utf8_lossy(&out.stderr).to_string(),
         )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(CaptureEmbedError::FfmpegNotAvailable)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(CaptureEmbedError::Exiftool(
+            "exiftool binary not found".into(),
+        )),
         Err(e) => Err(CaptureEmbedError::Io(e)),
     }
 }
 
-fn vl(field: &str) -> String {
-    format!("{VL_PREFIX}{field}")
-}
-
-/// Push `-metadata key=value` only when value is present and non-blank.
-fn push_meta(cmd: &mut std::process::Command, key: &str, value: Option<&str>) {
-    if let Some(v) = value
-        && !v.trim().is_empty()
-    {
-        cmd.arg("-metadata").arg(format!("{key}={v}"));
+/// Resolve the exiftool binary, preferring a bundled copy over system PATH.
+/// (Bundling is wired in xtask; until then this falls back to PATH `exiftool`.)
+fn resolve_exiftool_binary() -> std::ffi::OsString {
+    use std::ffi::OsString;
+    if let Ok(exe) = std::env::current_exe() {
+        #[cfg(target_os = "macos")]
+        if let Some(parent) = exe.parent().and_then(|p| p.parent()) {
+            let c = parent.join("Resources").join("exiftool");
+            if c.exists() {
+                return c.into_os_string();
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(dir) = exe.parent() {
+            let c = dir.join("exiftool.exe");
+            if c.exists() {
+                return c.into_os_string();
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(dir) = exe.parent() {
+            for rel in ["exiftool", "../lib/linewise-desktop/exiftool"] {
+                let c = dir.join(rel);
+                if c.exists() {
+                    return c.into_os_string();
+                }
+            }
+        }
     }
+    OsString::from("exiftool")
 }
 
 #[cfg(test)]
@@ -198,16 +258,16 @@ mod tests {
         assert!(!m.is_empty());
     }
 
-    /// Round-trip: embed → ffprobe asserts the tags landed. Requires ffmpeg +
-    /// ffprobe on PATH; ignored by default so CI without them stays green.
-    /// Run with `cargo test -p lw-core -- --ignored capture_embed_roundtrip`.
+    /// Round-trip: embed via ExifTool → ffprobe asserts the tags landed (under the
+    /// `com.apple.quicktime.io.visionlab.*` prefix the backend strips). Requires
+    /// exiftool + ffmpeg + ffprobe on PATH; ignored so CI without them stays green.
+    /// Run: `cargo test -p lw-core --lib capture::tests::roundtrip -- --ignored`.
     #[test]
     #[ignore]
-    fn capture_embed_roundtrip() {
+    fn roundtrip() {
         let dir = std::env::temp_dir().join("linewise-capture-test");
         std::fs::create_dir_all(&dir).unwrap();
         let base = dir.join("base.mp4");
-        // Generate a tiny test clip.
         let gen_out = std::process::Command::new("ffmpeg")
             .args([
                 "-y",
