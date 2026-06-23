@@ -17,6 +17,36 @@ use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
 use std::collections::HashMap;
 
+/// Compact one-line summary of the capture metadata set for a clip, for the
+/// inline "✓ set" row. Only present fields appear, joined by " · ".
+fn capture_summary(m: &lw_core::capture::CaptureMetadata) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for v in [&m.country, &m.city, &m.site, &m.station]
+        .into_iter()
+        .flatten()
+    {
+        parts.push(v.clone());
+    }
+    if let Some(o) = &m.operator {
+        parts.push(format!("op {o}"));
+    }
+    let device = [m.make.as_deref(), m.model.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !device.is_empty() {
+        parts.push(device);
+    }
+    if let Some(fov) = m.fov {
+        parts.push(format!("{fov}\u{00B0}"));
+    }
+    if let Some(a) = &m.action {
+        parts.push(a.clone());
+    }
+    parts.join(" \u{00B7} ")
+}
+
 #[component]
 pub fn SectionHeader(title: String, count: usize) -> Element {
     rsx! {
@@ -365,11 +395,12 @@ pub fn StagedRow(
 
     // Required-metadata gate: a `Staged` clip with no capture metadata recorded
     // holds here (auto-upload won't dispatch it) until the user fills it. Rejected
-    // rows never auto-upload, so the prompt is suppressed for them.
-    let needs_metadata = task.state == UploadState::Staged
-        && !use_context::<CoreServices>()
-            .upload_engine
-            .has_capture_metadata(&task.id);
+    // rows never auto-upload, so the prompt is suppressed for them. When set, the
+    // recorded values are shown inline so the user can see what's filled at a glance.
+    let capture = use_context::<CoreServices>()
+        .upload_engine
+        .capture_metadata_for(&task.id);
+    let needs_metadata = task.state == UploadState::Staged && capture.is_none();
 
     let btn_style = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
     let transcode_btn_style = if transcode_on {
@@ -428,6 +459,17 @@ pub fn StagedRow(
 
             if let Some(details) = video_details.clone() {
                 VideoInfoPopover { details }
+            }
+
+            // Capture metadata, when set: a green confirmation line showing the
+            // recorded values, so the user can see at a glance which clips are
+            // filled and with what (vs. the "Needs metadata" warning when absent).
+            if let Some(m) = capture.as_ref() {
+                div {
+                    style: "font-size: 11px; color: var(--success, #16a34a); margin-top: 4px; padding: 3px 6px; background: var(--success-bg, rgba(22,163,74,0.1)); border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                    title: "Capture metadata embedded into this clip on upload.",
+                    "\u{2713} {capture_summary(m)}"
+                }
             }
 
             // Reject reasons render first so they read as the headline

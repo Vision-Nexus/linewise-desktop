@@ -148,8 +148,17 @@ pub fn CaptureMetadataDialog(
                     engine.submit_with_capture(&id, meta).await;
                 });
             }
-            // Batch defaults for subsequently-staged files.
-            None => engine_save.set_batch_capture_metadata((!meta.is_empty()).then_some(meta)),
+            // Batch: apply to every clip already in the queue AND keep as the
+            // default for files added later.
+            None => {
+                engine_save.set_batch_capture_metadata((!meta.is_empty()).then_some(meta.clone()));
+                if !meta.is_empty() {
+                    let engine = engine_save.clone();
+                    spawn(async move {
+                        engine.apply_capture_to_staged(meta).await;
+                    });
+                }
+            }
         }
         on_close.call(true);
     };
@@ -176,7 +185,7 @@ pub fn CaptureMetadataDialog(
                         if task_id.is_some() {
                             "Required before this clip uploads. Embedded into the file, then the clip is queued."
                         } else {
-                            "Applied to every file added after saving. Embedded into the file on upload."
+                            "Applied to all files in the queue now and any you add next. Embedded into each file on upload."
                         }
                     }
                 }

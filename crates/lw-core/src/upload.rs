@@ -394,6 +394,28 @@ impl UploadEngine {
     /// opt-in), advance it to `Pending` and dispatch. The single entry point the
     /// per-file fill UI calls on save. Transcode-held rows still wait for their
     /// transcode confirm (`confirm_staged`), which dispatches them separately.
+    /// Apply `meta` to every clip currently `Staged` (the whole visible queue),
+    /// then release the ones not held for an opt-in transcode. This is what the
+    /// top-bar batch save calls so "set once" covers files already added, not just
+    /// future ones; the caller also records `meta` as the default for later files
+    /// via `set_batch_capture_metadata`. Transcode-held clips keep their metadata
+    /// but still wait for the transcode confirm.
+    pub async fn apply_capture_to_staged(self: &Arc<Self>, meta: crate::capture::CaptureMetadata) {
+        let staged = match self.db.get_staged_uploads().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("apply_capture_to_staged: failed to load staged set: {e}");
+                return;
+            }
+        };
+        for task in staged {
+            self.set_capture_metadata(&task.id, Some(meta.clone()));
+            if !task.transcode {
+                self.advance_staged_and_dispatch(&task.id).await;
+            }
+        }
+    }
+
     pub async fn submit_with_capture(
         self: &Arc<Self>,
         task_id: &str,

@@ -708,7 +708,7 @@ pub fn TransferPanel() -> Element {
                         }
                         button {
                             style: "padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-size: 13px;",
-                            title: "Set capture metadata applied to files you add next",
+                            title: "Set capture metadata for all queued files and any you add next",
                             onclick: move |_| {
                                 capture_task.set(None);
                                 capture_open.set(true);
