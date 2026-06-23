@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::bundle_ffmpeg::{
-    OPTIONAL_LIBS, REQUIRED_LIBS, SharedLibKind, copy_license_bundle, find_major_versioned,
+    OPTIONAL_LIBS, REQUIRED_LIBS, SharedLibKind, copy_exiftool_unix, copy_license_bundle,
+    exiftool_dist, find_major_versioned,
 };
 use crate::cmd::{capture, ensure_dir, run};
 
@@ -28,14 +29,30 @@ pub fn bundle(root: &Path, target: &str, create_dmg: bool) -> Result<()> {
     eprintln!("Using FFmpeg from: {}", ffmpeg_prefix.display());
     let ffmpeg_lib_dir = ffmpeg_prefix.join("lib");
 
-    // Stage 1 — copy ffmpeg CLI into Resources/. We rewrite its load
-    // commands later, after all transitive deps land in Frameworks/.
+    // Stage 1 — copy the ffmpeg + ffprobe CLIs into Resources/. We rewrite their
+    // load commands later, after all transitive deps land in Frameworks/. ffprobe
+    // links the same av* dylibs ffmpeg does, so Stage 2 already bundles everything
+    // it needs. (ffprobe is the capture-metadata read-back path; ffmpeg is the
+    // desensitize/strip path.)
     let ffmpeg_cli_src = ffmpeg_prefix.join("bin/ffmpeg");
     let ffmpeg_cli_dst = resources.join("ffmpeg");
     std::fs::copy(&ffmpeg_cli_src, &ffmpeg_cli_dst)
         .with_context(|| format!("copy ffmpeg CLI: {}", ffmpeg_cli_src.display()))?;
     set_executable(&ffmpeg_cli_dst)?;
     eprintln!("  Copied ffmpeg binary → Resources/");
+
+    let ffprobe_cli_src = ffmpeg_prefix.join("bin/ffprobe");
+    let ffprobe_cli_dst = resources.join("ffprobe");
+    std::fs::copy(&ffprobe_cli_src, &ffprobe_cli_dst)
+        .with_context(|| format!("copy ffprobe CLI: {}", ffprobe_cli_src.display()))?;
+    set_executable(&ffprobe_cli_dst)?;
+    eprintln!("  Copied ffprobe binary → Resources/");
+
+    // ExifTool (Perl script + lib/) for capture-metadata embedding and read-back.
+    // Runs on the system /usr/bin/perl via the script's shebang; no dylib rewrite
+    // needed. Sealed by the Stage 4 `codesign --deep`.
+    let exiftool_dist = exiftool_dist()?;
+    copy_exiftool_unix(&exiftool_dist, &resources)?;
 
     // Stage 2 — bundle the av* libraries plus every transitive dep dyld
     // would resolve from /opt/homebrew on the build host. The recursive
@@ -65,8 +82,10 @@ pub fn bundle(root: &Path, target: &str, create_dmg: bool) -> Result<()> {
     // resolves to Contents/Frameworks/.
     rewrite_consumer(&main_bin, &bundled)?;
     rewrite_consumer(&ffmpeg_cli_dst, &bundled)?;
+    rewrite_consumer(&ffprobe_cli_dst, &bundled)?;
     add_rpath_if_missing(&main_bin, "@executable_path/../Frameworks")?;
     add_rpath_if_missing(&ffmpeg_cli_dst, "@executable_path/../Frameworks")?;
+    add_rpath_if_missing(&ffprobe_cli_dst, "@executable_path/../Frameworks")?;
 
     eprintln!("Done bundling FFmpeg into {}", app_bundle.display());
 

@@ -19,9 +19,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Bundle FFmpeg shared libraries (and transitive deps on macOS/Linux)
-    /// into the cargo-bundle output for the given target. Run after
-    /// `cargo bundle --release --target <triple>`.
+    /// Bundle the external tools into the cargo-bundle output for the given
+    /// target: FFmpeg shared libs (+ transitive deps on macOS/Linux), the
+    /// ffmpeg/ffprobe CLIs, and ExifTool (capture-metadata embed/read-back).
+    /// Requires EXIFTOOL_DIST. Run after `cargo bundle --release --target <triple>`.
     BundleFfmpeg {
         #[arg(long)]
         target: String,

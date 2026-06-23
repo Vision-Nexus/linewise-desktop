@@ -90,6 +90,37 @@ jobs:
           # Add to PATH so pkg-config / build scripts find it
           echo "$ffmpegDir\bin" >> $env:GITHUB_PATH
 
+      # --- ExifTool setup (capture-metadata embed/read-back) ---
+      # macOS/Linux: the official source distribution (script + lib/), which
+      # self-locates its modules and runs on system Perl. Windows: the standalone
+      # build (exiftool.exe + exiftool_files/, embedded Perl). Pin the version.
+
+      - name: Install ExifTool (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          EXIFTOOL_VERSION="13.55"
+          curl -fsSL -o exiftool-src.tar.gz \
+            "https://github.com/exiftool/exiftool/archive/refs/tags/${EXIFTOOL_VERSION}.tar.gz"
+          mkdir -p exiftool-dist
+          tar xzf exiftool-src.tar.gz -C exiftool-dist --strip-components=1
+          test -f exiftool-dist/exiftool && test -d exiftool-dist/lib
+          echo "EXIFTOOL_DIST=$(pwd)/exiftool-dist" >> "$GITHUB_ENV"
+
+      - name: Install ExifTool (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exiftoolVersion = "13.55"
+          $url = "https://exiftool.org/exiftool-${exiftoolVersion}_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile exiftool.zip
+          Expand-Archive exiftool.zip -DestinationPath exiftool-dist
+          # The zip ships the launcher as `exiftool(-k).exe`; rename to exiftool.exe.
+          $launcher = Get-ChildItem exiftool-dist -Recurse -Filter "exiftool(-k).exe" | Select-Object -First 1
+          $distDir = $launcher.Directory.FullName
+          Move-Item $launcher.FullName (Join-Path $distDir "exiftool.exe") -Force
+          echo "EXIFTOOL_DIST=$distDir" >> $env:GITHUB_ENV
+
       # --- Build ---
 
       - name: Build release binary
