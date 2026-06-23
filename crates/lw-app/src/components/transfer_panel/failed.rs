@@ -43,6 +43,9 @@ pub fn FailedList(
     // Secondary tab is local state — re-anchoring on Quality when the panel
     // re-mounts is fine.
     let mut sub_tab = use_signal(|| FailedTab::Quality);
+    // Rejected rows never run a Save-time embed; a permanently-empty map satisfies
+    // `StagedRow`'s required `embed_progress` prop.
+    let embed_progress = use_signal(HashMap::new);
 
     let quality: Vec<_> = tasks
         .iter()
@@ -94,6 +97,8 @@ pub fn FailedList(
                                 // required-metadata prompt/button is suppressed
                                 // (gated on `!is_rejected` in `StagedRow`).
                                 on_fill_metadata: move |_: String| {},
+                                // Rejected rows are never embedding; an empty map.
+                                embed_progress,
                             }
                         }
                     }

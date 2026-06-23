@@ -355,6 +355,9 @@ pub fn StagedRow(
     /// Open the per-file capture-metadata sheet for this clip. Capture is
     /// required, so a `Staged` clip without metadata holds here until filled.
     on_fill_metadata: EventHandler<String>,
+    /// Save-time capture-embed progress `(bytes, total)` per task; present only
+    /// while this clip's metadata is being written into its file.
+    embed_progress: Signal<HashMap<String, (u64, u64)>>,
 ) -> Element {
     let task_id = task.id.clone();
     let force_id = task.id.clone();
@@ -403,7 +406,11 @@ pub fn StagedRow(
     let capture = use_context::<CoreServices>()
         .upload_engine
         .capture_metadata_for(&task.id);
-    let needs_metadata = task.state == UploadState::Staged && capture.is_none();
+    // Save-time embed in progress for this clip → show a determinate bar and
+    // suppress the fill prompt/button until the rewrite finishes.
+    let embedding = embed_progress.read().get(&task.id).copied();
+    let needs_metadata =
+        task.state == UploadState::Staged && capture.is_none() && embedding.is_none();
 
     let btn_style = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
     let transcode_btn_style = if transcode_on {
@@ -470,8 +477,30 @@ pub fn StagedRow(
             if let Some(m) = capture.as_ref() {
                 div {
                     style: "font-size: 11px; color: var(--success, #16a34a); margin-top: 4px; padding: 3px 6px; background: var(--success-bg, rgba(22,163,74,0.1)); border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
-                    title: "Capture metadata embedded into this clip on upload.",
+                    title: "Capture metadata written into this clip's file.",
                     "\u{2713} {capture_summary(m)}"
+                }
+            }
+
+            // Save-time embed in progress: determinate bar driven by the exiftool
+            // rewrite size (CaptureEmbedProgress).
+            if let Some((bytes, total)) = embedding {
+                div { style: "margin-top: 6px;",
+                    Progress {
+                        value: (bytes as f64 / total.max(1) as f64 * 100.0).min(100.0),
+                        max: 100.0,
+                        "aria-label": "Embedding metadata",
+                        ProgressIndicator {}
+                    }
+                    div {
+                        style: "font-size: 11px; margin-top: 2px; color: var(--text-muted);",
+                        {format!(
+                            "Writing metadata — {} / {} ({:.0}%)",
+                            format_size(bytes),
+                            format_size(total),
+                            (bytes as f64 / total.max(1) as f64 * 100.0).min(100.0),
+                        )}
+                    }
                 }
             }
 
@@ -501,7 +530,7 @@ pub fn StagedRow(
                         "\u{26A0} Needs metadata"
                     }
                 }
-                if !is_rejected {
+                if !is_rejected && embedding.is_none() {
                     button {
                         style: if needs_metadata {
                             format!("{btn_style} background: var(--btn-primary); color: white; border-color: var(--btn-primary);")

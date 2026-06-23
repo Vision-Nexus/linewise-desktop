@@ -150,6 +150,10 @@ pub struct AppState {
     pub transcode_progress: Signal<HashMap<String, f32>>,
     pub upload_progress: Signal<HashMap<String, (u64, u64)>>,
     pub hash_progress: Signal<HashMap<String, (u64, u64)>>,
+    /// Per-task Save-time capture-embed progress `(bytes_written, total)`, driven
+    /// by `UploadEvent::CaptureEmbedProgress`. Present only while a clip's metadata
+    /// is being written into its file; the row shows a determinate bar.
+    pub embed_progress: Signal<HashMap<String, (u64, u64)>>,
     /// Per-task upload speed in bytes/second, derived UI-side by the resident
     /// `UploadRuntime` from successive `Progress` events (the engine carries no
     /// timestamp). EMA-smoothed; absent or `0.0` means "unknown" (no rate/ETA
@@ -258,6 +262,7 @@ impl AppState {
             transcode_progress: Signal::new(HashMap::new()),
             upload_progress: Signal::new(HashMap::new()),
             hash_progress: Signal::new(HashMap::new()),
+            embed_progress: Signal::new(HashMap::new()),
             upload_speed: Signal::new(HashMap::new()),
             projects: Signal::new(Vec::new()),
             tenant_projects: Signal::new(HashMap::new()),

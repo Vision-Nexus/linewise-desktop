@@ -186,6 +186,7 @@ pub fn TransferPanel() -> Element {
     let transcode_progress = app_state.transcode_progress;
     let upload_progress = app_state.upload_progress;
     let hash_progress = app_state.hash_progress;
+    let embed_progress = app_state.embed_progress;
     // UI-derived per-task upload speed (bytes/sec), written by the resident
     // `UploadRuntime`. Read-only here — threaded down to the uploading rows.
     let upload_speed = app_state.upload_speed;
@@ -808,6 +809,7 @@ pub fn TransferPanel() -> Element {
                         transcode_progress,
                         upload_progress,
                         hash_progress,
+                        embed_progress,
                         upload_speed,
                         on_remove: on_remove.clone(),
                         on_clear: on_clear.clone(),

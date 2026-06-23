@@ -27,6 +27,7 @@ pub fn InProgressList(
     transcode_progress: Signal<HashMap<String, f32>>,
     upload_progress: Signal<HashMap<String, (u64, u64)>>,
     hash_progress: Signal<HashMap<String, (u64, u64)>>,
+    embed_progress: Signal<HashMap<String, (u64, u64)>>,
     upload_speed: Signal<HashMap<String, f64>>,
     on_remove: EventHandler<String>,
     on_clear: EventHandler<String>,
@@ -140,6 +141,7 @@ pub fn InProgressList(
                             on_transcode_click,
                             on_force_upload: None,
                             on_fill_metadata,
+                            embed_progress,
                         }
                     }
                 }
