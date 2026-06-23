@@ -185,9 +185,9 @@ pub fn CaptureMetadataDialog(
                     div {
                         style: "font-size: 12px; color: var(--text-secondary); margin-top: 4px;",
                         if task_id.is_some() {
-                            "Required before this clip uploads. Embedded into the file, then the clip is queued."
+                            "Saved to this clip only — it stays in the queue. Use \"Upload\" when you're ready. Embedded into the file on upload."
                         } else {
-                            "Applied to all files in the queue now and any you add next. Embedded into each file on upload."
+                            "Applied to all files in the queue now and any you add next. They stay in the queue; use \"Upload\" when ready. Embedded into each file on upload."
                         }
                     }
                 }
@@ -262,7 +262,7 @@ pub fn CaptureMetadataDialog(
                     button {
                         style: "flex: 1; padding: 7px 14px; border-radius: 6px; border: none; background: var(--btn-primary); color: white; cursor: pointer; font-weight: 500; font-size: 13px;",
                         onclick: on_save,
-                        if task_id.is_some() { "Save & Upload" } else { "Save" }
+                        "Save"
                     }
                     button {
                         style: "padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 13px;",
