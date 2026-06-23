@@ -16,10 +16,11 @@
 //! * **Toolbar** `[Retry all]` (Network failures only) + `[Clear
 //!   completed]`.
 //!
-//! Staging is auto-upload: a clip that passes QC dispatches immediately
-//! (bounded-parallel), with no manual click. The only rows that reach
-//! `Staged` are clips HELD for an opt-in transcode; the single `[Upload N]`
-//! button acts on those alone and is otherwise absent.
+//! Staging holds for required capture metadata: a clip that passes QC settles
+//! `Staged` and waits. Each row shows "✓ <summary>" once its metadata is set
+//! (per-file "Add metadata", or the top-bar batch fill) or "Needs metadata"
+//! until then. The single `[Upload N]` button dispatches every filled (ready)
+//! clip — its count is the ready count, and it is absent when none are ready.
 //!
 //! Ingest is consolidated into ONE multi-function "Upload" button in the
 //! header: it opens a small menu with "Select files…" (multi-file picker,
@@ -262,9 +263,16 @@ pub fn TransferPanel() -> Element {
         .filter(|t| PrimaryTab::Failed.contains(&t.state))
         .count();
 
+    // "Ready" = staged AND has its required capture metadata set. The manual
+    // Upload only dispatches these (`confirm_staged` skips the rest), so the
+    // button counts and gates on ready, not on all staged. Reading `capture_rev`
+    // keeps the count live as the user fills clips.
+    let _ = app_state.capture_rev.read();
     let staged_count = tasks
         .iter()
-        .filter(|t| t.state == UploadState::Staged)
+        .filter(|t| {
+            t.state == UploadState::Staged && services.upload_engine.has_capture_metadata(&t.id)
+        })
         .count();
 
     // === Staging + action callbacks ===
@@ -871,10 +879,11 @@ pub fn TransferPanel() -> Element {
     }
 }
 
-/// The Upload button: a single primary action that dispatches every held
-/// `Staged` clip (bounded-parallel). With auto-upload, the only rows that
-/// reach `Staged` are clips held for an opt-in transcode, so this button is
-/// shown solely for those (and is otherwise absent — `staged_count == 0`).
+/// The Upload button: a single primary action that dispatches every `Staged`
+/// clip whose required capture metadata is set (bounded-parallel). `staged_count`
+/// is the READY count (filled clips); the button is absent when it is 0, so the
+/// user fills at least one clip before it appears. Clips still missing metadata
+/// stay `Staged` and are skipped by `confirm_staged`.
 #[component]
 fn UploadButton(staged_count: usize, confirm_cb: Callback<()>) -> Element {
     let label = if staged_count == 1 {

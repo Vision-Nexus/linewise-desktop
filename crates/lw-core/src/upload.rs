@@ -283,17 +283,17 @@ pub struct UploadEngine {
     /// only (not persisted) — the UI calls [`Self::set_capture_metadata`] when
     /// the form is saved; `process_task` reads it at Stage 0 and embeds it into
     /// the file before hashing/upload. Held on the engine (not the `UploadTask`
-    /// row) so it survives the DB-reload that both the manual-confirm and the
-    /// auto-advance dispatch paths perform, and covers both without per-path
-    /// plumbing. Lost on app restart (acceptable for v1).
+    /// row) so it survives the DB-reload that the manual-confirm dispatch path
+    /// (`confirm_staged`) performs. Lost on app restart (acceptable for v1).
     capture_metadata:
         std::sync::Mutex<std::collections::HashMap<String, crate::capture::CaptureMetadata>>,
     /// Current batch-default capture metadata, applied to every file staged while
     /// it is set ("set defaults → add files" UX): a staged file with a batch
-    /// default in effect gets a per-file entry at stage time, so it satisfies the
-    /// required-metadata gate and auto-advances. In-memory only. `None` = no
-    /// default; files then hold `Staged` until the per-file fill UI sets metadata
-    /// (capture is required — see the auto-advance gate in `run_quality_then_hash`).
+    /// default in effect gets a per-file entry at stage time, so it shows
+    /// "✓ filled" and uploads on the next manual "Upload" without a per-file fill.
+    /// In-memory only. `None` = no default; files then hold `Staged` showing
+    /// "Needs metadata" until the fill UI sets it (capture is required — the
+    /// manual `confirm_staged` skips any clip still missing metadata).
     batch_capture: std::sync::Mutex<Option<crate::capture::CaptureMetadata>>,
 }
 
@@ -368,10 +368,11 @@ impl UploadEngine {
             .clone()
     }
 
-    /// Whether per-file capture metadata is set for `task_id`. The auto-advance
-    /// gate requires this before dispatching a `Staged` clip, so a clip with no
-    /// metadata (no batch default applied at stage time, no per-file entry) holds
-    /// `Staged` until the UI fills it. Also drives the row's "needs metadata" badge.
+    /// Whether per-file capture metadata is set for `task_id`. The manual
+    /// `confirm_staged` requires this before dispatching a `Staged` clip, so a
+    /// clip with no metadata (no batch default applied at stage time, no per-file
+    /// entry) stays `Staged` until the UI fills it. Also drives the row's
+    /// "Needs metadata" badge vs the "✓ filled" line.
     pub fn has_capture_metadata(&self, task_id: &str) -> bool {
         self.capture_metadata
             .lock()
@@ -389,17 +390,13 @@ impl UploadEngine {
             .cloned()
     }
 
-    /// Record per-file capture metadata for `task_id` and release the clip: if it
-    /// is currently held `Staged` (the required-metadata gate, not a transcode
-    /// opt-in), advance it to `Pending` and dispatch. The single entry point the
-    /// per-file fill UI calls on save. Transcode-held rows still wait for their
-    /// transcode confirm (`confirm_staged`), which dispatches them separately.
-    /// Apply `meta` to every clip currently `Staged` (the whole visible queue),
-    /// then release the ones not held for an opt-in transcode. This is what the
-    /// top-bar batch save calls so "set once" covers files already added, not just
-    /// future ones; the caller also records `meta` as the default for later files
-    /// via `set_batch_capture_metadata`. Transcode-held clips keep their metadata
-    /// but still wait for the transcode confirm.
+    /// Record `meta` as the per-file capture metadata for every clip currently
+    /// `Staged` (the whole visible queue). The top-bar batch save calls this so
+    /// "set once" covers files already added, not just future ones; the caller
+    /// also records `meta` as the default for later files via
+    /// `set_batch_capture_metadata`. Recording only — the upload step is manual:
+    /// the clips stay `Staged` (now showing "✓ filled") until the user clicks
+    /// "Upload", which runs `confirm_staged`.
     pub async fn apply_capture_to_staged(self: &Arc<Self>, meta: crate::capture::CaptureMetadata) {
         let staged = match self.db.get_staged_uploads().await {
             Ok(s) => s,
@@ -410,29 +407,6 @@ impl UploadEngine {
         };
         for task in staged {
             self.set_capture_metadata(&task.id, Some(meta.clone()));
-            if !task.transcode {
-                self.advance_staged_and_dispatch(&task.id).await;
-            }
-        }
-    }
-
-    pub async fn submit_with_capture(
-        self: &Arc<Self>,
-        task_id: &str,
-        meta: crate::capture::CaptureMetadata,
-    ) {
-        self.set_capture_metadata(task_id, Some(meta));
-        match self.db.get_upload_by_id(task_id).await {
-            Ok(Some(task)) if task.state == UploadState::Staged && !task.transcode => {
-                self.advance_staged_and_dispatch(task_id).await;
-            }
-            Ok(_) => {
-                // Not staged-and-waiting (e.g. already dispatched, transcode-held,
-                // or already uploading): metadata is recorded; nothing to release.
-            }
-            Err(e) => {
-                tracing::warn!(task_id, "submit_with_capture: failed to load task: {e}");
-            }
         }
     }
 
@@ -671,8 +645,8 @@ impl UploadEngine {
 
         self.db.insert_upload_task(&task).await?;
         // Apply the current batch-default capture metadata to this freshly-staged
-        // task so it's embedded at process time — even on the auto-upload path
-        // that never waits for a manual confirm.
+        // task so it shows "✓ filled" immediately and is embedded at process time
+        // without needing a per-file fill.
         if let Some(batch) = self
             .batch_capture
             .lock()
@@ -716,11 +690,11 @@ impl UploadEngine {
                     )
                     .await
             } else {
-                // Non-video rows have no `video_info`, so the transcode-hold
-                // predicate in `run_hash_and_dedup` can never fire for them —
-                // they always auto-advance on a `Staged` settle.
+                // Non-video rows skip the quality-check probe and go straight to
+                // the hash + dedup path; like every row, they settle `Staged` and
+                // wait for capture metadata + the manual "Upload".
                 engine
-                    .run_hash_and_dedup(&task_id, &path_buf, &tenant_id_owned, Vec::new(), None)
+                    .run_hash_and_dedup(&task_id, &path_buf, &tenant_id_owned, Vec::new())
                     .await
             };
             tracing::debug!(task_id = %task_id, ?final_state, "stage_file worker finished");
@@ -778,9 +752,6 @@ impl UploadEngine {
                         &warnings,
                     )
                     .await;
-                // Keep a copy for the transcode-hold decision at the `Staged`
-                // settle point; the event takes ownership of the original.
-                let video_info_for_hold = video_info.clone();
                 let _ = self.event_tx.send(UploadEvent::QualityCheckPassed {
                     task_id: task_id.to_string(),
                     video_info,
@@ -792,14 +763,8 @@ impl UploadEngine {
                 });
                 match post_hash {
                     PostHashVerdict::Stage => {
-                        self.run_hash_and_dedup(
-                            task_id,
-                            path,
-                            tenant_id,
-                            warnings,
-                            video_info_for_hold,
-                        )
-                        .await
+                        self.run_hash_and_dedup(task_id, path, tenant_id, warnings)
+                            .await
                     }
                     PostHashVerdict::Reject(reasons) => {
                         self.run_hash_only(task_id, path, warnings, reasons).await
@@ -831,20 +796,15 @@ impl UploadEngine {
     /// Returns the terminal state for logging only — all persistence
     /// and UI events happen inside.
     ///
-    /// On a `Staged` settle the row is auto-advanced to `Pending` and
-    /// dispatched immediately — there is no manual "Upload" step on the
-    /// happy path — UNLESS this clip is held for an opt-in transcode (see
-    /// [`Self::held_for_transcode`]), in which case it stays `Staged` and
-    /// waits for the manual confirm. `video_info` carries the quality-check
-    /// probe so the hold predicate can run; it is `None` for non-video rows
-    /// (which are never held).
+    /// A `Staged` settle is terminal here: the row stays `Staged` until the
+    /// user fills its required capture metadata and clicks "Upload"
+    /// (`confirm_staged`). There is no auto-advance.
     async fn run_hash_and_dedup(
         self: &Arc<Self>,
         task_id: &str,
         path: &Path,
         tenant_id: &str,
         warnings: Vec<String>,
-        video_info: Option<crate::models::VideoInfo>,
     ) -> UploadState {
         let hashes = match self.consume_hash_stream(task_id, path).await {
             Ok(h) => h,
@@ -888,102 +848,19 @@ impl UploadEngine {
             }
         };
 
-        let settled = self
-            .settle_post_hash(task_id, final_state, warnings, rejection_reasons)
-            .await;
-
-        // Auto-upload: a row that settled to `Staged` advances straight to
-        // `Pending` and dispatches, removing the manual click between QC-pass
-        // and upload. Transcode-eligible clips are the only exception — they
-        // wait `Staged` for the opt-in transcode confirm.
-        match settled {
-            // Auto-advance only when the clip is NOT held for an opt-in transcode
-            // AND its capture metadata is set. Capture is required: a clip with no
-            // metadata (no batch default applied, no per-file entry) stays `Staged`
-            // with a "fill metadata" affordance until the user fills it, which then
-            // dispatches it (`submit_with_capture`).
-            UploadState::Staged
-                if !self.held_for_transcode(video_info.as_ref())
-                    && self.has_capture_metadata(task_id) =>
-            {
-                self.advance_staged_and_dispatch(task_id).await;
-            }
-            UploadState::QualityChecking
-            | UploadState::Hashing
-            | UploadState::Staged
-            | UploadState::Rejected
-            | UploadState::Pending
-            | UploadState::Validating
-            | UploadState::Transcoding
-            | UploadState::Desensitizing
-            | UploadState::Creating
-            | UploadState::Uploading
-            | UploadState::Verifying
-            | UploadState::Completed
-            | UploadState::Failed
-            | UploadState::Paused => {}
-        }
-        settled
-    }
-
-    /// Whether auto-upload should HOLD this clip `Staged` for the manual
-    /// opt-in transcode flow. The hold fires iff the transcode feature is on
-    /// AND transcoding would actually shrink this specific clip — mirroring
-    /// the UI toggle gate and the `maybe_transcode` short-circuit exactly.
-    /// Re-reads (never modifies) `video::transcode_would_help`. `None`
-    /// `video_info` (non-video, or a probe that returned nothing) is never
-    /// held.
-    fn held_for_transcode(&self, video_info: Option<&crate::models::VideoInfo>) -> bool {
-        let Some(info) = video_info else {
-            return false;
-        };
-        self.transcode_config.enabled && video::transcode_would_help(info, &self.transcode_config)
-    }
-
-    /// Flip a freshly-`Staged` row to `Pending` (DB + UI event) and dispatch
-    /// it through the bounded-parallel worker. Mirrors what one iteration of
-    /// the `confirm_staged` loop does for a single task, so auto-upload and
-    /// the manual confirm share one dispatch path. Flipping to `Pending`
-    /// before the load means the manual `[Upload]` button (which reads
-    /// STAGED rows) can never also grab this row.
-    async fn advance_staged_and_dispatch(self: &Arc<Self>, task_id: &str) {
-        if let Err(e) = self
-            .db
-            .update_upload_state(task_id, UploadState::Pending, None)
+        // A `Staged` settle is terminal: the row stays `Staged` (showing its
+        // "✓ filled" / "Needs metadata" state) until the user fills its required
+        // capture metadata and clicks "Upload" (`confirm_staged`). No auto-advance.
+        self.settle_post_hash(task_id, final_state, warnings, rejection_reasons)
             .await
-        {
-            tracing::warn!(task_id, "auto-upload: failed to mark row PENDING: {e}");
-            return;
-        }
-        let _ = self.event_tx.send(UploadEvent::StateChanged {
-            task_id: task_id.to_string(),
-            state: UploadState::Pending,
-        });
-
-        // O(1) single-row load now that the row is `Pending` in the DB —
-        // avoids loading and scanning the entire pending set once per
-        // auto-advancing task.
-        let task = match self.db.get_upload_by_id(task_id).await {
-            Ok(Some(task)) => task,
-            Ok(None) => {
-                tracing::warn!(task_id, "auto-upload: task not found after flip to PENDING");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(task_id, "auto-upload: get_upload_by_id failed: {e}");
-                return;
-            }
-        };
-        self.dispatch_one(task);
     }
 
     /// Spawn the bounded-parallel upload worker for one already-`Pending`
     /// task. The single per-task dispatch path: a permit from the
     /// `upload_semaphore` caps concurrency at `max_concurrent`, and a failure
-    /// settles the row to `Failed` with the typed error. Shared by
-    /// `confirm_staged` (manual confirm) and `advance_staged_and_dispatch`
-    /// (auto-upload) so both fan out identically. Per-task (not per-batch) so
-    /// a slow QC file never gates a fast one.
+    /// settles the row to `Failed` with the typed error. Driven by
+    /// `confirm_staged` (the manual "Upload") and `force_upload`. Per-task (not
+    /// per-batch) so a slow QC file never gates a fast one.
     fn dispatch_one(self: &Arc<Self>, mut task: UploadTask) {
         let engine = Arc::clone(self);
         let sem = Arc::clone(&self.upload_semaphore);
@@ -1428,11 +1305,11 @@ impl UploadEngine {
         Ok(())
     }
 
-    /// Confirm staged files for upload (step 2 of two-step upload).
-    /// Moves all STAGED tasks to PENDING and dispatches each through the
-    /// bounded-parallel worker. With auto-upload (PR3) this only ever acts on
-    /// clips HELD `Staged` for an opt-in transcode — everything else already
-    /// auto-advanced at QC-pass time.
+    /// Confirm staged files for upload — the manual "Upload" step. Moves each
+    /// STAGED task whose required capture metadata is set to PENDING and
+    /// dispatches it through the bounded-parallel worker; clips still missing
+    /// metadata are left `Staged` (skipped) so the user can fill them and click
+    /// again. This is the only auto-advance-free path to upload.
     pub async fn confirm_staged(
         self: &Arc<Self>,
         transcode_task_ids: &[String],
@@ -1442,8 +1319,8 @@ impl UploadEngine {
 
         for mut task in staged {
             // Capture is required: a staged clip with no metadata stays `Staged`
-            // (its row shows the "needs metadata" fill prompt) rather than being
-            // dispatched by the manual confirm — mirroring the auto-advance gate.
+            // (its row shows the "Needs metadata" prompt) rather than being
+            // dispatched — the user fills it and clicks Upload again.
             if !self.has_capture_metadata(&task.id) {
                 continue;
             }

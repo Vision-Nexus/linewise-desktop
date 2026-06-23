@@ -394,9 +394,12 @@ pub fn StagedRow(
     let video_details = build_video_details(&task, device_encoder_signatures);
 
     // Required-metadata gate: a `Staged` clip with no capture metadata recorded
-    // holds here (auto-upload won't dispatch it) until the user fills it. Rejected
-    // rows never auto-upload, so the prompt is suppressed for them. When set, the
-    // recorded values are shown inline so the user can see what's filled at a glance.
+    // holds here (the manual "Upload" skips it) until the user fills it. Rejected
+    // rows never upload, so the prompt is suppressed for them. When set, the
+    // recorded values are shown inline so the user can see what's filled at a
+    // glance. Reading `capture_rev` subscribes the row to fill/batch changes so it
+    // re-renders immediately on save (the engine's capture map is not reactive).
+    let _capture_rev: u64 = *use_context::<AppState>().capture_rev.read();
     let capture = use_context::<CoreServices>()
         .upload_engine
         .capture_metadata_for(&task.id);

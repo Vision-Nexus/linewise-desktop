@@ -188,6 +188,12 @@ pub struct AppState {
     /// status as unknown — both are non-blocking. `Some(Unsupported {..})`
     /// is the only state that gates rendering.
     pub version_status: Signal<Option<VersionStatus>>,
+    /// Bumped whenever per-file capture metadata changes on the upload engine
+    /// (fill / batch-apply). The engine's capture map is not reactive, so staged
+    /// rows read this signal to re-render their "✓ filled" / "Needs metadata"
+    /// state immediately after the user saves, instead of waiting for an
+    /// unrelated `upload_tasks` change.
+    pub capture_rev: Signal<u64>,
 }
 
 /// Lightweight toast notification. Only one toast lives at a time — a
@@ -265,6 +271,7 @@ impl AppState {
             config: Signal::new(AppConfig::default()),
             restart_token: Signal::new(0),
             version_status: Signal::new(None),
+            capture_rev: Signal::new(0),
         }
     }
 

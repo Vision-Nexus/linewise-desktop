@@ -1,15 +1,15 @@
 //! Right-side sheet for io.visionlab capture metadata, in two modes:
 //!
-//! - **Batch** (`task_id == None`): defaults applied to every file staged
-//!   afterwards ("set defaults → add files"). Saving stores them on the engine
-//!   (`set_batch_capture_metadata`, in-memory); a file staged while defaults are
-//!   set gets a per-file entry, satisfies the required-metadata gate, and flows.
-//! - **Per-file** (`task_id == Some(id)`): fills the held clip's metadata. Saving
-//!   calls `submit_with_capture`, which records it and releases that one clip
-//!   (`Staged` → dispatch). This is the required-metadata fill the held rows open.
+//! - **Batch** (`task_id == None`): applies to every clip already in the queue
+//!   (`apply_capture_to_staged`) and is recorded as the default for files added
+//!   later (`set_batch_capture_metadata`).
+//! - **Per-file** (`task_id == Some(id)`): records that one clip's metadata
+//!   (`set_capture_metadata`). This is the fill the per-row "Add metadata" opens.
 //!
-//! Capture is **required**: a clip with no metadata holds `Staged` until filled
-//! (via either mode). `process_task` embeds the values into the MP4 before upload.
+//! Both modes only **record** the values; the upload step is manual. A clip with
+//! no metadata holds `Staged` (showing "Needs metadata") and the manual "Upload"
+//! (`confirm_staged`) skips it; a filled clip shows "✓ filled" and uploads on that
+//! click. `process_task` embeds the values into the MP4 before upload.
 //!
 //! Mounted unconditionally by `TransferPanel` so the slide animation plays on
 //! close; visibility is driven by the `open` prop.
@@ -60,13 +60,16 @@ fn opt(s: &str) -> Option<String> {
 #[component]
 pub fn CaptureMetadataDialog(
     open: bool,
-    /// `Some(task_id)` = per-file fill (releases that held clip on save);
-    /// `None` = batch defaults applied to subsequently-staged files.
+    /// `Some(task_id)` = per-file fill (records that clip's metadata);
+    /// `None` = batch (applies to the whole queue + default for later files).
     task_id: Option<String>,
     on_close: EventHandler<bool>,
 ) -> Element {
     let services = use_context::<CoreServices>();
     let engine = services.upload_engine.clone();
+    // Bumped on save so staged rows re-render their "✓ filled" / "Needs metadata"
+    // state immediately (the engine's capture map is not itself reactive).
+    let mut capture_rev = use_context::<crate::state::AppState>().capture_rev;
 
     let mut form = use_signal(CaptureForm::default);
     let mut error = use_signal(|| Option::<String>::None);
@@ -136,17 +139,15 @@ pub fn CaptureMetadataDialog(
         };
         error.set(None);
         match &task_save {
-            // Per-file: record + release this clip (Staged → dispatch).
+            // Per-file: record this clip's metadata. It stays `Staged` showing
+            // "✓ filled"; the manual "Upload" step dispatches it.
             Some(id) => {
                 if meta.is_empty() {
                     error.set(Some("Fill at least one field before saving.".to_string()));
                     return;
                 }
-                let engine = engine_save.clone();
-                let id = id.clone();
-                spawn(async move {
-                    engine.submit_with_capture(&id, meta).await;
-                });
+                engine_save.set_capture_metadata(id, Some(meta));
+                capture_rev += 1;
             }
             // Batch: apply to every clip already in the queue AND keep as the
             // default for files added later.
@@ -156,6 +157,7 @@ pub fn CaptureMetadataDialog(
                     let engine = engine_save.clone();
                     spawn(async move {
                         engine.apply_capture_to_staged(meta).await;
+                        capture_rev += 1;
                     });
                 }
             }
