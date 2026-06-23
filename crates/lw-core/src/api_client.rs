@@ -636,30 +636,61 @@ impl ApiClient {
                 .expect("ascii digits/colons/commas are valid header bytes"),
         );
 
-        let resp = self
-            .client
-            .post(url)
-            .headers(headers)
-            .body(body)
-            .send()
-            .await
-            .map_err(quality_check_send_error)?;
+        // Quality-check is a quick, idempotent probe (it only POSTs the file's
+        // head atoms for server-side rule evaluation), so a transient upstream
+        // hiccup must not fail the user's file. The common one is a 503 while
+        // the standalone PDQ service is mid scale-down — a terminating pdq pod
+        // is briefly still in the api's endpoint set, so the api->pdq call
+        // resets and the api returns 503 to us. That race clears in seconds, so
+        // retry a few times with a short backoff. `headers`/`body` are cloned
+        // per attempt so the request stays re-sendable.
+        let mut attempt: u32 = 1;
+        loop {
+            let send_result = self
+                .client
+                .post(url)
+                .headers(headers.clone())
+                .body(body.clone())
+                .send()
+                .await;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!(
-                status = status.as_u16(),
-                body = truncate(&body, 256),
-                "{op_label} non-2xx"
-            );
-            return Err(UploadError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
+            // Each arm either returns (terminal) or falls through to the backoff.
+            match send_result {
+                Ok(resp) if resp.status().is_success() => return Ok(resp.json().await?),
+                Ok(resp)
+                    if qc_status_is_transient(resp.status().as_u16())
+                        && attempt < QC_MAX_ATTEMPTS =>
+                {
+                    tracing::warn!(
+                        status = resp.status().as_u16(),
+                        attempt,
+                        "{op_label} transient upstream; retrying"
+                    );
+                }
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let err_body = resp.text().await.unwrap_or_default();
+                    tracing::warn!(
+                        status,
+                        body = truncate(&err_body, 256),
+                        "{op_label} non-2xx"
+                    );
+                    return Err(UploadError::Api {
+                        status,
+                        message: err_body,
+                    });
+                }
+                Err(send_err) if attempt < QC_MAX_ATTEMPTS => {
+                    tracing::warn!(attempt, error = %send_err, "{op_label} send error; retrying");
+                }
+                Err(send_err) => return Err(quality_check_send_error(send_err)),
+            }
+
+            let delay_ms =
+                QC_RETRY_DELAYS_MS[(attempt as usize - 1).min(QC_RETRY_DELAYS_MS.len() - 1)];
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            attempt += 1;
         }
-
-        Ok(resp.json().await?)
     }
 
     /// Verify document upload by polling until gcsUri is set
@@ -728,5 +759,45 @@ fn quality_check_send_error(err: reqwest::Error) -> UploadError {
     } else {
         tracing::warn!(?err, "quality_check network error");
         UploadError::Network(err)
+    }
+}
+
+/// Max attempts (initial + retries) for the quality-check probe against a
+/// transient upstream failure. Small on purpose: QC is a fast, blocking probe
+/// on the upload-critical path, and the failure it guards against (a PDQ
+/// scale-down race surfacing as 503) clears in seconds — so a couple of short
+/// retries recover it without making the user wait on a genuinely-down server.
+const QC_MAX_ATTEMPTS: u32 = 4;
+
+/// Backoff before each retry (ms), indexed by `attempt - 1` and clamped to the
+/// last entry. Short — the race we are riding out resolves in seconds.
+const QC_RETRY_DELAYS_MS: [u64; 3] = [500, 1000, 2000];
+
+/// Whether a non-2xx quality-check status is worth retrying. Transient upstream
+/// / gateway failures (the PDQ scale-down 503, plus the standard retryable 5xx
+/// and 429/408) are retried; a 4xx like 400/413 is a real rejection of this
+/// file and must NOT be retried (retrying never converges).
+fn qc_status_is_transient(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::qc_status_is_transient;
+
+    #[test]
+    fn transient_statuses_are_retryable() {
+        for s in [408, 429, 500, 502, 503, 504] {
+            assert!(qc_status_is_transient(s), "{s} should be retryable");
+        }
+    }
+
+    #[test]
+    fn client_rejections_are_not_retryable() {
+        // 4xx are genuine rejections of this request/file — retrying never
+        // converges, so they must fail fast.
+        for s in [400, 401, 403, 404, 409, 413, 422] {
+            assert!(!qc_status_is_transient(s), "{s} should be terminal");
+        }
     }
 }

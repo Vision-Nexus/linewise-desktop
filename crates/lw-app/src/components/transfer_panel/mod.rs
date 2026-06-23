@@ -264,15 +264,17 @@ pub fn TransferPanel() -> Element {
         .filter(|t| PrimaryTab::Failed.contains(&t.state))
         .count();
 
-    // "Ready" = staged AND has its required capture metadata set. The manual
-    // Upload only dispatches these (`confirm_staged` skips the rest), so the
-    // button counts and gates on ready, not on all staged. Reading `capture_rev`
-    // keeps the count live as the user fills clips.
+    // "Ready" = staged AND its required capture metadata is RESOLVED (filled or
+    // skipped). The manual Upload only dispatches these (`confirm_staged` skips the
+    // rest), so the button counts and gates on ready, not on all staged. With auto-
+    // advance, resolved non-transcode clips leave `Staged` on their own, so this
+    // count is mostly the transcode-held clips and the brief pre-advance window.
+    // Reading `capture_rev` keeps the count live as the user fills/skips clips.
     let _ = app_state.capture_rev.read();
     let staged_count = tasks
         .iter()
         .filter(|t| {
-            t.state == UploadState::Staged && services.upload_engine.has_capture_metadata(&t.id)
+            t.state == UploadState::Staged && services.upload_engine.capture_resolved(&t.id)
         })
         .count();
 
@@ -659,6 +661,22 @@ pub fn TransferPanel() -> Element {
         capture_open.set(true);
     };
 
+    // Skip capture metadata for one clip: resolves the metadata gate without
+    // values and auto-advances the clip to upload (the engine holds it only if
+    // it's transcode-eligible). Bump `capture_rev` so the row's "skipped" note and
+    // the ready-count re-render immediately (the engine's capture maps aren't
+    // reactive). The auto-advance dispatch happens inside the engine.
+    let engine_for_skip = services.upload_engine.clone();
+    let app_state_skip = app_state.clone();
+    let on_skip_metadata = move |task_id: String| {
+        let engine = engine_for_skip.clone();
+        let mut capture_rev = app_state_skip.capture_rev;
+        spawn(async move {
+            engine.skip_capture_and_advance(&task_id).await;
+            capture_rev += 1;
+        });
+    };
+
     rsx! {
         style { "{TRANSFER_TAB_CSS}" }
         div {
@@ -815,6 +833,7 @@ pub fn TransferPanel() -> Element {
                         on_clear: on_clear.clone(),
                         on_transcode_click,
                         on_fill_metadata,
+                        on_skip_metadata,
                         on_retry: on_retry.clone(),
                         on_pause: on_pause.clone(),
                         on_resume: on_resume.clone(),

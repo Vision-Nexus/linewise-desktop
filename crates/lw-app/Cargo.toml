@@ -35,7 +35,7 @@ icon = ["../../assets/icons/icon.icns", "../../assets/icons/icon.ico", "../../as
 copyright = "Copyright (c) 2024 Linewise. All rights reserved."
 category = "public.app-category.productivity"
 short_description = "Desktop client for Linewise video management"
-long_description = "Linewise Desktop handles data desensitization, resumable uploads, video validation, and action camera integration."
+long_description = "Linewise Desktop handles resumable uploads, video validation, and action camera integration."
 
 [package.metadata.bundle.deb]
 depends = ["libwebkit2gtk-4.1-0", "libgtk-3-0"]

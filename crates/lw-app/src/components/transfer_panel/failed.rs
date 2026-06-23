@@ -94,9 +94,11 @@ pub fn FailedList(
                                 on_transcode_click,
                                 on_force_upload: Some(on_force_upload),
                                 // Rejected rows never auto-upload, so the
-                                // required-metadata prompt/button is suppressed
-                                // (gated on `!is_rejected` in `StagedRow`).
+                                // required-metadata prompt/button (and the Skip
+                                // affordance) is suppressed (gated on `!is_rejected`
+                                // in `StagedRow`). Both handlers are no-ops here.
                                 on_fill_metadata: move |_: String| {},
+                                on_skip_metadata: move |_: String| {},
                                 // Rejected rows are never embedding; an empty map.
                                 embed_progress,
                             }

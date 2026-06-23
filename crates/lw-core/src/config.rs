@@ -5,7 +5,6 @@ use std::path::PathBuf;
 pub struct AppConfig {
     pub server: ServerConfig,
     pub upload: UploadConfig,
-    pub desensitization: DesensitizationConfig,
     #[serde(default)]
     pub transcode: TranscodeConfig,
     pub camera: CameraConfig,
@@ -107,31 +106,6 @@ fn default_concurrent() -> u32 {
 /// while large files scale up automatically. See `storage::pick_chunk_size`.
 fn default_chunk_size() -> u32 {
     8
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DesensitizationConfig {
-    #[serde(default = "default_true")]
-    pub strip_metadata: bool,
-    #[serde(default)]
-    pub blur_faces: bool,
-    #[serde(default)]
-    pub blur_license_plates: bool,
-    #[serde(default = "default_processing_mode")]
-    pub processing_mode: ProcessingMode,
-    #[serde(default)]
-    pub remote_api_url: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProcessingMode {
-    Local,
-    Remote,
-}
-
-fn default_processing_mode() -> ProcessingMode {
-    ProcessingMode::Local
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,13 +243,6 @@ impl Default for AppConfig {
                 max_concurrent_uploads: 2,
                 chunk_size_mb: 8,
                 sequential_uploads: false,
-            },
-            desensitization: DesensitizationConfig {
-                strip_metadata: true,
-                blur_faces: false,
-                blur_license_plates: false,
-                processing_mode: ProcessingMode::Local,
-                remote_api_url: String::new(),
             },
             transcode: TranscodeConfig::default(),
             camera: CameraConfig {

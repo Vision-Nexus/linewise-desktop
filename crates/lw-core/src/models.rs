@@ -525,7 +525,6 @@ pub enum UploadState {
     Pending,
     Validating,
     Transcoding,
-    Desensitizing,
     Creating,
     Uploading,
     Verifying,
@@ -544,7 +543,6 @@ impl UploadState {
             Self::Pending => "PENDING",
             Self::Validating => "VALIDATING",
             Self::Transcoding => "TRANSCODING",
-            Self::Desensitizing => "DESENSITIZING",
             Self::Creating => "CREATING",
             Self::Uploading => "UPLOADING",
             Self::Verifying => "VERIFYING",
@@ -563,7 +561,6 @@ impl UploadState {
             "PENDING" => Self::Pending,
             "VALIDATING" => Self::Validating,
             "TRANSCODING" => Self::Transcoding,
-            "DESENSITIZING" => Self::Desensitizing,
             "CREATING" => Self::Creating,
             "UPLOADING" => Self::Uploading,
             "VERIFYING" => Self::Verifying,
@@ -580,7 +577,6 @@ impl UploadState {
             Self::Pending
                 | Self::Validating
                 | Self::Transcoding
-                | Self::Desensitizing
                 | Self::Creating
                 | Self::Uploading
                 | Self::Verifying

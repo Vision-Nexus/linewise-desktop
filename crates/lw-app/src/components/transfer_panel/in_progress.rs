@@ -33,6 +33,7 @@ pub fn InProgressList(
     on_clear: EventHandler<String>,
     on_transcode_click: EventHandler<String>,
     on_fill_metadata: EventHandler<String>,
+    on_skip_metadata: EventHandler<String>,
     on_retry: EventHandler<String>,
     on_pause: EventHandler<String>,
     on_resume: EventHandler<String>,
@@ -141,6 +142,7 @@ pub fn InProgressList(
                             on_transcode_click,
                             on_force_upload: None,
                             on_fill_metadata,
+                            on_skip_metadata,
                             embed_progress,
                         }
                     }

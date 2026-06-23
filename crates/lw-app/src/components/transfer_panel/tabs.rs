@@ -48,7 +48,6 @@ impl PrimaryTab {
                     | UploadState::Pending
                     | UploadState::Validating
                     | UploadState::Transcoding
-                    | UploadState::Desensitizing
                     | UploadState::Creating
                     | UploadState::Uploading
                     | UploadState::Verifying

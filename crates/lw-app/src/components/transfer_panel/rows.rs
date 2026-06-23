@@ -352,9 +352,12 @@ pub fn StagedRow(
     /// Even when present, the button only renders for users whose
     /// `system_roles` contain `admin` (see `UserInfo::is_super_admin`).
     on_force_upload: Option<EventHandler<String>>,
-    /// Open the per-file capture-metadata sheet for this clip. Capture is
-    /// required, so a `Staged` clip without metadata holds here until filled.
+    /// Open the per-file capture-metadata sheet for this clip. Capture is offered
+    /// on a `Staged` clip until it is filled OR skipped.
     on_fill_metadata: EventHandler<String>,
+    /// Skip capture metadata for this clip: it resolves the metadata gate without
+    /// values, and the clip auto-advances to upload (unless transcode-held).
+    on_skip_metadata: EventHandler<String>,
     /// Save-time capture-embed progress `(bytes, total)` per task; present only
     /// while this clip's metadata is being written into its file.
     embed_progress: Signal<HashMap<String, (u64, u64)>>,
@@ -363,6 +366,7 @@ pub fn StagedRow(
     let force_id = task.id.clone();
     let transcode_id = task.id.clone();
     let fill_id = task.id.clone();
+    let skip_id = task.id.clone();
     let is_video = task.mime_type.starts_with("video/");
     let is_super_admin = use_context::<AppState>()
         .user_info
@@ -396,21 +400,22 @@ pub fn StagedRow(
     // in `Staged`.
     let video_details = build_video_details(&task, device_encoder_signatures);
 
-    // Required-metadata gate: a `Staged` clip with no capture metadata recorded
-    // holds here (the manual "Upload" skips it) until the user fills it. Rejected
-    // rows never upload, so the prompt is suppressed for them. When set, the
-    // recorded values are shown inline so the user can see what's filled at a
-    // glance. Reading `capture_rev` subscribes the row to fill/batch changes so it
-    // re-renders immediately on save (the engine's capture map is not reactive).
+    // Required-metadata gate: a `Staged` clip whose capture metadata is neither
+    // filled NOR skipped holds here until the user resolves it (fill or Skip).
+    // Rejected rows never upload, so the prompt is suppressed for them. When
+    // filled, the recorded values are shown inline; when skipped, a muted "skipped"
+    // note shows instead. Reading `capture_rev` subscribes the row to fill/skip/
+    // batch changes so it re-renders immediately (the engine's capture maps are not
+    // reactive).
     let _capture_rev: u64 = *use_context::<AppState>().capture_rev.read();
-    let capture = use_context::<CoreServices>()
-        .upload_engine
-        .capture_metadata_for(&task.id);
+    let engine = use_context::<CoreServices>().upload_engine.clone();
+    let capture = engine.capture_metadata_for(&task.id);
+    let skipped = engine.is_capture_skipped(&task.id);
     // Save-time embed in progress for this clip → show a determinate bar and
     // suppress the fill prompt/button until the rewrite finishes.
     let embedding = embed_progress.read().get(&task.id).copied();
     let needs_metadata =
-        task.state == UploadState::Staged && capture.is_none() && embedding.is_none();
+        task.state == UploadState::Staged && capture.is_none() && !skipped && embedding.is_none();
 
     let btn_style = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
     let transcode_btn_style = if transcode_on {
@@ -484,6 +489,17 @@ pub fn StagedRow(
                 }
             }
 
+            // Skipped: the user opted out of capture metadata for this clip. Shown
+            // in a muted style (no values) so it reads as a resolved-but-empty state
+            // distinct from the green "filled" line. "Add metadata" stays available.
+            if skipped && capture.is_none() && embedding.is_none() {
+                div {
+                    style: "font-size: 11px; color: var(--text-muted); margin-top: 4px; padding: 3px 6px; background: var(--bg-secondary, rgba(0,0,0,0.04)); border-radius: 3px;",
+                    title: "Capture metadata was skipped for this clip — it uploads without io.visionlab tags.",
+                    "Capture metadata skipped"
+                }
+            }
+
             // Save-time embed in progress. A determinate bar (driven by the
             // exiftool rewrite-temp size) ONCE we have a byte count; until then —
             // or if the rewrite-temp can't be located — an honest "Writing
@@ -550,6 +566,16 @@ pub fn StagedRow(
                         },
                         onclick: move |_| on_fill_metadata.call(fill_id.clone()),
                         if needs_metadata { "Add metadata" } else { "Edit metadata" }
+                    }
+                }
+                // Skip: only offered while the clip is still unresolved. Resolving by
+                // skipping auto-advances the clip to upload (capture is optional).
+                if needs_metadata {
+                    button {
+                        style: format!("{btn_style} background: transparent; color: var(--text-secondary);"),
+                        title: "Upload this clip without capture metadata.",
+                        onclick: move |_| on_skip_metadata.call(skip_id.clone()),
+                        "Skip"
                     }
                 }
                 if show_already_ok_badge {
@@ -687,7 +713,6 @@ pub fn UploadTaskRow(
                             UploadState::Uploading
                             | UploadState::Validating
                             | UploadState::Transcoding
-                            | UploadState::Desensitizing
                             | UploadState::Creating
                             | UploadState::Verifying
                             | UploadState::Pending => rsx! {
@@ -838,7 +863,6 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
             format_size(total)
         ),
         UploadState::Validating => "Validating...".to_string(),
-        UploadState::Desensitizing => "Desensitizing...".to_string(),
         UploadState::Creating => "Creating...".to_string(),
         UploadState::Verifying => "Verifying...".to_string(),
         UploadState::Paused => "Paused".to_string(),

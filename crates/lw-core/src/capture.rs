@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::desensitize::hidden_command;
+use crate::ffmpeg_util::hidden_command;
 
 /// io.visionlab container schema version this client writes.
 pub const CAPTURE_SCHEMA_VERSION: i32 = 1;

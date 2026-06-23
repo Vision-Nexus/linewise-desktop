@@ -6,10 +6,12 @@
 //! - **Per-file** (`task_id == Some(id)`): records that one clip's metadata
 //!   (`set_capture_metadata`). This is the fill the per-row "Add metadata" opens.
 //!
-//! Both modes only **record** the values; the upload step is manual. A clip with
-//! no metadata holds `Staged` (showing "Needs metadata") and the manual "Upload"
-//! (`confirm_staged`) skips it; a filled clip shows "✓ filled" and uploads on that
-//! click. `process_task` embeds the values into the MP4 before upload.
+//! Both modes record the values AND resolve the capture-metadata gate. A clip
+//! with neither filled nor skipped metadata holds `Staged` (showing "Needs
+//! metadata"); once it is filled here (or skipped from the row), it auto-advances
+//! to upload without a separate "Upload" click — unless it is transcode-eligible,
+//! which holds it for the opt-in transcode confirm. `process_task` embeds the
+//! values into the MP4 before upload.
 //!
 //! Mounted unconditionally by `TransferPanel` so the slide animation plays on
 //! close; visibility is driven by the `open` prop.
@@ -141,8 +143,9 @@ pub fn CaptureMetadataDialog(
         error.set(None);
         match &task_save {
             // Per-file: embed into this clip's source file in place (Save-time), so
-            // the file is self-describing. It stays `Staged` showing "✓ filled";
-            // the manual "Upload" step dispatches it.
+            // the file is self-describing. `embed_capture_in_place` records the
+            // metadata and then auto-advances the clip to upload (unless it's
+            // transcode-held).
             Some(id) => {
                 if meta.is_empty() {
                     error.set(Some("Fill at least one field before saving.".to_string()));
@@ -197,9 +200,9 @@ pub fn CaptureMetadataDialog(
                     div {
                         style: "font-size: 12px; color: var(--text-secondary); margin-top: 4px;",
                         if task_id.is_some() {
-                            "Written into this clip's file now (it stays in the queue). A large file takes a few seconds. Use \"Upload\" when ready."
+                            "Written into this clip's file now (a large file takes a few seconds), then it uploads automatically."
                         } else {
-                            "Written into every file in the queue now (one at a time), and the default for any you add next. Use \"Upload\" when ready."
+                            "Written into every file in the queue now (one at a time), and the default for any you add next. Filled clips upload automatically."
                         }
                     }
                 }
