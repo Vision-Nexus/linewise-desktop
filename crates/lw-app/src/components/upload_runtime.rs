@@ -252,6 +252,12 @@ fn handle_upload_event(
             if state != UploadState::Hashing {
                 hash_progress.write().remove(&task_id);
             }
+            // A capture-embed bar only makes sense while a row is `Staged`; drop
+            // any lingering entry once it advances (or is rejected), so a missed
+            // completion tick can never leave a stuck bar on a moved row.
+            if state != UploadState::Staged {
+                app_state.embed_progress.write().remove(&task_id);
+            }
             update_task(app_state, &task_id, |t| t.state = state);
         }
         UploadEvent::Progress {

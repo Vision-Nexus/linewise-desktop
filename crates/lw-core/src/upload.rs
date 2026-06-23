@@ -428,40 +428,35 @@ impl UploadEngine {
         let input = PathBuf::from(&task.local_path);
         let total = std::fs::metadata(&input).map(|m| m.len()).unwrap_or(0);
 
-        // Drive a determinate progress bar by polling exiftool's rewrite file
-        // (`<input>_exiftool_tmp`, grows linearly to the source size) while the
-        // blocking embed runs. Aborted as soon as the embed returns.
+        // Determinate progress: exiftool writes `<input>_exiftool_tmp`, growing
+        // linearly to the source size. We tick from a `select!` loop driven by the
+        // SAME future as the blocking embed — when the embed completes we break and
+        // emit exactly one final event. No separate racing task to abort, so a late
+        // tick can never land after completion and resurrect a stale bar.
         let mut tmp_os = input.clone().into_os_string();
         tmp_os.push("_exiftool_tmp");
         let tmp_path = PathBuf::from(tmp_os);
-        let poller = {
-            let event_tx = self.event_tx.clone();
-            let task_id = task_id.to_string();
-            let tmp_path = tmp_path.clone();
-            tokio::spawn(async move {
-                if total == 0 {
-                    return;
-                }
-                loop {
-                    let bytes = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
-                    let _ = event_tx.send(UploadEvent::CaptureEmbedProgress {
-                        task_id: task_id.clone(),
-                        bytes: bytes.min(total),
-                        total,
-                    });
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                }
-            })
-        };
 
         let embed_input = input.clone();
-        let res = tokio::task::spawn_blocking(move || {
+        let mut embed = tokio::task::spawn_blocking(move || {
             crate::capture::embed_in_place_blocking(&embed_input, &meta)
-        })
-        .await
-        .expect("capture in-place embed task panicked");
-        poller.abort();
-        // Final tick: full bar on success, or clear (bytes==0) on failure — the UI
+        });
+        let res = loop {
+            tokio::select! {
+                joined = &mut embed => break joined.expect("capture in-place embed task panicked"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                    if total > 0 {
+                        let bytes = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+                        let _ = self.event_tx.send(UploadEvent::CaptureEmbedProgress {
+                            task_id: task_id.to_string(),
+                            bytes: bytes.min(total),
+                            total,
+                        });
+                    }
+                }
+            }
+        };
+        // Exactly one final event: full bar on success, clear on failure — the UI
         // drops the bar when bytes >= total or total == 0.
         let _ = self.event_tx.send(UploadEvent::CaptureEmbedProgress {
             task_id: task_id.to_string(),

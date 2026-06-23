@@ -471,10 +471,12 @@ pub fn StagedRow(
                 VideoInfoPopover { details }
             }
 
-            // Capture metadata, when set: a green confirmation line showing the
-            // recorded values, so the user can see at a glance which clips are
-            // filled and with what (vs. the "Needs metadata" warning when absent).
-            if let Some(m) = capture.as_ref() {
+            // Capture metadata, when set AND not mid-write: a green confirmation
+            // line showing the recorded values, so the user can see at a glance
+            // which clips are filled and with what. Suppressed while embedding (the
+            // bar below takes over) and absent entirely when nothing is set (the
+            // "Needs metadata" warning shows instead).
+            if let Some(m) = capture.as_ref().filter(|_| embedding.is_none()) {
                 div {
                     style: "font-size: 11px; color: var(--success, #16a34a); margin-top: 4px; padding: 3px 6px; background: var(--success-bg, rgba(22,163,74,0.1)); border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
                     title: "Capture metadata written into this clip's file.",
@@ -482,24 +484,33 @@ pub fn StagedRow(
                 }
             }
 
-            // Save-time embed in progress: determinate bar driven by the exiftool
-            // rewrite size (CaptureEmbedProgress).
+            // Save-time embed in progress. A determinate bar (driven by the
+            // exiftool rewrite-temp size) ONCE we have a byte count; until then —
+            // or if the rewrite-temp can't be located — an honest "Writing
+            // metadata…" line rather than a bar stuck at 0%.
             if let Some((bytes, total)) = embedding {
                 div { style: "margin-top: 6px;",
-                    Progress {
-                        value: (bytes as f64 / total.max(1) as f64 * 100.0).min(100.0),
-                        max: 100.0,
-                        "aria-label": "Embedding metadata",
-                        ProgressIndicator {}
-                    }
-                    div {
-                        style: "font-size: 11px; margin-top: 2px; color: var(--text-muted);",
-                        {format!(
-                            "Writing metadata — {} / {} ({:.0}%)",
-                            format_size(bytes),
-                            format_size(total),
-                            (bytes as f64 / total.max(1) as f64 * 100.0).min(100.0),
-                        )}
+                    if bytes > 0 {
+                        Progress {
+                            value: (bytes as f64 / total.max(1) as f64 * 100.0).min(100.0),
+                            max: 100.0,
+                            "aria-label": "Embedding metadata",
+                            ProgressIndicator {}
+                        }
+                        div {
+                            style: "font-size: 11px; margin-top: 2px; color: var(--text-muted);",
+                            {format!(
+                                "Writing metadata — {} / {} ({:.0}%)",
+                                format_size(bytes),
+                                format_size(total),
+                                (bytes as f64 / total.max(1) as f64 * 100.0).min(100.0),
+                            )}
+                        }
+                    } else {
+                        div {
+                            style: "font-size: 11px; color: var(--text-muted);",
+                            "Writing metadata\u{2026}"
+                        }
                     }
                 }
             }
