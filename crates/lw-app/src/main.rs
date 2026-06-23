@@ -46,6 +46,13 @@ fn main() {
             release: sentry::release_name!(),
             environment: Some(std::borrow::Cow::from(environment)),
             traces_sample_rate: 0.2,
+            // Release Health: emit a session per app run (started here, ended
+            // when `_sentry_guard` drops at exit) so Sentry counts ALL desktop
+            // users + active-by-version — not just the ones who hit an error.
+            // Sessions are attributed to the logged-in user set on the scope in
+            // app.rs after whoami. Application mode (the default) = one session
+            // per process run, which is what we want for a desktop app.
+            auto_session_tracking: true,
             ..Default::default()
         },
     ));
