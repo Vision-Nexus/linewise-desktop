@@ -295,6 +295,12 @@ pub struct UploadEngine {
     /// "Needs metadata" until the fill UI sets it (capture is required — the
     /// manual `confirm_staged` skips any clip still missing metadata).
     batch_capture: std::sync::Mutex<Option<crate::capture::CaptureMetadata>>,
+    /// Task ids whose SOURCE FILE already carries the io.visionlab tags — either
+    /// the Save-time in-place embed succeeded, or the tags were read back from the
+    /// file at stage time (re-add / vendor-pre-tagged). Upload Stage 0 skips
+    /// re-embedding these (the rewrite already happened), avoiding a second
+    /// multi-GB pass. In-memory only.
+    capture_embedded: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// What the dedup gate needs from the logged-in user: their Linewise
@@ -333,6 +339,7 @@ impl UploadEngine {
             current_user_cache: OnceCell::new(),
             capture_metadata: std::sync::Mutex::new(std::collections::HashMap::new()),
             batch_capture: std::sync::Mutex::new(None),
+            capture_embedded: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -390,13 +397,64 @@ impl UploadEngine {
             .cloned()
     }
 
-    /// Record `meta` as the per-file capture metadata for every clip currently
-    /// `Staged` (the whole visible queue). The top-bar batch save calls this so
-    /// "set once" covers files already added, not just future ones; the caller
-    /// also records `meta` as the default for later files via
-    /// `set_batch_capture_metadata`. Recording only — the upload step is manual:
-    /// the clips stay `Staged` (now showing "✓ filled") until the user clicks
-    /// "Upload", which runs `confirm_staged`.
+    /// Save-time embed for one clip: record `meta` AND write the io.visionlab tags
+    /// into the source file in place, so the file is self-describing (a re-add
+    /// reads them back) and the staging hash is invalidated for re-derivation.
+    ///
+    /// Returns `Ok(true)` when the source file was tagged in place; `Ok(false)`
+    /// when the source couldn't be written (read-only / full removable media) —
+    /// the values are still recorded in memory and the upload path's adaptive
+    /// embed will tag a local copy instead. `Err` only when exiftool is missing.
+    /// The full-file rewrite is a blocking multi-second op for large clips.
+    pub async fn embed_capture_in_place(
+        self: &Arc<Self>,
+        task_id: &str,
+        meta: crate::capture::CaptureMetadata,
+    ) -> Result<bool, UploadError> {
+        self.set_capture_metadata(task_id, Some(meta.clone()));
+        let Some(task) = self.db.get_upload_by_id(task_id).await? else {
+            return Ok(false);
+        };
+        let input = PathBuf::from(&task.local_path);
+        let res = tokio::task::spawn_blocking(move || {
+            crate::capture::embed_in_place_blocking(&input, &meta)
+        })
+        .await
+        .expect("capture in-place embed task panicked");
+        match res {
+            Ok(()) => {
+                self.capture_embedded
+                    .lock()
+                    .expect("capture_embedded lock")
+                    .insert(task_id.to_string());
+                // Source bytes changed after the staging hash → invalidate so the
+                // upload worker re-derives the digest from the tagged file.
+                if let Err(e) = self.db.clear_upload_hashes(task_id).await {
+                    tracing::warn!(task_id, "failed to clear hashes after in-place embed: {e}");
+                }
+                tracing::info!(task_id, "[capture] embedded metadata in place at save");
+                Ok(true)
+            }
+            Err(crate::capture::CaptureEmbedError::ExiftoolNotFound) => {
+                Err(UploadError::CaptureEmbed {
+                    message: "exiftool binary not found".to_string(),
+                })
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id,
+                    "[capture] in-place embed failed at save ({e}); a copy will be tagged at upload"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// Batch save: embed `meta` into every clip currently `Staged`, ONE AT A TIME
+    /// (each is a full-file rewrite — never run concurrently). Also records `meta`
+    /// as the default for files added later (caller sets that). Per-file failures
+    /// are logged and skipped (their values stay in memory for the upload-time
+    /// copy fallback); the loop continues so one bad clip doesn't block the rest.
     pub async fn apply_capture_to_staged(self: &Arc<Self>, meta: crate::capture::CaptureMetadata) {
         let staged = match self.db.get_staged_uploads().await {
             Ok(s) => s,
@@ -406,7 +464,9 @@ impl UploadEngine {
             }
         };
         for task in staged {
-            self.set_capture_metadata(&task.id, Some(meta.clone()));
+            if let Err(e) = self.embed_capture_in_place(&task.id, meta.clone()).await {
+                tracing::warn!(task_id = %task.id, "batch capture embed failed: {e}");
+            }
         }
     }
 
@@ -740,6 +800,20 @@ impl UploadEngine {
             .await
         {
             Ok((video_info, warnings, post_hash)) => {
+                // Read back any io.visionlab tags already embedded in the file (a
+                // re-add of a Save-time-tagged clip, or a vendor-pre-tagged file):
+                // pre-populate so the row shows "✓ filled" on add and the upload
+                // skips re-embedding. The staging hash below is taken on these same
+                // (already-tagged) bytes, so no re-hash is needed.
+                if let Some(info) = video_info.as_ref()
+                    && let Some(parsed) = crate::capture::parse_capture_from_tags(&info.metadata)
+                {
+                    self.set_capture_metadata(task_id, Some(parsed));
+                    self.capture_embedded
+                        .lock()
+                        .expect("capture_embedded lock")
+                        .insert(task_id.to_string());
+                }
                 // Persist the response payload + flip to Hashing in
                 // one write so the popover-data fields land atomically
                 // with the state change.
@@ -1360,23 +1434,29 @@ impl UploadEngine {
         // the capture-tagged copy is tracked too.
         let mut temp_guard = TempCleanupGuard::default();
 
-        // Stage 0: Embed io.visionlab capture metadata (user-entered). Prefer an
-        // IN-PLACE rewrite of the source (exiftool restructures the QuickTime atoms,
-        // streams preserved, no re-mux), so the source becomes self-describing and a
-        // re-add reads the tags back. If the source can't be written (read-only or
-        // full removable media — USB / SD), it falls back to tagging a local copy.
-        // Either way the upload source carries the tags, so a server-side backfill
-        // can re-extract them from the GCS object. Only a fallback COPY is tracked
-        // for temp cleanup — never the user's own (possibly in-place tagged) file.
-        // The rewrite changes the bytes, so we invalidate the staging-time hashes
-        // and let Stage 1 re-derive the digest from the tagged file (digest of
-        // record / `original_md5` then matches the uploaded bytes).
-        let capture_meta = self
-            .capture_metadata
+        // Stage 0: Ensure io.visionlab capture metadata is embedded in the upload
+        // source. The normal path is Save-time `embed_capture_in_place` (tagged the
+        // user's own file already → `capture_embedded` holds this task → nothing to
+        // do here; the source is self-describing). This block is the FALLBACK for
+        // clips whose Save-time in-place write failed (read-only / full removable
+        // media): tag a local COPY now and upload that, so the GCS object still
+        // carries the tags for server-side backfill. Only the fallback COPY is
+        // tracked for temp cleanup — never the user's own file. The rewrite changes
+        // the bytes, so Stage 1 re-derives the digest from the tagged file.
+        let already_embedded = self
+            .capture_embedded
             .lock()
-            .expect("capture_metadata lock")
-            .get(&task.id)
-            .cloned();
+            .expect("capture_embedded lock")
+            .contains(&task.id);
+        let capture_meta = if already_embedded {
+            None
+        } else {
+            self.capture_metadata
+                .lock()
+                .expect("capture_metadata lock")
+                .get(&task.id)
+                .cloned()
+        };
         let source_buf = match capture_meta {
             Some(meta) if !meta.is_empty() => {
                 let input = original_buf.clone();

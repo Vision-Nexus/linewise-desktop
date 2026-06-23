@@ -242,6 +242,55 @@ fn write_tags_in_place(target: &Path, meta: &CaptureMetadata) -> Result<(), Capt
     }
 }
 
+/// Write the capture tags into `input` **in place only** — no copy fallback.
+/// Used at Save time: the whole point is to tag the user's own file so a re-add
+/// reads the values back, which a local copy can't provide. On read-only / full
+/// media this fails and the caller keeps the values in memory; the upload path's
+/// adaptive [`embed_capture_metadata_blocking`] then tags a copy instead.
+/// Blocking — call from `spawn_blocking`.
+pub fn embed_in_place_blocking(
+    input: &Path,
+    meta: &CaptureMetadata,
+) -> Result<(), CaptureEmbedError> {
+    write_tags_in_place(input, meta)
+}
+
+/// Parse capture metadata out of a clip's probe tags (the `(key, value)` pairs
+/// ffprobe reports in `format.tags`), so a re-added — or vendor-pre-tagged — file
+/// shows its embedded values without re-entry. Keys may carry the
+/// `com.apple.quicktime.` prefix exiftool writes under; it is stripped before
+/// matching. Returns `None` when no io.visionlab/make/model tag is present.
+pub fn parse_capture_from_tags(tags: &[(String, String)]) -> Option<CaptureMetadata> {
+    let mut meta = CaptureMetadata::default();
+    let mut found = false;
+    for (raw_key, value) in tags {
+        let v = value.trim();
+        if v.is_empty() {
+            continue;
+        }
+        // Normalize: drop the QuickTime container prefix and lowercase.
+        let key = raw_key
+            .trim()
+            .trim_start_matches("com.apple.quicktime.")
+            .to_ascii_lowercase();
+        let owned = v.to_string();
+        match key.as_str() {
+            "io.visionlab.country" => meta.country = Some(owned),
+            "io.visionlab.city" => meta.city = Some(owned),
+            "io.visionlab.site" => meta.site = Some(owned),
+            "io.visionlab.station" => meta.station = Some(owned),
+            "io.visionlab.operator" => meta.operator = Some(owned),
+            "io.visionlab.action" => meta.action = Some(owned),
+            "io.visionlab.fov" => meta.fov = v.parse::<i32>().ok(),
+            "make" => meta.make = Some(owned),
+            "model" => meta.model = Some(owned),
+            _ => continue,
+        }
+        found = true;
+    }
+    (found && !meta.is_empty()).then_some(meta)
+}
+
 /// Resolve the exiftool binary, preferring a bundled copy over system PATH.
 /// (Bundling is wired in xtask; until then this falls back to PATH `exiftool`.)
 fn resolve_exiftool_binary() -> std::ffi::OsString {
@@ -296,6 +345,41 @@ mod tests {
         assert_eq!(validate_fov(360).unwrap(), 360);
         assert!(validate_fov(0).is_err());
         assert!(validate_fov(361).is_err());
+    }
+
+    #[test]
+    fn parse_from_tags_strips_prefix_and_typed_fov() {
+        let tags = vec![
+            (
+                "com.apple.quicktime.io.visionlab.country".to_string(),
+                "Thailand".to_string(),
+            ),
+            ("io.visionlab.operator".to_string(), "001".to_string()),
+            (
+                "com.apple.quicktime.io.visionlab.fov".to_string(),
+                "143".to_string(),
+            ),
+            ("make".to_string(), "DJI".to_string()),
+            ("model".to_string(), "Osmo Nano".to_string()),
+            ("major_brand".to_string(), "mp42".to_string()), // unrelated → ignored
+            ("io.visionlab.city".to_string(), "  ".to_string()), // blank → skipped
+        ];
+        let m = parse_capture_from_tags(&tags).expect("should parse");
+        assert_eq!(m.country.as_deref(), Some("Thailand"));
+        assert_eq!(m.operator.as_deref(), Some("001"));
+        assert_eq!(m.fov, Some(143));
+        assert_eq!(m.make.as_deref(), Some("DJI"));
+        assert_eq!(m.model.as_deref(), Some("Osmo Nano"));
+        assert_eq!(m.city, None);
+    }
+
+    #[test]
+    fn parse_from_tags_none_when_absent() {
+        let tags = vec![
+            ("major_brand".to_string(), "mp42".to_string()),
+            ("encoder".to_string(), "Lavf".to_string()),
+        ];
+        assert!(parse_capture_from_tags(&tags).is_none());
     }
 
     #[test]

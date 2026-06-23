@@ -17,7 +17,7 @@
 use crate::components::sheet::{
     Sheet, SheetContent, SheetFooter, SheetHeader, SheetSide, SheetTitle,
 };
-use crate::state::CoreServices;
+use crate::state::{CoreServices, ToastKind};
 use dioxus::prelude::*;
 use lw_core::capture::{CaptureMetadata, canonicalize_operator, validate_fov};
 
@@ -67,9 +67,10 @@ pub fn CaptureMetadataDialog(
 ) -> Element {
     let services = use_context::<CoreServices>();
     let engine = services.upload_engine.clone();
+    let app_state = use_context::<crate::state::AppState>();
     // Bumped on save so staged rows re-render their "✓ filled" / "Needs metadata"
     // state immediately (the engine's capture map is not itself reactive).
-    let mut capture_rev = use_context::<crate::state::AppState>().capture_rev;
+    let mut capture_rev = app_state.capture_rev;
 
     let mut form = use_signal(CaptureForm::default);
     let mut error = use_signal(|| Option::<String>::None);
@@ -139,18 +140,29 @@ pub fn CaptureMetadataDialog(
         };
         error.set(None);
         match &task_save {
-            // Per-file: record this clip's metadata. It stays `Staged` showing
-            // "✓ filled"; the manual "Upload" step dispatches it.
+            // Per-file: embed into this clip's source file in place (Save-time), so
+            // the file is self-describing. It stays `Staged` showing "✓ filled";
+            // the manual "Upload" step dispatches it.
             Some(id) => {
                 if meta.is_empty() {
                     error.set(Some("Fill at least one field before saving.".to_string()));
                     return;
                 }
-                engine_save.set_capture_metadata(id, Some(meta));
-                capture_rev += 1;
+                let engine = engine_save.clone();
+                let id = id.clone();
+                let mut toast_state = app_state.clone();
+                spawn(async move {
+                    if let Err(e) = engine.embed_capture_in_place(&id, meta).await {
+                        toast_state.show_toast(
+                            format!("Couldn't write metadata into the file: {e}"),
+                            ToastKind::Error,
+                        );
+                    }
+                    capture_rev += 1;
+                });
             }
-            // Batch: apply to every clip already in the queue AND keep as the
-            // default for files added later.
+            // Batch: embed into every clip already in the queue (sequentially) AND
+            // keep as the default for files added later.
             None => {
                 engine_save.set_batch_capture_metadata((!meta.is_empty()).then_some(meta.clone()));
                 if !meta.is_empty() {
@@ -185,9 +197,9 @@ pub fn CaptureMetadataDialog(
                     div {
                         style: "font-size: 12px; color: var(--text-secondary); margin-top: 4px;",
                         if task_id.is_some() {
-                            "Saved to this clip only — it stays in the queue. Use \"Upload\" when you're ready. Embedded into the file on upload."
+                            "Written into this clip's file now (it stays in the queue). A large file takes a few seconds. Use \"Upload\" when ready."
                         } else {
-                            "Applied to all files in the queue now and any you add next. They stay in the queue; use \"Upload\" when ready. Embedded into each file on upload."
+                            "Written into every file in the queue now (one at a time), and the default for any you add next. Use \"Upload\" when ready."
                         }
                     }
                 }
