@@ -758,15 +758,18 @@ impl UploadEngine {
 
     /// Stage a file for review (step 1 of two-step upload).
     ///
-    /// Three-phase: this function returns synchronously after
-    /// inserting the row in the `QualityChecking` state, and spawns a
-    /// background worker that (1) runs the local atom walk + server
-    /// `/quality-check` round-trip, (2) flips the row to `Hashing`
-    /// and streams BLAKE3+MD5, (3) runs the cross-tenant dedup check
-    /// and settles the row in `Staged` or `Rejected`. Each phase
-    /// emits its own `StateChanged` so the queue UI can render an
-    /// indeterminate progress bar during the network-bound check and
-    /// a determinate one during hashing.
+    /// QC-only staging: this function returns synchronously after inserting
+    /// the row (a video row in `QualityChecking`, a non-video row directly in
+    /// `Staged`), and spawns a background worker that — for video — runs the
+    /// local atom walk + server `/quality-check` round-trip and settles the
+    /// row `Staged` (accept) or `Rejected` (QC failure). Staging does NOT
+    /// hash, compute PDQ, or run any dedup check: the capture-metadata embed
+    /// rewrites the file after staging, so a staging-time fingerprint can
+    /// never match what is finally uploaded. Dedup is the sole job of the
+    /// post-embed Stage-4 gate (`precreate_dedup`), where the digests match
+    /// the stored object. The video QC phase emits `StateChanged` so the
+    /// queue UI can render an indeterminate progress bar during the
+    /// network-bound check.
     ///
     /// Failures along the quality-check phase (broken file, missing
     /// `moov`, unsupported container, server unreachable) settle the
@@ -777,11 +780,9 @@ impl UploadEngine {
     /// see *which* file is broken and *why* without having to recall
     /// the toast.
     ///
-    /// Quality-`Rejected` rows still go through hashing: a
-    /// super-admin "Force upload" bypass turns them into a normal
-    /// pipeline run, and that run wants the digest already on the row
-    /// so the `create_document` call can carry `digest.{md5, crc32c,
-    /// sha256_head_256kib}` without paying for a second I/O pass.
+    /// A super-admin "Force upload" on a `Rejected` row turns it into a
+    /// normal pipeline run; the Stage-1 rehash derives the digest from the
+    /// (post-embed) source then, so no staging-time hash is needed.
     pub async fn stage_file(
         self: &Arc<Self>,
         path: &Path,
@@ -824,14 +825,16 @@ impl UploadEngine {
             mpu_upload_id: None,
             bytes_uploaded: 0,
             // Non-video rows skip the quality-check step entirely; the
-            // server gate runs only for `video/*`. They land in
-            // `Hashing` straight away and follow the regular dedup
-            // path. Video rows enter `QualityChecking` and only
-            // transition to `Hashing` once the server response arrives.
+            // server gate runs only for `video/*`. With staging-time dedup
+            // removed (dedup now happens once, post-capture-embed, at
+            // Stage 4), a non-video row has nothing to do at staging and
+            // lands in `Staged` straight away. Video rows enter
+            // `QualityChecking` and transition to `Staged` once the server
+            // QC response arrives — they no longer pass through `Hashing`.
             state: if is_video {
                 UploadState::QualityChecking
             } else {
-                UploadState::Hashing
+                UploadState::Staged
             },
             error_message: None,
             hash: None,
@@ -885,7 +888,7 @@ impl UploadEngine {
             let _permit = stage_sem.acquire().await.expect("stage semaphore closed");
             let final_state = if is_video {
                 engine
-                    .run_quality_then_hash(
+                    .run_quality_check_only(
                         &task_id,
                         &path_buf,
                         &tenant_id_owned,
@@ -894,12 +897,14 @@ impl UploadEngine {
                     )
                     .await
             } else {
-                // Non-video rows skip the quality-check probe and go straight to
-                // the hash + dedup path; like every row, they settle `Staged` and
-                // wait for capture metadata + the manual "Upload".
-                engine
-                    .run_hash_and_dedup(&task_id, &path_buf, &tenant_id_owned, Vec::new())
-                    .await
+                // Non-video rows skip the quality-check probe entirely. Staging no
+                // longer hashes or dedups (that is the sole job of Stage 4, after
+                // the capture-metadata embed), so the row is already `Staged` from
+                // insert: just settle it and let auto-advance decide whether to
+                // upload. The duplicate verdict, if any, is caught at Stage 4 on
+                // the post-embed bytes — the only fingerprints that match what is
+                // actually stored.
+                engine.settle_staged_and_advance(&task_id, Vec::new()).await
             };
             tracing::debug!(task_id = %task_id, ?final_state, "stage_file worker finished");
         });
@@ -926,12 +931,21 @@ impl UploadEngine {
         Ok(task)
     }
 
-    /// Drive the quality-check phase, then hand off to the hash phase.
-    /// On a broken-file / unsupported-container / offline failure the
-    /// row settles directly into `Rejected` with the typed message in
-    /// `rejection_reasons`; on accept (or server-reject) the row
-    /// transitions to `Hashing` and the regular post-hash path runs.
-    async fn run_quality_then_hash(
+    /// Drive the quality-check phase and settle the row. Staging is now
+    /// QC-only: there is NO hashing, NO PDQ compute, and NO dedup check at
+    /// staging time. The capture-metadata embed (Stage 0) rewrites the file
+    /// after staging, so any fingerprint taken here would be on the
+    /// pre-embed bytes and could never match what is finally uploaded. Dedup
+    /// is therefore deferred to the single post-embed gate at Stage 4
+    /// (`precreate_dedup`), where the digests match the stored object.
+    ///
+    /// On a broken-file / unsupported-container / offline failure the row
+    /// settles directly into `Rejected` with the typed message in
+    /// `rejection_reasons`. On accept the row settles `Staged` and
+    /// auto-advances if its capture metadata is already resolved. On a
+    /// server QC *reject* the row settles `Rejected` with the QC reasons —
+    /// never a *duplicate* rejection at staging.
+    async fn run_quality_check_only(
         self: &Arc<Self>,
         task_id: &str,
         path: &Path,
@@ -939,58 +953,86 @@ impl UploadEngine {
         project_id: &str,
         filename: &str,
     ) -> UploadState {
-        match self
+        let (video_info, warnings, post_hash) = match self
             .run_quality_check(path, tenant_id, project_id, filename)
             .await
         {
-            Ok((video_info, warnings, post_hash)) => {
-                // Read back any io.visionlab tags already embedded in the file (a
-                // re-add of a Save-time-tagged clip, or a vendor-pre-tagged file):
-                // pre-populate so the row shows "✓ filled" on add and the upload
-                // skips re-embedding. The staging hash below is taken on these same
-                // (already-tagged) bytes, so no re-hash is needed.
-                if let Some(info) = video_info.as_ref()
-                    && let Some(parsed) = crate::capture::parse_capture_from_tags(&info.metadata)
-                {
-                    self.set_capture_metadata(task_id, Some(parsed));
-                    self.capture_embedded
-                        .lock()
-                        .expect("capture_embedded lock")
-                        .insert(task_id.to_string());
-                }
-                // Persist the response payload + flip to Hashing in
-                // one write so the popover-data fields land atomically
-                // with the state change.
-                let _ = self
-                    .db
-                    .update_upload_quality_check_settled(
-                        task_id,
-                        UploadState::Hashing,
-                        video_info.as_ref(),
-                        &warnings,
-                    )
-                    .await;
-                let _ = self.event_tx.send(UploadEvent::QualityCheckPassed {
-                    task_id: task_id.to_string(),
-                    video_info,
-                    warnings: warnings.clone(),
-                });
-                let _ = self.event_tx.send(UploadEvent::StateChanged {
-                    task_id: task_id.to_string(),
-                    state: UploadState::Hashing,
-                });
-                match post_hash {
-                    PostHashVerdict::Stage => {
-                        self.run_hash_and_dedup(task_id, path, tenant_id, warnings)
-                            .await
-                    }
-                    PostHashVerdict::Reject(reasons) => {
-                        self.run_hash_only(task_id, path, warnings, reasons).await
-                    }
-                }
-            }
-            Err(err) => self.settle_quality_check_rejected(task_id, &err).await,
+            Ok(triple) => triple,
+            Err(err) => return self.settle_quality_check_rejected(task_id, &err).await,
+        };
+        // Read back any io.visionlab tags already embedded in the file (a
+        // re-add of a Save-time-tagged clip, or a vendor-pre-tagged file):
+        // pre-populate so the row shows "✓ filled" on add and the upload
+        // skips re-embedding.
+        if let Some(info) = video_info.as_ref()
+            && let Some(parsed) = crate::capture::parse_capture_from_tags(&info.metadata)
+        {
+            self.set_capture_metadata(task_id, Some(parsed));
+            self.capture_embedded
+                .lock()
+                .expect("capture_embedded lock")
+                .insert(task_id.to_string());
         }
+        // Persist the response payload (video_info + warnings) and the
+        // terminal staging state in one write so the popover-data fields land
+        // atomically with the state change. A QC reject lands `Rejected` with
+        // the server reasons; an accept lands `Staged`.
+        let (state, rejection_reasons) = match post_hash {
+            PostHashVerdict::Stage => (UploadState::Staged, Vec::new()),
+            PostHashVerdict::Reject(reasons) => (UploadState::Rejected, reasons),
+        };
+        let _ = self
+            .db
+            .update_upload_quality_check_settled(
+                task_id,
+                state.clone(),
+                video_info.as_ref(),
+                &warnings,
+            )
+            .await;
+        let _ = self.event_tx.send(UploadEvent::QualityCheckPassed {
+            task_id: task_id.to_string(),
+            video_info,
+            warnings: warnings.clone(),
+        });
+        if state == UploadState::Rejected {
+            // Surface the QC rejection reasons + flip the row to Rejected.
+            return self
+                .settle_post_hash(task_id, state, warnings, rejection_reasons)
+                .await;
+        }
+        // Accepted: emit warnings (may be empty) + the `Staged` transition,
+        // then auto-advance if the clip's capture metadata is already
+        // resolved (batch default in effect, or tags read back above).
+        let _ = self.event_tx.send(UploadEvent::ValidationWarnings {
+            task_id: task_id.to_string(),
+            warnings,
+            rejection_reasons,
+        });
+        let _ = self.event_tx.send(UploadEvent::StateChanged {
+            task_id: task_id.to_string(),
+            state: UploadState::Staged,
+        });
+        self.auto_advance_if_resolved(task_id).await;
+        UploadState::Staged
+    }
+
+    /// Settle a (non-video) row `Staged` and auto-advance if its capture
+    /// metadata is already resolved. The QC-only-staging counterpart to the
+    /// accept branch of [`Self::run_quality_check_only`], for rows that never
+    /// run a quality check. No hashing, no dedup: that is Stage 4's job now.
+    async fn settle_staged_and_advance(
+        self: &Arc<Self>,
+        task_id: &str,
+        warnings: Vec<String>,
+    ) -> UploadState {
+        let settled = self
+            .settle_post_hash(task_id, UploadState::Staged, warnings, Vec::new())
+            .await;
+        if settled == UploadState::Staged {
+            self.auto_advance_if_resolved(task_id).await;
+        }
+        settled
     }
 
     /// Settle a quality-check failure as a typed `Rejected` row. The
@@ -1007,87 +1049,6 @@ impl UploadEngine {
         let reason = err.to_string();
         self.settle_post_hash(task_id, UploadState::Rejected, Vec::new(), vec![reason])
             .await
-    }
-
-    /// Drive the hash stream for a `Hashing` row, then run the
-    /// cross-tenant dedup check, and end in `Staged` or `Rejected`.
-    /// Returns the terminal state for logging only — all persistence
-    /// and UI events happen inside.
-    ///
-    /// A `Staged` settle triggers [`Self::auto_advance_if_resolved`]: if the
-    /// clip's capture metadata is already resolved (a batch default was in effect,
-    /// or tags were read back at QC time) and it is not transcode-held, it advances
-    /// straight to upload. The common case — no batch default — settles `Staged`
-    /// here and waits for the user to fill or skip metadata, which re-fires the
-    /// auto-advance from the UI handlers.
-    async fn run_hash_and_dedup(
-        self: &Arc<Self>,
-        task_id: &str,
-        path: &Path,
-        tenant_id: &str,
-        warnings: Vec<String>,
-    ) -> UploadState {
-        let hashes = match self.consume_hash_stream(task_id, path).await {
-            Ok(h) => h,
-            Err(_) => return self.fail_hashing(task_id).await,
-        };
-        // Tier-2 perceptual frames (empty + no-op while `pdq::PDQ_ENABLED` is
-        // false). Computed here so the dedup query can carry them; recomputed at
-        // Stage 4 for persistence (see `process_task`).
-        let pdq_frames = pdq::compute_pdq_frames(path).await;
-
-        let mut rejection_reasons: Vec<String> = Vec::new();
-        let final_state = match self
-            .dedup_verdict(tenant_id, &hashes, pdq_frames, task_id)
-            .await
-        {
-            DedupVerdict::Allow => UploadState::Staged,
-            DedupVerdict::Reuse(document_id) => {
-                // Stamp the abandoned upload's document_id onto the row
-                // so Stage 4 in `process_task` skips `create_document`
-                // and the resumable-upload machinery picks the existing
-                // GCS object. A failure here drops us back to the
-                // regular staging path — the worst case is the row gets
-                // a fresh document on retry, which is the pre-feature
-                // behaviour, so we don't escalate to Rejected.
-                if let Err(e) = self
-                    .db
-                    .update_upload_document_id(task_id, &document_id)
-                    .await
-                {
-                    tracing::warn!(
-                        task_id,
-                        document_id,
-                        "dedup: failed to persist reused document_id, falling back to fresh create: {e}"
-                    );
-                }
-                UploadState::Staged
-            }
-            DedupVerdict::Reject(reason) => {
-                rejection_reasons.push(reason);
-                UploadState::Rejected
-            }
-        };
-
-        let settled = self
-            .settle_post_hash(task_id, final_state, warnings, rejection_reasons)
-            .await;
-
-        // Auto-advance: a clip that settles `Staged` advances straight to
-        // `Pending` and uploads WITHOUT a manual "Upload" click — but only once
-        // its required capture metadata is RESOLVED (filled, or explicitly
-        // skipped). A freshly-staged clip is usually unresolved at this point, so
-        // this fires only for clips that arrived already resolved: a batch-default
-        // was in effect at stage time, or the source carried io.visionlab tags read
-        // back at QC time. The common case (no batch default) settles `Staged`
-        // here and waits; `auto_advance_if_resolved` re-fires from the UI's
-        // fill/skip handlers the moment the user resolves the clip. Transcode-
-        // eligible clips are held `Staged` regardless, for the opt-in transcode
-        // confirm (see `held_for_transcode`).
-        if settled == UploadState::Staged {
-            self.auto_advance_if_resolved(task_id).await;
-        }
-        settled
     }
 
     /// Auto-advance one clip from `Staged` to upload when, and only when, it is
@@ -1197,24 +1158,6 @@ impl UploadEngine {
         });
     }
 
-    /// Hash a quality-rejected row so the MD5 is on disk for a future
-    /// Force-upload bypass, then settle the row into `Rejected` with
-    /// the quality reasons. We skip the dedup check here — a row the
-    /// user can't upload as-is doesn't need the cross-tenant verdict.
-    async fn run_hash_only(
-        self: &Arc<Self>,
-        task_id: &str,
-        path: &Path,
-        warnings: Vec<String>,
-        rejection_reasons: Vec<String>,
-    ) -> UploadState {
-        if self.consume_hash_stream(task_id, path).await.is_err() {
-            return self.fail_hashing(task_id).await;
-        }
-        self.settle_post_hash(task_id, UploadState::Rejected, warnings, rejection_reasons)
-            .await
-    }
-
     /// One write + two events: persist state + warnings + reasons,
     /// notify the UI, return the state for logging. Shared by both
     /// terminal paths so the DB and event order can't drift between
@@ -1247,14 +1190,14 @@ impl UploadEngine {
         state
     }
 
-    /// Pump the hash stream into UI events + persisted hashes. The
-    /// single drain path used both by the staging-time worker and by
-    /// `process_task`'s legacy-row fallback. Errors are surfaced as
-    /// `UploadError::Io` so a caller in the upload pipeline can `?`
-    /// them; the staging worker maps `Err` to a `Failed` state via
-    /// [`fail_hashing`]. `HashProgress` events fire unconditionally —
-    /// a row that isn't in the `Hashing` state has its stale entry
-    /// cleared by the next `StateChanged` in the UI's event handler.
+    /// Pump the hash stream into UI events + persisted hashes. Since
+    /// staging no longer hashes (dedup moved to the post-embed Stage-4
+    /// gate), the sole caller is `process_task`'s Stage-1 rehash, which
+    /// `?`-propagates an error. Errors are surfaced as `UploadError::Io`
+    /// so that caller can `?` them. `HashProgress` events fire
+    /// unconditionally — a row that isn't in a hashing-progress view has
+    /// its stale entry cleared by the next `StateChanged` in the UI's
+    /// event handler.
     async fn consume_hash_stream(
         &self,
         task_id: &str,
@@ -1288,22 +1231,6 @@ impl UploadEngine {
         Err(UploadError::Io(std::io::Error::other(
             "hash stream ended without Done",
         )))
-    }
-
-    /// Mark a row Failed when its hash stream errored. Surfaced to
-    /// the UI so the user can re-add the file rather than wonder
-    /// why the row is stuck on "Hashing" forever.
-    async fn fail_hashing(self: &Arc<Self>, task_id: &str) -> UploadState {
-        let msg = "Failed to read file for hashing";
-        let _ = self
-            .db
-            .update_upload_state(task_id, UploadState::Failed, Some(msg))
-            .await;
-        let _ = self.event_tx.send(UploadEvent::Failed {
-            task_id: task_id.to_string(),
-            error: msg.to_string(),
-        });
-        UploadState::Failed
     }
 
     /// Ask the cross-tenant dedup registry whether this file's digest is
@@ -1737,26 +1664,29 @@ impl UploadEngine {
         };
         let path = source_buf.as_path();
 
-        // Stage 1: Dedup check (skip if already hashed). Staging now
-        // pre-computes the full 4-way hash (BLAKE3 + MD5 + CRC32C +
-        // SHA-256-head), so on the happy path we already have all four
-        // values on the row. This branch fires for two cases:
+        // Stage 1: Hash the (post-capture-embed) upload source. Staging is
+        // now QC-only — it does NOT hash — so a freshly-staged row reaches
+        // here with no digest and `needs_rehash` is true. The hash is taken
+        // on `path`, which is the capture-tagged artifact when Stage 0
+        // embedded metadata: the digest therefore matches the bytes we are
+        // about to upload, which is the whole point of moving dedup here.
+        // `needs_rehash` also fires for:
         //
-        //   1. Legacy rows staged before the dual-hash pass landed
+        //   1. Resumed legacy rows staged before any digest pass landed
         //      (`task.hash` is None).
-        //   2. Rows staged in the BLAKE3+MD5-only era after the
-        //      multi-signal-digest migration: `task.hash` is set but
-        //      `source_crc32c` / `source_sha256_head_256kib` are NULL.
-        //      Without rehashing, Stage 4's `create_document` would
-        //      send a partial `digest` and the GCS-callback verified
-        //      pair couldn't match the desktop-supplied legs.
+        //   2. Resumed rows from the BLAKE3+MD5-only era: `task.hash` is set
+        //      but `source_crc32c` / `source_sha256_head_256kib` are NULL.
+        //      Without rehashing, Stage 4's `create_document` would send a
+        //      partial `digest` and the GCS-callback verified pair couldn't
+        //      match the desktop-supplied legs.
         //
-        // The `force_upload` flag suppresses both the local-DB
-        // short-circuit and (implicitly) the staging-time dedup gate
-        // that would have already routed this row to `Rejected` —
-        // a force-upload row reaches `process_task` only because a
-        // super-admin clicked the bypass, so re-asserting the gate
-        // here would defeat the affordance.
+        // A fully-hashed resumed row (all three legs present, e.g. a task
+        // that already passed Stage 4 once and is resuming the upload) skips
+        // the rehash and reuses its persisted digest.
+        //
+        // The `force_upload` flag suppresses the local-DB short-circuit — a
+        // force-upload row reaches `process_task` only because a super-admin
+        // clicked the bypass, so re-asserting the gate here would defeat it.
         let needs_rehash = task.hash.is_none()
             || task.source_crc32c.is_none()
             || task.source_sha256_head_256kib.is_none();
@@ -1767,6 +1697,15 @@ impl UploadEngine {
             task.source_crc32c = Some(hashes.crc32c_b64.clone());
             task.source_sha256_head_256kib = Some(hashes.sha256_head_256kib_hex.clone());
 
+            // Local in-session double-add guard: this exact content (by
+            // post-embed BLAKE3) already finished uploading from this machine
+            // (`file_hashes` is written only after Verify, Stage 6). This used
+            // to run at staging on the pre-embed bytes; moving it here keeps
+            // the protection but now keys it on the digest that actually
+            // matches the stored object. The server-side dedup gate
+            // (`precreate_dedup`) is the authoritative check just below at
+            // Stage 4; this local guard is a fast fail-fast for the common
+            // re-add-the-same-file case.
             if !task.force_upload
                 && let Ok(Some(existing_id)) = self.db.find_by_hash(&hashes.blake3_hex).await
             {
@@ -1781,11 +1720,10 @@ impl UploadEngine {
             // Stage 4 (`precreate_dedup`) so it guards *every* path to create —
             // happy path, auto-retry, and resume — not just rehashed rows.
         }
-        // Set unconditionally above: either the row arrived from `Hashing`
-        // with `task.hash` populated by `consume_hash_stream`, or the
-        // legacy fallback in this function just wrote it. An empty hash
-        // here would silently match the wrong row in `find_by_hash` /
-        // `insert_file_hash`, so fail loudly instead.
+        // Set unconditionally above when `needs_rehash`, or carried on a
+        // fully-hashed resumed row. An empty hash here would silently match
+        // the wrong row in `find_by_hash` / `insert_file_hash`, so fail
+        // loudly instead.
         let hash = task.hash.clone().expect("hash set in Stage 1");
 
         // Stage 2: Video re-check (skip when staging already populated
@@ -1884,21 +1822,24 @@ impl UploadEngine {
             doc_id.clone()
         } else {
             self.update_state(task, UploadState::Creating).await;
-            // Recompute the perceptual frames (cheap: <=5 keyframe seeks) so the
-            // created doc is persisted as a near-duplicate match target. Empty +
-            // omitted while `pdq::PDQ_ENABLED` is false. Recomputed rather than
-            // carried from staging to avoid a DB column / migration — the source
-            // file is local and unchanged, so the frames are identical.
+            // Compute the perceptual frames (cheap: <=5 keyframe seeks) on the
+            // post-embed source so the created doc is persisted as a
+            // near-duplicate match target AND the same frames feed the dedup
+            // query below. Empty + omitted while `pdq::PDQ_ENABLED` is false.
             let pdq_frames = pdq::compute_pdq_frames(path).await;
 
             // INVARIANT: every `create_document` is immediately preceded by a
-            // fresh dedup check. This is the one choke point that runs on *every*
-            // path to create — happy path, auto-retry, and resume — unlike the
-            // staging check (which ran once, before this row's own document
-            // existed) and the Stage-1 checks (which only fire for rows that need
-            // rehashing). It adopts the in-flight orphan a lost create-response
-            // left behind (instead of minting a second document) and skips
-            // creating when a duplicate has appeared since staging.
+            // fresh dedup check — and this is now the SOLE dedup point. Staging
+            // is QC-only; it no longer hashes or dedups, because the
+            // capture-metadata embed rewrites the file after staging, so a
+            // staging-time fingerprint could never match the stored object. The
+            // digest + PDQ frames checked here are taken on the post-embed bytes
+            // (Stage 1 rehashed `path`, the tagged artifact), so the dedup-time
+            // signals are exactly the ones persisted on the created document.
+            // This gate adopts the in-flight orphan a lost create-response left
+            // behind (instead of minting a second document) and settles
+            // `Rejected` when the content already exists (completed,
+            // cross-tenant, or perceptual near-duplicate).
             match self.precreate_dedup(task, &hash, pdq_frames.clone()).await {
                 PreCreate::Adopt(existing_id) => {
                     tracing::info!(

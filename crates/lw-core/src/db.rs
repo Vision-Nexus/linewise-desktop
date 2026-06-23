@@ -378,11 +378,12 @@ impl Database {
     }
 
     /// Settle the staging-time quality-check worker in one UPDATE:
-    /// state + video_info + warnings + cleared error message. Used at
-    /// the `QualityChecking → Hashing` transition so the popover-data
-    /// fields the response carries land atomically with the state
-    /// change. `video_info` is serialised to JSON; `None` clears the
-    /// column.
+    /// state + video_info + warnings + cleared error message. Used at the
+    /// `QualityChecking → Staged` (accept) and `QualityChecking → Rejected`
+    /// (QC failure) transitions so the popover-data fields the response
+    /// carries land atomically with the state change. Staging no longer
+    /// passes through `Hashing` — dedup happens once, post-embed, at
+    /// Stage 4. `video_info` is serialised to JSON; `None` clears the column.
     pub async fn update_upload_quality_check_settled(
         &self,
         id: &str,
