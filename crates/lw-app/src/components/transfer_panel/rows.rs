@@ -8,7 +8,7 @@
 //! byte/duration formatters.
 
 use crate::components::progress::{Progress, ProgressIndicator};
-use crate::state::AppState;
+use crate::state::{AppState, CoreServices};
 use crate::styles;
 use dioxus::prelude::*;
 use lw_core::config::TranscodeConfig;
@@ -322,10 +322,14 @@ pub fn StagedRow(
     /// Even when present, the button only renders for users whose
     /// `system_roles` contain `admin` (see `UserInfo::is_super_admin`).
     on_force_upload: Option<EventHandler<String>>,
+    /// Open the per-file capture-metadata sheet for this clip. Capture is
+    /// required, so a `Staged` clip without metadata holds here until filled.
+    on_fill_metadata: EventHandler<String>,
 ) -> Element {
     let task_id = task.id.clone();
     let force_id = task.id.clone();
     let transcode_id = task.id.clone();
+    let fill_id = task.id.clone();
     let is_video = task.mime_type.starts_with("video/");
     let is_super_admin = use_context::<AppState>()
         .user_info
@@ -358,6 +362,14 @@ pub fn StagedRow(
     // quality check returns, instead of waiting for the row to land
     // in `Staged`.
     let video_details = build_video_details(&task, device_encoder_signatures);
+
+    // Required-metadata gate: a `Staged` clip with no capture metadata recorded
+    // holds here (auto-upload won't dispatch it) until the user fills it. Rejected
+    // rows never auto-upload, so the prompt is suppressed for them.
+    let needs_metadata = task.state == UploadState::Staged
+        && !use_context::<CoreServices>()
+            .upload_engine
+            .has_capture_metadata(&task.id);
 
     let btn_style = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
     let transcode_btn_style = if transcode_on {
@@ -437,6 +449,24 @@ pub fn StagedRow(
             // Action buttons
             div {
                 style: "display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 8px;",
+                if needs_metadata {
+                    span {
+                        style: "margin-right: auto; font-size: 11px; color: var(--warning); padding: 2px 6px; border-radius: 3px; background: var(--warning-bg); border: 1px solid var(--warning);",
+                        title: "Capture metadata is required before this clip uploads.",
+                        "\u{26A0} Needs metadata"
+                    }
+                }
+                if !is_rejected {
+                    button {
+                        style: if needs_metadata {
+                            format!("{btn_style} background: var(--btn-primary); color: white; border-color: var(--btn-primary);")
+                        } else {
+                            format!("{btn_style} background: transparent; color: var(--text-secondary);")
+                        },
+                        onclick: move |_| on_fill_metadata.call(fill_id.clone()),
+                        if needs_metadata { "Add metadata" } else { "Edit metadata" }
+                    }
+                }
                 if show_already_ok_badge {
                     span {
                         style: "font-size: 11px; color: var(--text-secondary); padding: 2px 6px; border-radius: 3px; background: var(--bg-secondary); border: 1px solid var(--border);",

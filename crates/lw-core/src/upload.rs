@@ -289,9 +289,11 @@ pub struct UploadEngine {
     capture_metadata:
         std::sync::Mutex<std::collections::HashMap<String, crate::capture::CaptureMetadata>>,
     /// Current batch-default capture metadata, applied to every file staged while
-    /// it is set ("set defaults → add files" UX). In-memory only. `None` = the
-    /// user hasn't set defaults; files then stage without capture (soft — upload
-    /// still proceeds untagged).
+    /// it is set ("set defaults → add files" UX): a staged file with a batch
+    /// default in effect gets a per-file entry at stage time, so it satisfies the
+    /// required-metadata gate and auto-advances. In-memory only. `None` = no
+    /// default; files then hold `Staged` until the per-file fill UI sets metadata
+    /// (capture is required — see the auto-advance gate in `run_quality_then_hash`).
     batch_capture: std::sync::Mutex<Option<crate::capture::CaptureMetadata>>,
 }
 
@@ -364,6 +366,52 @@ impl UploadEngine {
             .lock()
             .expect("batch_capture lock")
             .clone()
+    }
+
+    /// Whether per-file capture metadata is set for `task_id`. The auto-advance
+    /// gate requires this before dispatching a `Staged` clip, so a clip with no
+    /// metadata (no batch default applied at stage time, no per-file entry) holds
+    /// `Staged` until the UI fills it. Also drives the row's "needs metadata" badge.
+    pub fn has_capture_metadata(&self, task_id: &str) -> bool {
+        self.capture_metadata
+            .lock()
+            .expect("capture_metadata lock")
+            .contains_key(task_id)
+    }
+
+    /// The per-file capture metadata recorded for `task_id`, if any — for the
+    /// fill UI to prefill when re-editing a clip that already has values.
+    pub fn capture_metadata_for(&self, task_id: &str) -> Option<crate::capture::CaptureMetadata> {
+        self.capture_metadata
+            .lock()
+            .expect("capture_metadata lock")
+            .get(task_id)
+            .cloned()
+    }
+
+    /// Record per-file capture metadata for `task_id` and release the clip: if it
+    /// is currently held `Staged` (the required-metadata gate, not a transcode
+    /// opt-in), advance it to `Pending` and dispatch. The single entry point the
+    /// per-file fill UI calls on save. Transcode-held rows still wait for their
+    /// transcode confirm (`confirm_staged`), which dispatches them separately.
+    pub async fn submit_with_capture(
+        self: &Arc<Self>,
+        task_id: &str,
+        meta: crate::capture::CaptureMetadata,
+    ) {
+        self.set_capture_metadata(task_id, Some(meta));
+        match self.db.get_upload_by_id(task_id).await {
+            Ok(Some(task)) if task.state == UploadState::Staged && !task.transcode => {
+                self.advance_staged_and_dispatch(task_id).await;
+            }
+            Ok(_) => {
+                // Not staged-and-waiting (e.g. already dispatched, transcode-held,
+                // or already uploading): metadata is recorded; nothing to release.
+            }
+            Err(e) => {
+                tracing::warn!(task_id, "submit_with_capture: failed to load task: {e}");
+            }
+        }
     }
 
     /// Return the cached `whoami` snapshot, fetching it on first call
@@ -827,7 +875,15 @@ impl UploadEngine {
         // and upload. Transcode-eligible clips are the only exception — they
         // wait `Staged` for the opt-in transcode confirm.
         match settled {
-            UploadState::Staged if !self.held_for_transcode(video_info.as_ref()) => {
+            // Auto-advance only when the clip is NOT held for an opt-in transcode
+            // AND its capture metadata is set. Capture is required: a clip with no
+            // metadata (no batch default applied, no per-file entry) stays `Staged`
+            // with a "fill metadata" affordance until the user fills it, which then
+            // dispatches it (`submit_with_capture`).
+            UploadState::Staged
+                if !self.held_for_transcode(video_info.as_ref())
+                    && self.has_capture_metadata(task_id) =>
+            {
                 self.advance_staged_and_dispatch(task_id).await;
             }
             UploadState::QualityChecking
@@ -1363,6 +1419,12 @@ impl UploadEngine {
         let mut confirmed_ids = Vec::new();
 
         for mut task in staged {
+            // Capture is required: a staged clip with no metadata stays `Staged`
+            // (its row shows the "needs metadata" fill prompt) rather than being
+            // dispatched by the manual confirm — mirroring the auto-advance gate.
+            if !self.has_capture_metadata(&task.id) {
+                continue;
+            }
             task.transcode = transcode_task_ids.contains(&task.id);
             // Persist the transcode choice so resume-after-crash keeps it.
             // Without this, a killed mid-transcode task silently falls through

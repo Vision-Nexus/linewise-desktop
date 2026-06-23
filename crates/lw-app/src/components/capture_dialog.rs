@@ -1,9 +1,15 @@
-//! Right-side sheet for the **batch** io.visionlab capture metadata applied to
-//! every file staged afterwards ("set defaults → add files"). Saving stores the
-//! values on the upload engine (`set_batch_capture_metadata`, in-memory); each
-//! file staged while defaults are set carries them, and `process_task` embeds
-//! them into the MP4 before upload. Capture is optional (soft) — leaving fields
-//! blank just uploads untagged.
+//! Right-side sheet for io.visionlab capture metadata, in two modes:
+//!
+//! - **Batch** (`task_id == None`): defaults applied to every file staged
+//!   afterwards ("set defaults → add files"). Saving stores them on the engine
+//!   (`set_batch_capture_metadata`, in-memory); a file staged while defaults are
+//!   set gets a per-file entry, satisfies the required-metadata gate, and flows.
+//! - **Per-file** (`task_id == Some(id)`): fills the held clip's metadata. Saving
+//!   calls `submit_with_capture`, which records it and releases that one clip
+//!   (`Staged` → dispatch). This is the required-metadata fill the held rows open.
+//!
+//! Capture is **required**: a clip with no metadata holds `Staged` until filled
+//! (via either mode). `process_task` embeds the values into the MP4 before upload.
 //!
 //! Mounted unconditionally by `TransferPanel` so the slide animation plays on
 //! close; visibility is driven by the `open` prop.
@@ -52,15 +58,42 @@ fn opt(s: &str) -> Option<String> {
 }
 
 #[component]
-pub fn CaptureMetadataDialog(open: bool, on_close: EventHandler<bool>) -> Element {
+pub fn CaptureMetadataDialog(
+    open: bool,
+    /// `Some(task_id)` = per-file fill (releases that held clip on save);
+    /// `None` = batch defaults applied to subsequently-staged files.
+    task_id: Option<String>,
+    on_close: EventHandler<bool>,
+) -> Element {
     let services = use_context::<CoreServices>();
     let engine = services.upload_engine.clone();
 
-    let initial = engine.batch_capture_metadata().unwrap_or_default();
-    let mut form = use_signal(|| CaptureForm::from(initial));
+    let mut form = use_signal(CaptureForm::default);
     let mut error = use_signal(|| Option::<String>::None);
 
+    // Reset the buffer each time the sheet opens so a reused dialog never shows a
+    // previous clip's values. Per-file prefers the clip's own entry, then the
+    // batch default; batch mode shows the current default.
+    {
+        let engine_eff = engine.clone();
+        let task_eff = task_id.clone();
+        use_effect(move || {
+            if open {
+                let initial = match &task_eff {
+                    Some(id) => engine_eff
+                        .capture_metadata_for(id)
+                        .or_else(|| engine_eff.batch_capture_metadata())
+                        .unwrap_or_default(),
+                    None => engine_eff.batch_capture_metadata().unwrap_or_default(),
+                };
+                form.set(CaptureForm::from(initial));
+                error.set(None);
+            }
+        });
+    }
+
     let engine_save = engine.clone();
+    let task_save = task_id.clone();
     let on_save = move |_| {
         let f = form.read().clone();
 
@@ -102,7 +135,22 @@ pub fn CaptureMetadataDialog(open: bool, on_close: EventHandler<bool>) -> Elemen
             action: opt(&f.action),
         };
         error.set(None);
-        engine_save.set_batch_capture_metadata((!meta.is_empty()).then_some(meta));
+        match &task_save {
+            // Per-file: record + release this clip (Staged → dispatch).
+            Some(id) => {
+                if meta.is_empty() {
+                    error.set(Some("Fill at least one field before saving.".to_string()));
+                    return;
+                }
+                let engine = engine_save.clone();
+                let id = id.clone();
+                spawn(async move {
+                    engine.submit_with_capture(&id, meta).await;
+                });
+            }
+            // Batch defaults for subsequently-staged files.
+            None => engine_save.set_batch_capture_metadata((!meta.is_empty()).then_some(meta)),
+        }
         on_close.call(true);
     };
 
@@ -120,10 +168,16 @@ pub fn CaptureMetadataDialog(open: bool, on_close: EventHandler<bool>) -> Elemen
             SheetContent {
                 side: SheetSide::Right,
                 SheetHeader {
-                    SheetTitle { "Capture Metadata" }
+                    SheetTitle {
+                        if task_id.is_some() { "Fill Capture Metadata" } else { "Capture Metadata Defaults" }
+                    }
                     div {
                         style: "font-size: 12px; color: var(--text-secondary); margin-top: 4px;",
-                        "Applied to every file added after saving. Embedded into the file on upload."
+                        if task_id.is_some() {
+                            "Required before this clip uploads. Embedded into the file, then the clip is queued."
+                        } else {
+                            "Applied to every file added after saving. Embedded into the file on upload."
+                        }
                     }
                 }
 
@@ -197,7 +251,7 @@ pub fn CaptureMetadataDialog(open: bool, on_close: EventHandler<bool>) -> Elemen
                     button {
                         style: "flex: 1; padding: 7px 14px; border-radius: 6px; border: none; background: var(--btn-primary); color: white; cursor: pointer; font-weight: 500; font-size: 13px;",
                         onclick: on_save,
-                        "Save"
+                        if task_id.is_some() { "Save & Upload" } else { "Save" }
                     }
                     button {
                         style: "padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 13px;",

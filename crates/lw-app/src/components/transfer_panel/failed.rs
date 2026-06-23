@@ -90,6 +90,10 @@ pub fn FailedList(
                                 on_remove,
                                 on_transcode_click,
                                 on_force_upload: Some(on_force_upload),
+                                // Rejected rows never auto-upload, so the
+                                // required-metadata prompt/button is suppressed
+                                // (gated on `!is_rejected` in `StagedRow`).
+                                on_fill_metadata: move |_: String| {},
                             }
                         }
                     }

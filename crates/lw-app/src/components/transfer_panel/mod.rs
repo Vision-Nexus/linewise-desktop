@@ -638,8 +638,17 @@ pub fn TransferPanel() -> Element {
 
     let active_tab = *tab.read();
 
-    // Open-state for the batch capture-metadata sheet.
+    // Capture-metadata sheet state. `capture_open` drives visibility (one
+    // mounted sheet, for the slide animation); `capture_task` selects the mode:
+    // `None` = batch defaults (header button), `Some(id)` = per-file fill (row
+    // button), which releases that held clip on save.
     let mut capture_open = use_signal(|| false);
+    let mut capture_task: Signal<Option<String>> = use_signal(|| None);
+
+    let on_fill_metadata = move |task_id: String| {
+        capture_task.set(Some(task_id));
+        capture_open.set(true);
+    };
 
     rsx! {
         style { "{TRANSFER_TAB_CSS}" }
@@ -700,7 +709,10 @@ pub fn TransferPanel() -> Element {
                         button {
                             style: "padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-size: 13px;",
                             title: "Set capture metadata applied to files you add next",
-                            onclick: move |_| capture_open.set(true),
+                            onclick: move |_| {
+                                capture_task.set(None);
+                                capture_open.set(true);
+                            },
                             "Capture metadata"
                         }
                         if staged_count > 0 {
@@ -792,6 +804,7 @@ pub fn TransferPanel() -> Element {
                         on_remove: on_remove.clone(),
                         on_clear: on_clear.clone(),
                         on_transcode_click,
+                        on_fill_metadata,
                         on_retry: on_retry.clone(),
                         on_pause: on_pause.clone(),
                         on_resume: on_resume.clone(),
@@ -843,11 +856,16 @@ pub fn TransferPanel() -> Element {
                 }
             }
 
-            // Batch capture-metadata sheet. Mounted unconditionally for the
-            // slide animation; visibility driven by `capture_open`.
+            // Capture-metadata sheet (batch or per-file by `capture_task`).
+            // Mounted unconditionally for the slide animation; visibility driven
+            // by `capture_open`.
             CaptureMetadataDialog {
                 open: capture_open(),
-                on_close: move |_saved: bool| capture_open.set(false),
+                task_id: capture_task(),
+                on_close: move |_saved: bool| {
+                    capture_open.set(false);
+                    capture_task.set(None);
+                },
             }
         }
     }
