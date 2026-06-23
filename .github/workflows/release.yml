@@ -208,12 +208,15 @@ jobs:
 
       # cargo-bundle's MSI path is broken for our setup (hyphenated bin name
       # + missing `--format msi` detection), so we ship the unpacked release
-      # directory as a zip. linewise-desktop.exe + bundled FFmpeg DLLs are
-      # all the user needs.
+      # directory as a zip. We stage an explicit allowlist: the app exe, the
+      # FFmpeg DLLs, and the bundled CLIs (ffmpeg/ffprobe) + ExifTool (exe +
+      # its exiftool_files/ PAR folder). The resolve_* helpers find each next to
+      # linewise-desktop.exe, so the flat staging layout must mirror that.
       - name: Zip Windows release
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $ReleaseDir = "target\${{ matrix.target }}\release"
           $ZipPath = "target\linewise-desktop-windows-x86_64.zip"
           $Staging = "$env:RUNNER_TEMP\linewise-desktop"
@@ -221,6 +224,14 @@ jobs:
           Copy-Item "$ReleaseDir\linewise-desktop.exe" $Staging
           Copy-Item "$ReleaseDir\*.dll" $Staging -ErrorAction SilentlyContinue
           Copy-Item "$ReleaseDir\ffmpeg.exe" $Staging -ErrorAction SilentlyContinue
+          Copy-Item "$ReleaseDir\ffprobe.exe" $Staging -ErrorAction SilentlyContinue
+          # ExifTool is required for capture metadata — fail if the bundler didn't
+          # produce it, rather than silently ship a Windows build that can't embed.
+          Copy-Item "$ReleaseDir\exiftool.exe" $Staging
+          Copy-Item "$ReleaseDir\exiftool_files" $Staging -Recurse -ErrorAction SilentlyContinue
+          # Smoke test: the standalone must launch from the staged layout.
+          & "$Staging\exiftool.exe" -ver
+          if ($LASTEXITCODE -ne 0) { throw "bundled exiftool.exe failed to run" }
           Compress-Archive -Path "$Staging\*" -DestinationPath $ZipPath -Force
           Write-Host "Created $ZipPath"
 
