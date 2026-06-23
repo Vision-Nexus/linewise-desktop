@@ -279,6 +279,20 @@ pub struct UploadEngine {
     /// back to less-rich behaviour, mirroring how a transient API
     /// outage is handled.
     current_user_cache: OnceCell<CurrentUserCache>,
+    /// User-entered io.visionlab capture metadata, keyed by task id. In-memory
+    /// only (not persisted) — the UI calls [`Self::set_capture_metadata`] when
+    /// the form is saved; `process_task` reads it at Stage 0 and embeds it into
+    /// the file before hashing/upload. Held on the engine (not the `UploadTask`
+    /// row) so it survives the DB-reload that both the manual-confirm and the
+    /// auto-advance dispatch paths perform, and covers both without per-path
+    /// plumbing. Lost on app restart (acceptable for v1).
+    capture_metadata:
+        std::sync::Mutex<std::collections::HashMap<String, crate::capture::CaptureMetadata>>,
+    /// Current batch-default capture metadata, applied to every file staged while
+    /// it is set ("set defaults → add files" UX). In-memory only. `None` = the
+    /// user hasn't set defaults; files then stage without capture (soft — upload
+    /// still proceeds untagged).
+    batch_capture: std::sync::Mutex<Option<crate::capture::CaptureMetadata>>,
 }
 
 /// What the dedup gate needs from the logged-in user: their Linewise
@@ -315,7 +329,41 @@ impl UploadEngine {
             upload_semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             stage_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STAGING)),
             current_user_cache: OnceCell::new(),
+            capture_metadata: std::sync::Mutex::new(std::collections::HashMap::new()),
+            batch_capture: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Set (or clear, with `None`) the capture metadata the UI collected for a
+    /// specific task (per-file override). Read by `process_task` Stage 0.
+    pub fn set_capture_metadata(
+        &self,
+        task_id: &str,
+        meta: Option<crate::capture::CaptureMetadata>,
+    ) {
+        let mut map = self.capture_metadata.lock().expect("capture_metadata lock");
+        match meta {
+            Some(m) => {
+                map.insert(task_id.to_string(), m);
+            }
+            None => {
+                map.remove(task_id);
+            }
+        }
+    }
+
+    /// Set the batch-default capture metadata applied to every file staged from
+    /// now on ("set defaults → add files"). `None` clears it. In-memory only.
+    pub fn set_batch_capture_metadata(&self, meta: Option<crate::capture::CaptureMetadata>) {
+        *self.batch_capture.lock().expect("batch_capture lock") = meta;
+    }
+
+    /// The current batch-default capture metadata, for the UI to show/edit.
+    pub fn batch_capture_metadata(&self) -> Option<crate::capture::CaptureMetadata> {
+        self.batch_capture
+            .lock()
+            .expect("batch_capture lock")
+            .clone()
     }
 
     /// Return the cached `whoami` snapshot, fetching it on first call
@@ -552,6 +600,21 @@ impl UploadEngine {
         };
 
         self.db.insert_upload_task(&task).await?;
+        // Apply the current batch-default capture metadata to this freshly-staged
+        // task so it's embedded at process time — even on the auto-upload path
+        // that never waits for a manual confirm.
+        if let Some(batch) = self
+            .batch_capture
+            .lock()
+            .expect("batch_capture lock")
+            .clone()
+            && !batch.is_empty()
+        {
+            self.capture_metadata
+                .lock()
+                .expect("capture_metadata lock")
+                .insert(task.id.clone(), batch);
+        }
         let t_after_insert = t_entry.elapsed();
         let _ = self
             .event_tx
@@ -1329,8 +1392,51 @@ impl UploadEngine {
     /// Resumes from where it left off — skips stages already completed
     /// (has document_id → skip create, has session_id → skip initiate).
     pub async fn process_task(&self, task: &mut UploadTask) -> Result<(), UploadError> {
-        let path_buf = std::path::PathBuf::from(&task.local_path);
-        let path = path_buf.as_path();
+        let original_buf = std::path::PathBuf::from(&task.local_path);
+
+        // Temp copies (capture-tagged / transcoded / desensitized) are cleaned up
+        // on EVERY exit of this function by this guard. Declared before Stage 0 so
+        // the capture-tagged copy is tracked too.
+        let mut temp_guard = TempCleanupGuard::default();
+
+        // Stage 0: Embed io.visionlab capture metadata (user-entered) into a tagged
+        // copy, which becomes the effective source for the rest of the pipeline.
+        // Embedding rewrites the file bytes, so we invalidate the staging-time
+        // hashes and let Stage 1 re-derive the digest from the TAGGED file — the
+        // digest of record (and `original_md5`) then matches the uploaded bytes.
+        let capture_meta = self
+            .capture_metadata
+            .lock()
+            .expect("capture_metadata lock")
+            .get(&task.id)
+            .cloned();
+        let source_buf = match capture_meta {
+            Some(meta) if !meta.is_empty() => {
+                let input = original_buf.clone();
+                let tagged = tokio::task::spawn_blocking(move || {
+                    crate::capture::embed_capture_metadata_blocking(&input, &meta)
+                })
+                .await
+                .expect("capture embed task panicked")
+                .map_err(|e| UploadError::CaptureEmbed {
+                    message: e.to_string(),
+                })?;
+                temp_guard.track(Some(&tagged));
+                // Force Stage 1 to rehash the tagged file.
+                task.hash = None;
+                task.source_md5 = None;
+                task.source_crc32c = None;
+                task.source_sha256_head_256kib = None;
+                tracing::info!(
+                    "[capture] embedded metadata for {} → {}",
+                    task.filename,
+                    tagged.display()
+                );
+                tagged
+            }
+            _ => original_buf.clone(),
+        };
+        let path = source_buf.as_path();
 
         // Stage 1: Dedup check (skip if already hashed). Staging now
         // pre-computes the full 4-way hash (BLAKE3 + MD5 + CRC32C +
@@ -1422,11 +1528,8 @@ impl UploadEngine {
             None
         };
 
-        // Temp copies produced below (the transcoded mp4 and/or the desensitized
-        // clean_<file>) are deleted on EVERY exit of this function by this guard
-        // — not just the success tail — so a failure / cancel / panic can never
-        // leak a full-size copy into %TEMP% and accumulate toward a full disk.
-        let mut temp_guard = TempCleanupGuard::default();
+        // (Transcoded / desensitized temp copies are tracked on the `temp_guard`
+        // declared at Stage 0 above, which also tracks the capture-tagged copy.)
 
         // Stage 2.5: Transcoding (user opt-in, video files only)
         let transcoded_path = self.maybe_transcode(task, path, &video_info).await?;

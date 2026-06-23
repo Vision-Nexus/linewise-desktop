@@ -40,6 +40,7 @@ mod tabs;
 /// definition.
 pub use completed::ALREADY_EXISTS_MARKER;
 
+use crate::components::capture_dialog::CaptureMetadataDialog;
 use crate::components::transcode_dialog::TranscodeDialog;
 use crate::state::{AppState, CoreServices, ToastKind};
 use crate::styles;
@@ -169,6 +170,7 @@ fn stage_error_toast(path: &Path, err: &UploadError) -> String {
         | UploadError::MpuResumeFailed { .. }
         | UploadError::Network(_)
         | UploadError::Io(_)
+        | UploadError::CaptureEmbed { .. }
         | UploadError::Database(_) => format!("Failed to add \"{filename}\": {err}"),
     }
 }
@@ -636,6 +638,9 @@ pub fn TransferPanel() -> Element {
 
     let active_tab = *tab.read();
 
+    // Open-state for the batch capture-metadata sheet.
+    let mut capture_open = use_signal(|| false);
+
     rsx! {
         style { "{TRANSFER_TAB_CSS}" }
         div {
@@ -691,6 +696,12 @@ pub fn TransferPanel() -> Element {
                                     }
                                 }
                             }
+                        }
+                        button {
+                            style: "padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-size: 13px;",
+                            title: "Set capture metadata applied to files you add next",
+                            onclick: move |_| capture_open.set(true),
+                            "Capture metadata"
                         }
                         if staged_count > 0 {
                             UploadButton { staged_count, confirm_cb }
@@ -830,6 +841,13 @@ pub fn TransferPanel() -> Element {
                         },
                     }
                 }
+            }
+
+            // Batch capture-metadata sheet. Mounted unconditionally for the
+            // slide animation; visibility driven by `capture_open`.
+            CaptureMetadataDialog {
+                open: capture_open(),
+                on_close: move |_saved: bool| capture_open.set(false),
             }
         }
     }
