@@ -111,14 +111,31 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $exiftoolVersion = "13.55"
-          $url = "https://exiftool.org/exiftool-${exiftoolVersion}_64.zip"
-          Invoke-WebRequest -Uri $url -OutFile exiftool.zip
-          Expand-Archive exiftool.zip -DestinationPath exiftool-dist
-          # The zip ships the launcher as `exiftool(-k).exe`; rename to exiftool.exe.
+          # exiftool.org keeps only the current version at the root; older ones
+          # move to /older/. Try both so a pinned version keeps resolving after
+          # upstream releases a newer one. (No GitHub binary release exists — the
+          # repo is source-only — so exiftool.org is the canonical Windows source.)
+          $zip = "exiftool-${exiftoolVersion}_64.zip"
+          $urls = @("https://exiftool.org/$zip", "https://exiftool.org/older/$zip")
+          $ok = $false
+          foreach ($u in $urls) {
+            try { Invoke-WebRequest -Uri $u -OutFile exiftool.zip; $ok = $true; Write-Host "Downloaded $u"; break }
+            catch { Write-Host "Not at $u" }
+          }
+          if (-not $ok) { throw "ExifTool $exiftoolVersion not found at exiftool.org (root or /older/)" }
+          Expand-Archive exiftool.zip -DestinationPath exiftool-dist -Force
+          # The zip ships the launcher as `exiftool(-k).exe` next to `exiftool_files/`;
+          # rename the launcher to `exiftool.exe` (the documented install step — the
+          # PAR launcher still finds `exiftool_files/` by that fixed name).
           $launcher = Get-ChildItem exiftool-dist -Recurse -Filter "exiftool(-k).exe" | Select-Object -First 1
+          if (-not $launcher) { throw "exiftool(-k).exe not found in the downloaded zip" }
           $distDir = $launcher.Directory.FullName
           Move-Item $launcher.FullName (Join-Path $distDir "exiftool.exe") -Force
+          if (-not (Test-Path (Join-Path $distDir "exiftool_files"))) {
+            Write-Host "::warning::exiftool_files/ not found next to the launcher — the standalone may not run"
+          }
           echo "EXIFTOOL_DIST=$distDir" >> $env:GITHUB_ENV
 
       # --- Build ---
