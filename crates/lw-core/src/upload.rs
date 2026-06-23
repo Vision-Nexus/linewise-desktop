@@ -1678,8 +1678,19 @@ impl UploadEngine {
         // metadata-clean (e.g. re-encoded upstream) the read-4GB +
         // write-4GB-temp + hold-an-upload-slot cost that otherwise gates every
         // upload — the root of the "selected N files, nothing uploads" jam.
+        // TEMPORARILY DISABLED (0.1.5 rc2): the desensitize pass
+        // (`ffmpeg -map_metadata -1`) strips the io.visionlab capture tags we embed
+        // before upload, AND is the dominant upload-time cost in user logs. Skipped
+        // UNCONDITIONALLY — not via the `strip_metadata` flag, because existing
+        // installs persist `strip_metadata = true` in their config.toml and would
+        // otherwise keep stripping. Restore by flipping this to `true` once the
+        // proper fix lands: re-embed capture onto the final upload artifact AFTER
+        // strip/transcode, so privacy stripping and capture metadata can coexist.
+        const DESENSITIZE_ENABLED: bool = false;
+
         let mut desensitized_path: Option<PathBuf> = None;
-        let strip_applicable = self.strip_metadata && transcoded_path.is_none();
+        let strip_applicable =
+            DESENSITIZE_ENABLED && self.strip_metadata && transcoded_path.is_none();
         let needs_strip = strip_applicable && video::metadata_needs_strip(video_info.as_ref());
         if needs_strip {
             self.update_state(task, UploadState::Desensitizing).await;
