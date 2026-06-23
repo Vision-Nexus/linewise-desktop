@@ -85,6 +85,13 @@ pub fn UploadRuntime() -> Element {
                 Err(e) => tracing::warn!("Failed to load upload history: {e}"),
                 _ => {}
             }
+            // Capture state is in-memory and lost on restart, but the tags live in
+            // the files. Read them back for staged clips so a previously-filled row
+            // shows "✓ filled" (and uploads) instead of falsely demanding metadata.
+            // Bump the UI revision so the recovered rows re-render.
+            if engine.recover_capture_for_staged().await {
+                app_state.capture_rev += 1;
+            }
         }
     });
 

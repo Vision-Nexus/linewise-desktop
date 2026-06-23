@@ -492,6 +492,45 @@ impl UploadEngine {
         }
     }
 
+    /// Recover capture state for `Staged` clips after a restart: the in-memory
+    /// maps are lost, but the tags live in the files. For each staged clip with no
+    /// in-memory entry, read the embedded tags back via a local ffprobe and, when
+    /// present, repopulate `capture_metadata` + `capture_embedded` so the row shows
+    /// "✓ filled" and the upload doesn't re-embed. Also picks up vendor-pre-tagged
+    /// files. One file at a time (each is a quick moov-only probe). Returns whether
+    /// any row was recovered (the caller bumps the UI's capture revision if so).
+    pub async fn recover_capture_for_staged(self: &Arc<Self>) -> bool {
+        let staged = match self.db.get_staged_uploads().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("recover_capture_for_staged: failed to load staged set: {e}");
+                return false;
+            }
+        };
+        let mut recovered = false;
+        for task in staged {
+            if self.has_capture_metadata(&task.id) {
+                continue;
+            }
+            let path = PathBuf::from(&task.local_path);
+            let parsed =
+                tokio::task::spawn_blocking(move || crate::capture::read_embedded_capture(&path))
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(meta) = parsed {
+                self.set_capture_metadata(&task.id, Some(meta));
+                self.capture_embedded
+                    .lock()
+                    .expect("capture_embedded lock")
+                    .insert(task.id.clone());
+                recovered = true;
+                tracing::info!(task_id = %task.id, "[capture] recovered embedded metadata from file");
+            }
+        }
+        recovered
+    }
+
     /// Batch save: embed `meta` into every clip currently `Staged`, ONE AT A TIME
     /// (each is a full-file rewrite — never run concurrently). Also records `meta`
     /// as the default for files added later (caller sets that). Per-file failures

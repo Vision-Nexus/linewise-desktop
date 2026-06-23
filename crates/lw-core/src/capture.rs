@@ -291,6 +291,69 @@ pub fn parse_capture_from_tags(tags: &[(String, String)]) -> Option<CaptureMetad
     (found && !meta.is_empty()).then_some(meta)
 }
 
+/// Read io.visionlab capture metadata back from a file's QuickTime tags via a
+/// local `ffprobe -show_entries format_tags` (reads only the moov atom — fast
+/// even for multi-GB clips, no media scan). Returns `None` when ffprobe is
+/// unavailable, the file is unreadable, or it carries no capture tags. Used to
+/// recover state on restart (the in-memory maps are lost) and to recognize
+/// vendor-pre-tagged files. Blocking — call from `spawn_blocking`.
+pub fn read_embedded_capture(path: &Path) -> Option<CaptureMetadata> {
+    let out = hidden_command(resolve_ffprobe_binary())
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_entries",
+            "format_tags",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let tags_obj = json.get("format")?.get("tags")?.as_object()?;
+    let tags: Vec<(String, String)> = tags_obj
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+        .collect();
+    parse_capture_from_tags(&tags)
+}
+
+/// Resolve the ffprobe binary, preferring a bundled copy (next to ffmpeg) over
+/// system PATH. Mirrors [`resolve_exiftool_binary`].
+fn resolve_ffprobe_binary() -> std::ffi::OsString {
+    use std::ffi::OsString;
+    if let Ok(exe) = std::env::current_exe() {
+        #[cfg(target_os = "macos")]
+        if let Some(parent) = exe.parent().and_then(|p| p.parent()) {
+            let c = parent.join("Resources").join("ffprobe");
+            if c.exists() {
+                return c.into_os_string();
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(dir) = exe.parent() {
+            let c = dir.join("ffprobe.exe");
+            if c.exists() {
+                return c.into_os_string();
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(dir) = exe.parent() {
+            for rel in ["ffprobe", "../lib/linewise-desktop/ffprobe"] {
+                let c = dir.join(rel);
+                if c.exists() {
+                    return c.into_os_string();
+                }
+            }
+        }
+    }
+    OsString::from("ffprobe")
+}
+
 /// Resolve the exiftool binary, preferring a bundled copy over system PATH.
 /// (Bundling is wired in xtask; until then this falls back to PATH `exiftool`.)
 fn resolve_exiftool_binary() -> std::ffi::OsString {
@@ -461,5 +524,13 @@ mod tests {
         );
         assert!(out.contains("io.visionlab.fov"), "missing fov: {out}");
         assert!(out.contains("\"make\""), "missing make: {out}");
+
+        // Restart-recovery path: read the tags back from the file locally.
+        let recovered = read_embedded_capture(&outcome.path).expect("read back");
+        assert_eq!(recovered.country.as_deref(), Some("Thailand"));
+        assert_eq!(recovered.operator.as_deref(), Some("001"));
+        assert_eq!(recovered.fov, Some(143));
+        assert_eq!(recovered.make.as_deref(), Some("DJI"));
+        assert_eq!(recovered.model.as_deref(), Some("Osmo Nano"));
     }
 }
