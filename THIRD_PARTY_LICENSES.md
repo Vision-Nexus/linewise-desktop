@@ -25,6 +25,7 @@ means.
 | libpostproc | all (ships with FFmpeg) | Same as FFmpeg | GPL-2.0-or-later | Same tarball as the parent FFmpeg |
 | x264 | macOS (Homebrew), Linux (Ubuntu `libx264-163`) | Homebrew current / Ubuntu `2:0.163.3060+git5db6aa6-2build1` | GPL-2.0-or-later | https://www.videolan.org/developers/x264.html |
 | x265 | macOS (Homebrew) | Homebrew current | GPL-2.0-or-later | https://bitbucket.org/multicoreware/x265_git |
+| ExifTool | macOS, Linux (Perl script + `lib/`); Windows (standalone exe) | Per `EXIFTOOL_DIST` (e.g. 13.55) | Perl licence (Artistic-1.0-Perl OR GPL-1.0-or-later) | https://exiftool.org / https://github.com/exiftool/exiftool |
 
 ## Licence texts
 

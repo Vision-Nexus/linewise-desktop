@@ -207,6 +207,14 @@ pub fn CaptureMetadataDialog(
                 div {
                     class: "sheet-body",
 
+                    // Guidance: unknown fields should be left blank, never guessed —
+                    // a blank field is omitted entirely; a wrong value pollutes the
+                    // dataset (mirrors the vendor SOP).
+                    div {
+                        style: "font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; padding: 6px 8px; background: var(--bg-secondary, rgba(0,0,0,0.04)); border-radius: 6px;",
+                        "Fill what you know. Leave any field blank if you're not sure — don't guess (a wrong value is worse than an empty one)."
+                    }
+
                     div { style: "margin-bottom: 10px;",
                         label { style: label_style, "Country" }
                         input { style: input_style, placeholder: "Thailand",
@@ -234,6 +242,7 @@ pub fn CaptureMetadataDialog(
                     div { style: "margin-bottom: 10px;",
                         label { style: label_style, "Operator (3 digits)" }
                         input { style: input_style, placeholder: "001",
+                            title: "Operator code, 1-3 digits — zero-padded to 3 (e.g. 1 → 001).",
                             value: "{form.read().operator}",
                             oninput: move |e| form.write().operator = e.value() }
                     }
@@ -252,8 +261,13 @@ pub fn CaptureMetadataDialog(
                     div { style: "margin-bottom: 10px;",
                         label { style: label_style, "FOV (degrees)" }
                         input { style: input_style, placeholder: "143", r#type: "number",
+                            title: "Camera horizontal field-of-view in whole degrees (1-360). Depends on the camera's FOV mode — not a fixed value.",
                             value: "{form.read().fov}",
                             oninput: move |e| form.write().fov = e.value() }
+                        div {
+                            style: "font-size: 11px; color: var(--text-muted); margin-top: 3px;",
+                            "Camera's horizontal view angle, whole degrees. DJI Osmo Nano: Standard ≈85, Wide ≈100, Ultra-Wide ≈118 — or the vendor's calibrated value (e.g. 143). Leave blank if unknown."
+                        }
                     }
                     div { style: "margin-bottom: 10px;",
                         label { style: label_style, "Action" }

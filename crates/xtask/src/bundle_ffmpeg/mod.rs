@@ -54,6 +54,67 @@ impl HostOs {
     }
 }
 
+/// Resolve the ExifTool distribution to bundle. We require `EXIFTOOL_DIST` to
+/// point at an **extracted official distribution** (the `exiftool` script + its
+/// `lib/` directory, as shipped in `Image-ExifTool-NN.NN.tar.gz`). That layout is
+/// self-locating — the script adds `$exeDir/lib` to `@INC` — so it runs anywhere
+/// with system Perl, unlike a Homebrew/apt install whose script hardcodes an
+/// absolute, build-host `@INC` path. On Windows, point it at the standalone build
+/// (containing `exiftool.exe`, which embeds its own Perl — no system Perl needed).
+///
+/// Hard error when unset: shipping a release that can't embed capture metadata is
+/// worse than failing the build. CI must provide it (download + extract the
+/// pinned tarball / Windows zip from https://exiftool.org).
+pub(crate) fn exiftool_dist() -> Result<PathBuf> {
+    let dir = std::env::var("EXIFTOOL_DIST").context(
+        "EXIFTOOL_DIST not set — point it at an extracted ExifTool distribution \
+         (the `exiftool` script + `lib/` on macOS/Linux, or the directory holding \
+         the standalone `exiftool.exe` on Windows). Download from https://exiftool.org.",
+    )?;
+    let dir = PathBuf::from(dir);
+    if !dir.is_dir() {
+        bail!("EXIFTOOL_DIST is not a directory: {}", dir.display());
+    }
+    Ok(dir)
+}
+
+/// macOS/Linux: copy the ExifTool script + its `lib/` into `dst_dir`, preserving
+/// the script↔lib sibling layout so the script self-locates its modules at
+/// runtime via system Perl. Returns the path to the copied `exiftool` script.
+pub(crate) fn copy_exiftool_unix(dist: &Path, dst_dir: &Path) -> Result<PathBuf> {
+    crate::cmd::ensure_dir(dst_dir)?;
+    let script_src = dist.join("exiftool");
+    if !script_src.is_file() {
+        bail!(
+            "no `exiftool` script under EXIFTOOL_DIST ({}) — expected an extracted \
+             official distribution",
+            dist.display()
+        );
+    }
+    let lib_src = dist.join("lib");
+    if !lib_src.is_dir() {
+        bail!(
+            "no `lib/` directory under EXIFTOOL_DIST ({}) — the script can't find its \
+             modules without it",
+            dist.display()
+        );
+    }
+    let script_dst = dst_dir.join("exiftool");
+    std::fs::copy(&script_src, &script_dst)
+        .with_context(|| format!("copy exiftool script: {}", script_src.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script_dst)?.permissions();
+        perms.set_mode(perms.mode() | 0o111);
+        std::fs::set_permissions(&script_dst, perms)
+            .with_context(|| format!("chmod +x {}", script_dst.display()))?;
+    }
+    copy_dir_all(&lib_src, &dst_dir.join("lib"))?;
+    eprintln!("  Copied exiftool + lib/ → {}", dst_dir.display());
+    Ok(script_dst)
+}
+
 /// Copy `THIRD_PARTY_LICENSES.md` and the `NOTICES/` directory into `dst`.
 /// Every platform bundler ships these so the About pane has a local copy.
 pub(crate) fn copy_license_bundle(root: &Path, dst: &Path) -> Result<()> {
@@ -69,7 +130,7 @@ pub(crate) fn copy_license_bundle(root: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     crate::cmd::ensure_dir(dst)?;
     for entry in std::fs::read_dir(src).with_context(|| format!("read_dir {}", src.display()))? {
         let entry = entry?;

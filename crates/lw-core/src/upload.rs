@@ -428,40 +428,35 @@ impl UploadEngine {
         let input = PathBuf::from(&task.local_path);
         let total = std::fs::metadata(&input).map(|m| m.len()).unwrap_or(0);
 
-        // Drive a determinate progress bar by polling exiftool's rewrite file
-        // (`<input>_exiftool_tmp`, grows linearly to the source size) while the
-        // blocking embed runs. Aborted as soon as the embed returns.
+        // Determinate progress: exiftool writes `<input>_exiftool_tmp`, growing
+        // linearly to the source size. We tick from a `select!` loop driven by the
+        // SAME future as the blocking embed — when the embed completes we break and
+        // emit exactly one final event. No separate racing task to abort, so a late
+        // tick can never land after completion and resurrect a stale bar.
         let mut tmp_os = input.clone().into_os_string();
         tmp_os.push("_exiftool_tmp");
         let tmp_path = PathBuf::from(tmp_os);
-        let poller = {
-            let event_tx = self.event_tx.clone();
-            let task_id = task_id.to_string();
-            let tmp_path = tmp_path.clone();
-            tokio::spawn(async move {
-                if total == 0 {
-                    return;
-                }
-                loop {
-                    let bytes = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
-                    let _ = event_tx.send(UploadEvent::CaptureEmbedProgress {
-                        task_id: task_id.clone(),
-                        bytes: bytes.min(total),
-                        total,
-                    });
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                }
-            })
-        };
 
         let embed_input = input.clone();
-        let res = tokio::task::spawn_blocking(move || {
+        let mut embed = tokio::task::spawn_blocking(move || {
             crate::capture::embed_in_place_blocking(&embed_input, &meta)
-        })
-        .await
-        .expect("capture in-place embed task panicked");
-        poller.abort();
-        // Final tick: full bar on success, or clear (bytes==0) on failure — the UI
+        });
+        let res = loop {
+            tokio::select! {
+                joined = &mut embed => break joined.expect("capture in-place embed task panicked"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                    if total > 0 {
+                        let bytes = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+                        let _ = self.event_tx.send(UploadEvent::CaptureEmbedProgress {
+                            task_id: task_id.to_string(),
+                            bytes: bytes.min(total),
+                            total,
+                        });
+                    }
+                }
+            }
+        };
+        // Exactly one final event: full bar on success, clear on failure — the UI
         // drops the bar when bytes >= total or total == 0.
         let _ = self.event_tx.send(UploadEvent::CaptureEmbedProgress {
             task_id: task_id.to_string(),
@@ -495,6 +490,45 @@ impl UploadEngine {
                 Ok(false)
             }
         }
+    }
+
+    /// Recover capture state for `Staged` clips after a restart: the in-memory
+    /// maps are lost, but the tags live in the files. For each staged clip with no
+    /// in-memory entry, read the embedded tags back via a local ffprobe and, when
+    /// present, repopulate `capture_metadata` + `capture_embedded` so the row shows
+    /// "✓ filled" and the upload doesn't re-embed. Also picks up vendor-pre-tagged
+    /// files. One file at a time (each is a quick moov-only probe). Returns whether
+    /// any row was recovered (the caller bumps the UI's capture revision if so).
+    pub async fn recover_capture_for_staged(self: &Arc<Self>) -> bool {
+        let staged = match self.db.get_staged_uploads().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("recover_capture_for_staged: failed to load staged set: {e}");
+                return false;
+            }
+        };
+        let mut recovered = false;
+        for task in staged {
+            if self.has_capture_metadata(&task.id) {
+                continue;
+            }
+            let path = PathBuf::from(&task.local_path);
+            let parsed =
+                tokio::task::spawn_blocking(move || crate::capture::read_embedded_capture(&path))
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(meta) = parsed {
+                self.set_capture_metadata(&task.id, Some(meta));
+                self.capture_embedded
+                    .lock()
+                    .expect("capture_embedded lock")
+                    .insert(task.id.clone());
+                recovered = true;
+                tracing::info!(task_id = %task.id, "[capture] recovered embedded metadata from file");
+            }
+        }
+        recovered
     }
 
     /// Batch save: embed `meta` into every clip currently `Staged`, ONE AT A TIME
@@ -1644,8 +1678,19 @@ impl UploadEngine {
         // metadata-clean (e.g. re-encoded upstream) the read-4GB +
         // write-4GB-temp + hold-an-upload-slot cost that otherwise gates every
         // upload — the root of the "selected N files, nothing uploads" jam.
+        // TEMPORARILY DISABLED (0.1.5 rc2): the desensitize pass
+        // (`ffmpeg -map_metadata -1`) strips the io.visionlab capture tags we embed
+        // before upload, AND is the dominant upload-time cost in user logs. Skipped
+        // UNCONDITIONALLY — not via the `strip_metadata` flag, because existing
+        // installs persist `strip_metadata = true` in their config.toml and would
+        // otherwise keep stripping. Restore by flipping this to `true` once the
+        // proper fix lands: re-embed capture onto the final upload artifact AFTER
+        // strip/transcode, so privacy stripping and capture metadata can coexist.
+        const DESENSITIZE_ENABLED: bool = false;
+
         let mut desensitized_path: Option<PathBuf> = None;
-        let strip_applicable = self.strip_metadata && transcoded_path.is_none();
+        let strip_applicable =
+            DESENSITIZE_ENABLED && self.strip_metadata && transcoded_path.is_none();
         let needs_strip = strip_applicable && video::metadata_needs_strip(video_info.as_ref());
         if needs_strip {
             self.update_state(task, UploadState::Desensitizing).await;

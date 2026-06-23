@@ -90,6 +90,54 @@ jobs:
           # Add to PATH so pkg-config / build scripts find it
           echo "$ffmpegDir\bin" >> $env:GITHUB_PATH
 
+      # --- ExifTool setup (capture-metadata embed/read-back) ---
+      # macOS/Linux: the official source distribution (script + lib/), which
+      # self-locates its modules and runs on system Perl. Windows: the standalone
+      # build (exiftool.exe + exiftool_files/, embedded Perl). Pin the version.
+
+      - name: Install ExifTool (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          EXIFTOOL_VERSION="13.55"
+          curl -fsSL -o exiftool-src.tar.gz \
+            "https://github.com/exiftool/exiftool/archive/refs/tags/${EXIFTOOL_VERSION}.tar.gz"
+          mkdir -p exiftool-dist
+          tar xzf exiftool-src.tar.gz -C exiftool-dist --strip-components=1
+          test -f exiftool-dist/exiftool && test -d exiftool-dist/lib
+          echo "EXIFTOOL_DIST=$(pwd)/exiftool-dist" >> "$GITHUB_ENV"
+
+      - name: Install ExifTool (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exiftoolVersion = "13.55"
+          # exiftool.org keeps only the current version at the root; older ones
+          # move to /older/. Try both so a pinned version keeps resolving after
+          # upstream releases a newer one. (No GitHub binary release exists — the
+          # repo is source-only — so exiftool.org is the canonical Windows source.)
+          $zip = "exiftool-${exiftoolVersion}_64.zip"
+          $urls = @("https://exiftool.org/$zip", "https://exiftool.org/older/$zip")
+          $ok = $false
+          foreach ($u in $urls) {
+            try { Invoke-WebRequest -Uri $u -OutFile exiftool.zip; $ok = $true; Write-Host "Downloaded $u"; break }
+            catch { Write-Host "Not at $u" }
+          }
+          if (-not $ok) { throw "ExifTool $exiftoolVersion not found at exiftool.org (root or /older/)" }
+          Expand-Archive exiftool.zip -DestinationPath exiftool-dist -Force
+          # The zip ships the launcher as `exiftool(-k).exe` next to `exiftool_files/`;
+          # rename the launcher to `exiftool.exe` (the documented install step — the
+          # PAR launcher still finds `exiftool_files/` by that fixed name).
+          $launcher = Get-ChildItem exiftool-dist -Recurse -Filter "exiftool(-k).exe" | Select-Object -First 1
+          if (-not $launcher) { throw "exiftool(-k).exe not found in the downloaded zip" }
+          $distDir = $launcher.Directory.FullName
+          Move-Item $launcher.FullName (Join-Path $distDir "exiftool.exe") -Force
+          if (-not (Test-Path (Join-Path $distDir "exiftool_files"))) {
+            Write-Host "::warning::exiftool_files/ not found next to the launcher — the standalone may not run"
+          }
+          echo "EXIFTOOL_DIST=$distDir" >> $env:GITHUB_ENV
+
       # --- Build ---
 
       - name: Build release binary
@@ -160,12 +208,15 @@ jobs:
 
       # cargo-bundle's MSI path is broken for our setup (hyphenated bin name
       # + missing `--format msi` detection), so we ship the unpacked release
-      # directory as a zip. linewise-desktop.exe + bundled FFmpeg DLLs are
-      # all the user needs.
+      # directory as a zip. We stage an explicit allowlist: the app exe, the
+      # FFmpeg DLLs, and the bundled CLIs (ffmpeg/ffprobe) + ExifTool (exe +
+      # its exiftool_files/ PAR folder). The resolve_* helpers find each next to
+      # linewise-desktop.exe, so the flat staging layout must mirror that.
       - name: Zip Windows release
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $ReleaseDir = "target\${{ matrix.target }}\release"
           $ZipPath = "target\linewise-desktop-windows-x86_64.zip"
           $Staging = "$env:RUNNER_TEMP\linewise-desktop"
@@ -173,6 +224,14 @@ jobs:
           Copy-Item "$ReleaseDir\linewise-desktop.exe" $Staging
           Copy-Item "$ReleaseDir\*.dll" $Staging -ErrorAction SilentlyContinue
           Copy-Item "$ReleaseDir\ffmpeg.exe" $Staging -ErrorAction SilentlyContinue
+          Copy-Item "$ReleaseDir\ffprobe.exe" $Staging -ErrorAction SilentlyContinue
+          # ExifTool is required for capture metadata — fail if the bundler didn't
+          # produce it, rather than silently ship a Windows build that can't embed.
+          Copy-Item "$ReleaseDir\exiftool.exe" $Staging
+          Copy-Item "$ReleaseDir\exiftool_files" $Staging -Recurse -ErrorAction SilentlyContinue
+          # Smoke test: the standalone must launch from the staged layout.
+          & "$Staging\exiftool.exe" -ver
+          if ($LASTEXITCODE -ne 0) { throw "bundled exiftool.exe failed to run" }
           Compress-Archive -Path "$Staging\*" -DestinationPath $ZipPath -Force
           Write-Host "Created $ZipPath"
 

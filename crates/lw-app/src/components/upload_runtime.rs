@@ -85,6 +85,13 @@ pub fn UploadRuntime() -> Element {
                 Err(e) => tracing::warn!("Failed to load upload history: {e}"),
                 _ => {}
             }
+            // Capture state is in-memory and lost on restart, but the tags live in
+            // the files. Read them back for staged clips so a previously-filled row
+            // shows "✓ filled" (and uploads) instead of falsely demanding metadata.
+            // Bump the UI revision so the recovered rows re-render.
+            if engine.recover_capture_for_staged().await {
+                app_state.capture_rev += 1;
+            }
         }
     });
 
@@ -251,6 +258,12 @@ fn handle_upload_event(
             // entry until the next add/drop.
             if state != UploadState::Hashing {
                 hash_progress.write().remove(&task_id);
+            }
+            // A capture-embed bar only makes sense while a row is `Staged`; drop
+            // any lingering entry once it advances (or is rejected), so a missed
+            // completion tick can never leave a stuck bar on a moved row.
+            if state != UploadState::Staged {
+                app_state.embed_progress.write().remove(&task_id);
             }
             update_task(app_state, &task_id, |t| t.state = state);
         }
