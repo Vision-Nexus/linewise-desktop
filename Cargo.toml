@@ -5,7 +5,7 @@ default-members = ["crates/lw-core", "crates/lw-app"]
 exclude = ["crates/lw-chat"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6-rc1"
 edition = "2024"
 license = "GPL-2.0-or-later"
 authors = ["Linewise <dev@linewise.io>"]
