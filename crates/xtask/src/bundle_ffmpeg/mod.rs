@@ -5,6 +5,25 @@ mod linux;
 mod macos;
 mod windows;
 
+/// The single canonical FFmpeg version every platform bundles. This is the
+/// source of truth the CI workflows (`.github/workflows/{release,test}.yml`)
+/// must mirror — they reference it via the `BUNDLED_FFMPEG_VERSION` job env.
+///
+/// PDQ perceptual hashes are only bit-exact across producers when the SAME
+/// ffmpeg (same swscale build) decodes the frame; the explicit `PDQ_VF_FILTER`
+/// in `lw-core` pins the *filter*, but the scaler implementation itself still
+/// has to match, which means one ffmpeg version everywhere. Today the OSes
+/// diverge (Windows n7.1, macOS Homebrew ~8.x, Linux apt ~6.1), so two users on
+/// different OSes can hash the same file differently.
+///
+/// ⚠️ TBD / PLACEHOLDER: `7.1` matches what Windows already pins, but the
+/// canonical version is pending a prod hash-divergence measurement (a separate
+/// bench is running). The point of this constant is "one version, pinned in one
+/// place" — not the specific number. When the bench lands, update this single
+/// value (and the matching `BUNDLED_FFMPEG_VERSION` in both workflows) and
+/// coordinate the rollout with the sidecar + a stored-hash backfill.
+pub(crate) const BUNDLED_FFMPEG_VERSION: &str = "7.1";
+
 /// FFmpeg shared libraries we link against directly. The order matters
 /// only insofar as dependents come after their dependencies, which keeps
 /// the dependency walk's debug output readable.
@@ -22,6 +41,11 @@ const REQUIRED_LIBS: &[&str] = &[
 const OPTIONAL_LIBS: &[&str] = &["libpostproc"];
 
 pub fn run(root: &Path, target: &str, create_dmg: bool) -> Result<()> {
+    // Surface the canonical version in the CI log so a mismatch with the
+    // FFmpeg the runner actually installed is visible at a glance. The OS
+    // installers (apt/brew/BtbN) are what enforce the pin; this is the
+    // assertion of intent the workflows must agree with.
+    eprintln!("Canonical bundled FFmpeg version (intended): n{BUNDLED_FFMPEG_VERSION}");
     let host = HostOs::detect();
     match (host, target) {
         (HostOs::MacOs, t) if t.ends_with("-apple-darwin") => macos::bundle(root, t, create_dmg),
