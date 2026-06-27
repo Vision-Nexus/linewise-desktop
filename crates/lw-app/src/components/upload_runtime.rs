@@ -372,6 +372,16 @@ fn handle_upload_event(
                 t.error_message = Some(error);
             });
         }
+        UploadEvent::Retrying { task_id, attempt } => {
+            // Record the auto-retry attempt on the row; the in-progress row
+            // renders "Retrying (attempt N)" so a re-queued file no longer
+            // looks like a silent PENDING. Clear the stale failure message so
+            // it doesn't render alongside the retry indicator.
+            update_task(app_state, &task_id, |t| {
+                t.retry_count = attempt;
+                t.error_message = None;
+            });
+        }
     }
 }
 

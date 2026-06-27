@@ -226,6 +226,71 @@ fn retry_delay_ms(attempt: u32) -> u64 {
     (INITIAL_RETRY_DELAY_MS << shift).min(MAX_RETRY_DELAY_MS)
 }
 
+/// Wall-clock ceiling for a single chunk/part's retry loop. `max_attempts`
+/// alone let one chunk grind for hours: when each attempt stalled to its full
+/// request timeout before failing, 100 attempts × (timeout + 30s backoff)
+/// spanned most of a night while holding one of only `max_concurrent` upload
+/// slots — so every other queued file sat at PENDING behind it. Capping
+/// wall-clock makes a stuck chunk give up promptly and surface as a
+/// retryable failure instead of stranding the whole queue.
+const MAX_RETRY_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Combined attempt-count + wall-clock bound for the shared upload retry loops.
+/// The wall-clock axis is the real fix; `max_attempts` is kept as a secondary
+/// cap so a fast-failing loop still terminates.
+#[derive(Clone, Copy)]
+struct RetryBudget {
+    max_attempts: u32,
+    max_elapsed: std::time::Duration,
+}
+
+impl RetryBudget {
+    /// May we make another attempt? `attempts_made` is how many attempts have
+    /// already failed; `elapsed` is wall-clock since the first attempt began.
+    /// Stops as soon as either axis is exhausted.
+    fn allows_retry(&self, attempts_made: u32, elapsed: std::time::Duration) -> bool {
+        attempts_made < self.max_attempts && elapsed < self.max_elapsed
+    }
+}
+
+/// Run `op` with the shared retry policy: retry retryable failures with capped
+/// exponential backoff until `budget` is exhausted (attempt count OR wall-clock),
+/// then surface the last error. A terminal (non-retryable) error returns
+/// immediately. `sleep` is the inter-attempt wait — production passes
+/// [`wait_for_network`]; tests pass a no-op so they neither wait nor hit the
+/// network. `label` names the operation in the retry warning. Shared by the
+/// resumable-chunk and multipart-part paths so both honour the same budget.
+async fn retry_io<T, F, Fut, S, SFut>(
+    budget: RetryBudget,
+    label: &str,
+    mut op: F,
+    sleep: S,
+) -> Result<T, UploadError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, UploadError>>,
+    S: Fn(u64) -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
+    let started = std::time::Instant::now();
+    let mut attempt = 0;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(e) if is_retryable(&e) && budget.allows_retry(attempt, started.elapsed()) => {
+                attempt += 1;
+                let delay = retry_delay_ms(attempt);
+                tracing::warn!(
+                    "{label} failed (attempt {attempt}/{}), retrying in {delay}ms: {e}",
+                    budget.max_attempts
+                );
+                sleep(delay).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Bounded concurrency for the parallel multipart (XML MPU) upload path: the
 /// driver uploads at most this many parts at once. Six keeps a multi-GB upload
 /// saturating a fast link without fanning out to one TCP connection per part
@@ -245,22 +310,18 @@ async fn upload_chunk_with_retry(
     offset: u64,
     max_retries: u32,
 ) -> Result<u64, UploadError> {
-    let mut attempt = 0;
-    loop {
-        match backend.upload_chunk(session, data, offset).await {
-            Ok(confirmed) => return Ok(confirmed),
-            Err(e) if is_retryable(&e) && attempt < max_retries => {
-                attempt += 1;
-                let delay = retry_delay_ms(attempt);
-                tracing::warn!(
-                    "Chunk upload failed (attempt {attempt}/{max_retries}), retrying in {delay}ms: {e}"
-                );
-                // Wait for network recovery — poll connectivity before sleeping
-                wait_for_network(delay).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    let budget = RetryBudget {
+        max_attempts: max_retries,
+        max_elapsed: MAX_RETRY_WALL_CLOCK,
+    };
+    // `wait_for_network` polls connectivity before each backoff sleep.
+    retry_io(
+        budget,
+        "Chunk upload",
+        || backend.upload_chunk(session, data, offset),
+        wait_for_network,
+    )
+    .await
 }
 
 /// Check if an error is retryable (network/timeout, not auth/client errors)
@@ -327,11 +388,15 @@ impl GcsBackend {
     /// historical no-explicit-proxy behaviour. The 5-minute total timeout is
     /// deliberately generous for large resumable chunk PUTs; the 30s connect
     /// timeout fails a dead/wrong proxy fast instead of hanging the session.
+    /// The 60s read timeout breaks a half-open connection (peer silently gone)
+    /// in seconds and lets the retry loop recover, instead of letting one
+    /// stalled PUT hold an upload slot for the full 5-minute total budget.
     pub fn new(proxy: Option<&str>) -> Self {
         let client = crate::net::build_http_client(
             proxy,
             Some(std::time::Duration::from_secs(300)),
             std::time::Duration::from_secs(30),
+            Some(std::time::Duration::from_secs(60)),
         )
         .expect("failed to build reqwest client");
         Self { client }
@@ -550,22 +615,18 @@ async fn put_part_with_retry(
     len: u64,
     max_retries: u32,
 ) -> Result<String, UploadError> {
-    let mut attempt = 0;
-    loop {
-        match put_part_once(client, file_path, part, offset, len).await {
-            Ok(etag) => return Ok(etag),
-            Err(e) if is_retryable(&e) && attempt < max_retries => {
-                attempt += 1;
-                let delay = retry_delay_ms(attempt);
-                tracing::warn!(
-                    part_number = part.part_number,
-                    "Multipart part upload failed (attempt {attempt}/{max_retries}), retrying in {delay}ms: {e}"
-                );
-                wait_for_network(delay).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    let budget = RetryBudget {
+        max_attempts: max_retries,
+        max_elapsed: MAX_RETRY_WALL_CLOCK,
+    };
+    let label = format!("Multipart part {} upload", part.part_number);
+    retry_io(
+        budget,
+        &label,
+        || put_part_once(client, file_path, part, offset, len),
+        wait_for_network,
+    )
+    .await
 }
 
 /// Read this part's byte slice from `file_path` and PUT it to its signed URL.
@@ -881,5 +942,117 @@ mod tests {
     #[test]
     fn zero_floor_falls_back_to_min() {
         assert_eq!(pick_chunk_size(50 * MIB, 0), MIN_AUTO_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn retry_budget_stops_when_attempts_exhausted() {
+        let budget = RetryBudget {
+            max_attempts: 5,
+            max_elapsed: std::time::Duration::from_secs(600),
+        };
+        // All 5 attempts already spent, barely any time elapsed: no more retries.
+        assert!(!budget.allows_retry(5, std::time::Duration::from_secs(1)));
+        // 4 spent, plenty of budget left on both axes: keep going.
+        assert!(budget.allows_retry(4, std::time::Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn retry_budget_stops_when_wall_clock_exhausted() {
+        // The real fix: even with attempts to spare, a chunk that has been
+        // grinding past the wall-clock cap must give up instead of retrying
+        // for hours (each stalled attempt can burn the full request timeout).
+        let budget = RetryBudget {
+            max_attempts: 100,
+            max_elapsed: std::time::Duration::from_secs(600),
+        };
+        // Only 3 attempts made, but 11 minutes have elapsed: stop.
+        assert!(!budget.allows_retry(3, std::time::Duration::from_secs(660)));
+        // 3 attempts, 9 minutes: still within the wall-clock budget.
+        assert!(budget.allows_retry(3, std::time::Duration::from_secs(540)));
+    }
+
+    /// A retryable error that is trivial to construct in tests (a 503 is
+    /// classified retryable by `is_retryable`).
+    fn transient() -> UploadError {
+        UploadError::Api {
+            status: 503,
+            message: "stall".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_io_gives_up_after_the_attempt_budget() {
+        let budget = RetryBudget {
+            max_attempts: 3,
+            max_elapsed: std::time::Duration::from_secs(600),
+        };
+        let calls = std::cell::Cell::new(0u32);
+        // Sleep is injected as a no-op so the test neither waits nor touches the
+        // network (the real callers pass `wait_for_network`).
+        let result: Result<u64, UploadError> = retry_io(
+            budget,
+            "test",
+            || {
+                calls.set(calls.get() + 1);
+                async { Err(transient()) }
+            },
+            |_delay_ms| async {},
+        )
+        .await;
+        assert!(result.is_err());
+        // 1 initial attempt + 3 retries, then the budget stops it.
+        assert_eq!(calls.get(), 4);
+    }
+
+    #[tokio::test]
+    async fn retry_io_succeeds_after_transient_failures() {
+        let budget = RetryBudget {
+            max_attempts: 5,
+            max_elapsed: std::time::Duration::from_secs(600),
+        };
+        let calls = std::cell::Cell::new(0u32);
+        let result: Result<u64, UploadError> = retry_io(
+            budget,
+            "test",
+            || {
+                let n = calls.get() + 1;
+                calls.set(n);
+                // Compute the outcome here so the async block stays flat (the
+                // first two attempts fail transiently, the third succeeds).
+                let outcome = if n < 3 { Err(transient()) } else { Ok(42) };
+                async move { outcome }
+            },
+            |_delay_ms| async {},
+        )
+        .await;
+        assert_eq!(result.expect("should succeed on the 3rd attempt"), 42);
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_io_does_not_retry_a_terminal_error() {
+        let budget = RetryBudget {
+            max_attempts: 100,
+            max_elapsed: std::time::Duration::from_secs(600),
+        };
+        let calls = std::cell::Cell::new(0u32);
+        // A 404 is NOT retryable: the loop must surface it on the first failure.
+        let result: Result<u64, UploadError> = retry_io(
+            budget,
+            "test",
+            || {
+                calls.set(calls.get() + 1);
+                async {
+                    Err(UploadError::Api {
+                        status: 404,
+                        message: "gone".to_string(),
+                    })
+                }
+            },
+            |_delay_ms| async {},
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
     }
 }
