@@ -28,6 +28,7 @@ impl ApiClient {
             proxy,
             Some(std::time::Duration::from_secs(120)),
             std::time::Duration::from_secs(10),
+            None,
         )
         .expect("failed to build reqwest client");
         Self {

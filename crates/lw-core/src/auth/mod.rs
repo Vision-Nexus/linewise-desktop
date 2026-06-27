@@ -111,6 +111,7 @@ impl AuthService {
             config.proxy_url.as_deref(),
             Some(std::time::Duration::from_secs(60)),
             std::time::Duration::from_secs(10),
+            None,
         )
         .expect("failed to build reqwest client");
         Self {

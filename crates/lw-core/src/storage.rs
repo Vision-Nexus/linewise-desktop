@@ -226,6 +226,33 @@ fn retry_delay_ms(attempt: u32) -> u64 {
     (INITIAL_RETRY_DELAY_MS << shift).min(MAX_RETRY_DELAY_MS)
 }
 
+/// Wall-clock ceiling for a single chunk/part's retry loop. `max_attempts`
+/// alone let one chunk grind for hours: when each attempt stalled to its full
+/// request timeout before failing, 100 attempts × (timeout + 30s backoff)
+/// spanned most of a night while holding one of only `max_concurrent` upload
+/// slots — so every other queued file sat at PENDING behind it. Capping
+/// wall-clock makes a stuck chunk give up promptly and surface as a
+/// retryable failure instead of stranding the whole queue.
+const MAX_RETRY_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Combined attempt-count + wall-clock bound for the shared upload retry loops.
+/// The wall-clock axis is the real fix; `max_attempts` is kept as a secondary
+/// cap so a fast-failing loop still terminates.
+#[derive(Clone, Copy)]
+struct RetryBudget {
+    max_attempts: u32,
+    max_elapsed: std::time::Duration,
+}
+
+impl RetryBudget {
+    /// May we make another attempt? `attempts_made` is how many attempts have
+    /// already failed; `elapsed` is wall-clock since the first attempt began.
+    /// Stops as soon as either axis is exhausted.
+    fn allows_retry(&self, attempts_made: u32, elapsed: std::time::Duration) -> bool {
+        attempts_made < self.max_attempts && elapsed < self.max_elapsed
+    }
+}
+
 /// Bounded concurrency for the parallel multipart (XML MPU) upload path: the
 /// driver uploads at most this many parts at once. Six keeps a multi-GB upload
 /// saturating a fast link without fanning out to one TCP connection per part
@@ -245,11 +272,16 @@ async fn upload_chunk_with_retry(
     offset: u64,
     max_retries: u32,
 ) -> Result<u64, UploadError> {
+    let budget = RetryBudget {
+        max_attempts: max_retries,
+        max_elapsed: MAX_RETRY_WALL_CLOCK,
+    };
+    let started = std::time::Instant::now();
     let mut attempt = 0;
     loop {
         match backend.upload_chunk(session, data, offset).await {
             Ok(confirmed) => return Ok(confirmed),
-            Err(e) if is_retryable(&e) && attempt < max_retries => {
+            Err(e) if is_retryable(&e) && budget.allows_retry(attempt, started.elapsed()) => {
                 attempt += 1;
                 let delay = retry_delay_ms(attempt);
                 tracing::warn!(
@@ -327,11 +359,15 @@ impl GcsBackend {
     /// historical no-explicit-proxy behaviour. The 5-minute total timeout is
     /// deliberately generous for large resumable chunk PUTs; the 30s connect
     /// timeout fails a dead/wrong proxy fast instead of hanging the session.
+    /// The 60s read timeout breaks a half-open connection (peer silently gone)
+    /// in seconds and lets the retry loop recover, instead of letting one
+    /// stalled PUT hold an upload slot for the full 5-minute total budget.
     pub fn new(proxy: Option<&str>) -> Self {
         let client = crate::net::build_http_client(
             proxy,
             Some(std::time::Duration::from_secs(300)),
             std::time::Duration::from_secs(30),
+            Some(std::time::Duration::from_secs(60)),
         )
         .expect("failed to build reqwest client");
         Self { client }
@@ -550,11 +586,16 @@ async fn put_part_with_retry(
     len: u64,
     max_retries: u32,
 ) -> Result<String, UploadError> {
+    let budget = RetryBudget {
+        max_attempts: max_retries,
+        max_elapsed: MAX_RETRY_WALL_CLOCK,
+    };
+    let started = std::time::Instant::now();
     let mut attempt = 0;
     loop {
         match put_part_once(client, file_path, part, offset, len).await {
             Ok(etag) => return Ok(etag),
-            Err(e) if is_retryable(&e) && attempt < max_retries => {
+            Err(e) if is_retryable(&e) && budget.allows_retry(attempt, started.elapsed()) => {
                 attempt += 1;
                 let delay = retry_delay_ms(attempt);
                 tracing::warn!(
@@ -881,5 +922,32 @@ mod tests {
     #[test]
     fn zero_floor_falls_back_to_min() {
         assert_eq!(pick_chunk_size(50 * MIB, 0), MIN_AUTO_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn retry_budget_stops_when_attempts_exhausted() {
+        let budget = RetryBudget {
+            max_attempts: 5,
+            max_elapsed: std::time::Duration::from_secs(600),
+        };
+        // All 5 attempts already spent, barely any time elapsed: no more retries.
+        assert!(!budget.allows_retry(5, std::time::Duration::from_secs(1)));
+        // 4 spent, plenty of budget left on both axes: keep going.
+        assert!(budget.allows_retry(4, std::time::Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn retry_budget_stops_when_wall_clock_exhausted() {
+        // The real fix: even with attempts to spare, a chunk that has been
+        // grinding past the wall-clock cap must give up instead of retrying
+        // for hours (each stalled attempt can burn the full request timeout).
+        let budget = RetryBudget {
+            max_attempts: 100,
+            max_elapsed: std::time::Duration::from_secs(600),
+        };
+        // Only 3 attempts made, but 11 minutes have elapsed: stop.
+        assert!(!budget.allows_retry(3, std::time::Duration::from_secs(660)));
+        // 3 attempts, 9 minutes: still within the wall-clock budget.
+        assert!(budget.allows_retry(3, std::time::Duration::from_secs(540)));
     }
 }

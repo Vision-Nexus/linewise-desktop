@@ -2479,12 +2479,20 @@ impl UploadEngine {
         Ok(())
     }
 
-    /// Spawn a background task that auto-retries failed uploads when network recovers.
-    /// Checks every 30 seconds for failed tasks with "Network error" and retries them.
+    /// Spawn a background task that auto-retries failed uploads when the network
+    /// recovers. Polls every 30s, but each failed file is re-queued on its own
+    /// exponential backoff ([`auto_retry_backoff`]) and only as many as there
+    /// are free upload slots are launched per tick — so one flaky-network window
+    /// no longer re-queues every failed file every 30s (the storm that kept
+    /// dozens of files cycling through PENDING all night and starved the slots).
     pub fn spawn_auto_retry(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let engine = Arc::clone(self);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            // Per-task bookkeeping: task_id -> (auto-retries done, last attempt).
+            // Local to this single loop task, so no shared-state synchronization.
+            let mut retry_state: std::collections::HashMap<String, (u32, std::time::Instant)> =
+                std::collections::HashMap::new();
             loop {
                 interval.tick().await;
 
@@ -2506,16 +2514,37 @@ impl UploadEngine {
                     Err(_) => continue,
                 };
 
-                if failed.is_empty() {
+                // Drop bookkeeping for tasks that are no longer failing, so a
+                // file that fails again later starts its backoff fresh.
+                let live: std::collections::HashSet<String> =
+                    failed.iter().map(|t| t.id.clone()).collect();
+                retry_state.retain(|id, _| live.contains(id));
+
+                // Only launch as many retries as there are free upload slots:
+                // a backlog backs off in the queue instead of all flipping to
+                // PENDING and contending for the (default 2) upload permits.
+                let free = engine.upload_semaphore.available_permits();
+                if free == 0 {
+                    continue;
+                }
+                let now = std::time::Instant::now();
+                let to_launch: Vec<UploadTask> = failed
+                    .into_iter()
+                    .filter(|t| auto_retry_due(&retry_state, &t.id, now))
+                    .take(free)
+                    .collect();
+                if to_launch.is_empty() {
                     continue;
                 }
 
                 tracing::info!(
-                    "Auto-retrying {} failed uploads after network recovery",
-                    failed.len()
+                    "Auto-retrying {} failed uploads (backoff-paced, {free} slots free)",
+                    to_launch.len()
                 );
 
-                for task in failed {
+                for task in to_launch {
+                    let attempts_done = retry_state.get(&task.id).map_or(0, |&(c, _)| c);
+                    retry_state.insert(task.id.clone(), (attempts_done + 1, now));
                     let eng = Arc::clone(&engine);
                     let sem = Arc::clone(&engine.upload_semaphore);
                     tokio::spawn(Self::retry_task(eng, sem, task));
@@ -2634,6 +2663,54 @@ impl UploadEngine {
     }
 }
 
+/// Base delay before auto-retrying a failed upload — one `spawn_auto_retry`
+/// tick.
+const AUTO_RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(30);
+/// Plateau for the auto-retry backoff: a long-dead file is re-checked every
+/// 15 min rather than hammered every 30s or abandoned outright.
+const AUTO_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(900);
+/// Give up auto-retrying a file after this many attempts; it stays `Failed`
+/// for the user to retry manually. Bounds a permanently-dead file instead of
+/// re-queueing it forever (the shipped `retry_count < 10` guard never fired
+/// because `retry_count` was never incremented).
+pub(crate) const AUTO_RETRY_MAX_ATTEMPTS: u32 = 10;
+
+/// Per-task backoff before a failed upload is auto-retried again, doubling with
+/// each prior auto-retry: 30s, 1m, 2m, 4m, 8m, … capped at 15m. Without this,
+/// `spawn_auto_retry` re-queued every failed file on every 30s tick — one
+/// flaky-network window turned into an all-night storm that kept dozens of
+/// files cycling through PENDING and starved the upload slots.
+fn auto_retry_backoff(retry_count: u32) -> std::time::Duration {
+    let shift = retry_count.min(5);
+    AUTO_RETRY_BASE
+        .saturating_mul(1 << shift)
+        .min(AUTO_RETRY_MAX_BACKOFF)
+}
+
+/// Whether a failed task whose last auto-retry was `since_last_attempt` ago is
+/// due for another, given how many times it has already been auto-retried.
+fn should_auto_retry(retry_count: u32, since_last_attempt: std::time::Duration) -> bool {
+    since_last_attempt >= auto_retry_backoff(retry_count)
+}
+
+/// Decide whether `id` is due for an auto-retry this tick, given the loop's
+/// per-task bookkeeping (`attempts_done`, `last_attempt`). A task never seen
+/// before is eligible immediately; a task that has exhausted
+/// [`AUTO_RETRY_MAX_ATTEMPTS`] is left `Failed` for manual retry.
+fn auto_retry_due(
+    state: &std::collections::HashMap<String, (u32, std::time::Instant)>,
+    id: &str,
+    now: std::time::Instant,
+) -> bool {
+    match state.get(id) {
+        None => true,
+        Some(&(attempts_done, last)) => {
+            attempts_done < AUTO_RETRY_MAX_ATTEMPTS
+                && should_auto_retry(attempts_done, now.duration_since(last))
+        }
+    }
+}
+
 #[cfg(test)]
 mod collect_videos_tests {
     use super::collect_videos_in_dir;
@@ -2701,5 +2778,30 @@ mod collect_videos_tests {
         let found = collect_videos_in_dir(&file);
         cleanup(&root);
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn auto_retry_backoff_grows_exponentially_then_caps() {
+        use std::time::Duration;
+        // First auto-retry waits one tick; each subsequent one doubles so a
+        // file that keeps failing backs off instead of being re-queued every
+        // 30s (the storm: one flaky network window re-tried 13 files forever).
+        assert_eq!(super::auto_retry_backoff(0), Duration::from_secs(30));
+        assert_eq!(super::auto_retry_backoff(1), Duration::from_secs(60));
+        assert_eq!(super::auto_retry_backoff(2), Duration::from_secs(120));
+        assert_eq!(super::auto_retry_backoff(3), Duration::from_secs(240));
+        // Plateaus at 15 minutes so a long-dead file is checked rarely, not never.
+        assert_eq!(super::auto_retry_backoff(20), Duration::from_secs(900));
+    }
+
+    #[test]
+    fn should_auto_retry_waits_for_the_per_task_backoff() {
+        use std::time::Duration;
+        // retry_count=2 needs 120s since the last attempt before retrying again.
+        assert!(!super::should_auto_retry(2, Duration::from_secs(60)));
+        assert!(super::should_auto_retry(2, Duration::from_secs(120)));
+        // A fresh failure (retry_count=0) is eligible after the first 30s tick.
+        assert!(!super::should_auto_retry(0, Duration::from_secs(10)));
+        assert!(super::should_auto_retry(0, Duration::from_secs(30)));
     }
 }

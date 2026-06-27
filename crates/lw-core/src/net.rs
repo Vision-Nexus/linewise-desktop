@@ -36,6 +36,11 @@ use std::time::Duration;
 ///   API and auth clients pass a shorter sane ceiling.
 /// * `connect` — TCP/TLS connect timeout (`Client::connect_timeout`), so a
 ///   dead or wrong proxy fails fast instead of hanging the whole session.
+/// * `read` — optional idle/read timeout (`Client::read_timeout`): the max gap
+///   between received bytes. The GCS upload client sets this so a half-open
+///   connection (peer silently gone — common on flaky/metered links) is broken
+///   in seconds and retried, instead of stalling until the much longer `total`
+///   budget elapses and holding an upload slot the whole time.
 ///
 /// On an invalid proxy URL this does **not** panic and does not propagate
 /// an error: it logs a warning and falls back to building the client with
@@ -46,10 +51,14 @@ pub fn build_http_client(
     proxy: Option<&str>,
     total: Option<Duration>,
     connect: Duration,
+    read: Option<Duration>,
 ) -> reqwest::Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder().connect_timeout(connect);
     if let Some(total) = total {
         builder = builder.timeout(total);
+    }
+    if let Some(read) = read {
+        builder = builder.read_timeout(read);
     }
 
     let trimmed = proxy.map(str::trim).filter(|p| !p.is_empty());
