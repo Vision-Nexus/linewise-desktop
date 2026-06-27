@@ -828,6 +828,13 @@ pub fn UploadTaskRow(
                 }
             }
 
+            if task.retry_count > 0 {
+                div {
+                    style: "font-size: 12px; color: var(--warning); margin-top: 4px; padding: 6px 8px; background: var(--warning-bg); border-radius: 4px;",
+                    "Retrying after a network error (attempt {task.retry_count})…"
+                }
+            }
+
             if let Some(ref err) = task.error_message {
                 div {
                     style: "font-size: 12px; color: var(--error); margin-top: 4px; padding: 6px 8px; background: var(--error-bg); border-radius: 4px;",

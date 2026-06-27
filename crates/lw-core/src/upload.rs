@@ -213,6 +213,14 @@ pub enum UploadEvent {
         task_id: String,
         error: String,
     },
+    /// A previously-failed upload is being auto-retried after network recovery.
+    /// `attempt` is the 1-based auto-retry number. The UI shows it so a
+    /// re-queued file reads as "retrying (attempt N)" instead of a silent
+    /// PENDING/UPLOADING row.
+    Retrying {
+        task_id: String,
+        attempt: u32,
+    },
 }
 
 /// Cap on how many files run their staging-time quality check + hash stream
@@ -2544,17 +2552,24 @@ impl UploadEngine {
 
                 for task in to_launch {
                     let attempts_done = retry_state.get(&task.id).map_or(0, |&(c, _)| c);
-                    retry_state.insert(task.id.clone(), (attempts_done + 1, now));
+                    let attempt = attempts_done + 1;
+                    retry_state.insert(task.id.clone(), (attempt, now));
                     let eng = Arc::clone(&engine);
                     let sem = Arc::clone(&engine.upload_semaphore);
-                    tokio::spawn(Self::retry_task(eng, sem, task));
+                    tokio::spawn(Self::retry_task(eng, sem, task, attempt));
                 }
             }
         })
     }
 
-    async fn retry_task(eng: Arc<Self>, sem: Arc<Semaphore>, mut task: UploadTask) {
+    async fn retry_task(eng: Arc<Self>, sem: Arc<Semaphore>, mut task: UploadTask, attempt: u32) {
         let _permit = sem.acquire().await.expect("semaphore closed");
+        // Surface the retry so the row reads "retrying (attempt N)" instead of a
+        // silent PENDING while it waits for / holds one of the upload slots.
+        let _ = eng.event_tx.send(UploadEvent::Retrying {
+            task_id: task.id.clone(),
+            attempt,
+        });
         let _ = eng
             .db
             .update_upload_state(&task.id, UploadState::Pending, None)
