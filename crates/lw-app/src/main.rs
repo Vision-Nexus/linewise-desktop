@@ -53,6 +53,31 @@ fn main() {
             // app.rs after whoami. Application mode (the default) = one session
             // per process run, which is what we want for a desktop app.
             auto_session_tracking: true,
+            // Dioxus 0.7 / wry logs `error!("Webview {n} was already connected.
+            // Rejecting new connection.")` on every webview reconnect. The
+            // rejection is a benign framework no-op, not an app fault, but
+            // `sentry_tracing` captures `error!` as an Event — making this the
+            // single highest-volume desktop "error" in Sentry. We can't lower
+            // the framework's emission level (it lives in a dependency), so we
+            // drop exactly this line here: `before_send` sees the rendered
+            // message and returns `None` to discard it, leaving every other
+            // error (including real wry / dioxus faults) untouched. Matched on
+            // the stable substring, not the per-window webview index.
+            before_send: Some(std::sync::Arc::new(|event| {
+                let is_webview_reconnect_noise = event
+                    .message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("already connected"))
+                    || event
+                        .logentry
+                        .as_ref()
+                        .is_some_and(|l| l.message.contains("already connected"));
+                if is_webview_reconnect_noise {
+                    None
+                } else {
+                    Some(event)
+                }
+            })),
             ..Default::default()
         },
     ));
