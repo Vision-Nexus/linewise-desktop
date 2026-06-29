@@ -1603,6 +1603,63 @@ impl UploadEngine {
         Ok(())
     }
 
+    /// Remove a queued/failed upload row, first aborting any in-flight
+    /// server-side upload so a partially-uploaded file does not leak a GCS
+    /// resumable session or an incomplete XML multipart upload (both linger and
+    /// cost storage until a bucket lifecycle rule reaps them). Use this for the
+    /// transfer-panel "Remove"/"Clear" affordance, where a row may already have
+    /// pushed bytes to GCS.
+    ///
+    /// The abort is best-effort: an unreachable server is logged and does NOT
+    /// block the local-row deletion (the user asked to remove it). A `Completed`
+    /// row has nothing in flight, so it is deleted directly. The created
+    /// document is intentionally left in place — reaping a created-but-unverified
+    /// document is a backend-owned decision handled separately.
+    pub async fn abort_in_flight_and_remove(&self, task_id: &str) -> Result<(), DbError> {
+        if let Some(task) = self.db.get_upload_by_id(task_id).await?
+            && task.state != UploadState::Completed
+        {
+            self.abort_in_flight(&task).await;
+        }
+        self.db.delete_upload_task(task_id).await
+    }
+
+    /// Best-effort cancel of a task's in-flight server-side upload. Prefers the
+    /// XML MPU path (its `uploadId` plus the document are required to abort) and
+    /// falls back to the GCS resumable session. A no-op when neither is present
+    /// (the task never reached the upload stage). Errors are logged, never
+    /// returned: the caller is removing the row regardless.
+    async fn abort_in_flight(&self, task: &UploadTask) {
+        if let (Some(upload_id), Some(doc_id)) =
+            (task.mpu_upload_id.as_deref(), task.document_id.as_deref())
+        {
+            if let Err(e) = self
+                .api
+                .abort_multipart_upload(&task.tenant_id, &task.project_id, doc_id, upload_id)
+                .await
+            {
+                tracing::warn!(
+                    "Abort multipart upload on remove failed for {}: {e}",
+                    task.filename
+                );
+            }
+            return;
+        }
+        if let Some(session_id) = task.session_id.as_deref() {
+            let session = storage::UploadSession {
+                session_id: session_id.to_string(),
+                total_size: task.size,
+                bytes_confirmed: task.bytes_uploaded,
+            };
+            if let Err(e) = self.storage.abort_upload(&session).await {
+                tracing::warn!(
+                    "Abort resumable session on remove failed for {}: {e}",
+                    task.filename
+                );
+            }
+        }
+    }
+
     /// Process a single upload task through all stages.
     /// Resumes from where it left off — skips stages already completed
     /// (has document_id → skip create, has session_id → skip initiate).
