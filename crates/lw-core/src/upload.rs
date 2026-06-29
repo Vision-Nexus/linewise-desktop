@@ -1795,7 +1795,10 @@ impl UploadEngine {
         // capture metadata onto the final upload artifact AFTER the strip so the two
         // can coexist.
         let upload_path = transcoded_path.as_deref().unwrap_or(path);
-        let upload_size = tokio::fs::metadata(upload_path).await?.len();
+        let upload_size = tokio::fs::metadata(upload_path)
+            .await
+            .map_err(|e| UploadError::from_source_io(e, upload_path))?
+            .len();
 
         // Sanity check: if this task carries a recorded `transcoded_size`
         // (persisted when `maybe_transcode` finished in this run OR loaded
