@@ -1,5 +1,5 @@
 use crate::container_kind::ContainerKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -120,6 +120,32 @@ pub enum UploadError {
          Wait until it finishes writing or downloading, then add it again."
     )]
     FileChangedDuringUpload { declared: u64, actual: u64 },
+    /// The source file/path was gone when its bytes were read for upload —
+    /// moved, renamed, deleted, or on a removable/network drive that
+    /// disconnected mid-batch (Windows `os error 2` = file not found,
+    /// `os error 3` = path not found, both mapped by std to
+    /// `ErrorKind::NotFound`; ENOENT elsewhere).
+    ///
+    /// While the file is missing this is `is_expected` (a `warn!`, not a
+    /// Sentry error) and is never AUTO-retried: its message matches none of
+    /// the transient-transport markers in the `error_message LIKE …` allow-list
+    /// of [`crate::db::Database::get_failed_retryable`], so the 30s auto-retry
+    /// loop never re-queues it. The attempt fails fast at `open()`, so the
+    /// upload slot is released immediately and the row settles in `Failed`
+    /// without blocking other uploads. The created document, any resumable
+    /// session, and `bytes_uploaded` are PRESERVED: once the user restores the
+    /// file they click Retry to RESUME from the partial upload, or Remove to
+    /// discard it.
+    ///
+    /// `path` is carried for logging only and is deliberately kept OUT of the
+    /// `Display` string so that a path containing a marker word (e.g. a
+    /// `\\NetworkShare\…` UNC path) can't leak into the message and be misread
+    /// as a retryable network error by that `LIKE`-based gate.
+    #[error(
+        "Source file is missing — it was moved, renamed, or deleted during upload. \
+         Restore it to its original location and click Retry to resume, or Remove to discard this upload."
+    )]
+    SourceFileMissing { path: PathBuf },
     /// A part PUT in the parallel multipart (XML MPU) path completed but
     /// returned no usable `ETag` response header. GCS always sets `ETag` on
     /// a successful part PUT; its absence means a misbehaving proxy stripped
@@ -170,9 +196,18 @@ impl UploadError {
             | UploadError::UnsupportedContainer { .. }
             | UploadError::QualityCheckPayloadTooLarge { .. }
             | UploadError::QualityCheckOffline { .. }
-            | UploadError::FileChangedDuringUpload { .. } => true,
-            UploadError::FileNotFound(_)
-            | UploadError::FileTooLarge { .. }
+            | UploadError::FileChangedDuringUpload { .. }
+            // A missing source file/path is a user-environment condition (the
+            // file was moved/deleted, or a removable drive vanished), not a
+            // code fault — surface it as a warning, like FileChangedDuringUpload.
+            | UploadError::SourceFileMissing { .. }
+            | UploadError::FileNotFound(_) => true,
+            // ENOENT (a stray missing-file IO that escaped `from_source_io`) or
+            // ENOSPC / a full disk are user-environment conditions, not code
+            // faults — keep them out of Sentry. Other IO / DB errors stay loud.
+            UploadError::Io(e) => io_is_missing_or_full(e),
+            UploadError::Database(e) => e.to_string().contains("disk is full"),
+            UploadError::FileTooLarge { .. }
             | UploadError::Api { .. }
             | UploadError::Auth { .. }
             | UploadError::GcsUpload { .. }
@@ -180,9 +215,21 @@ impl UploadError {
             | UploadError::MpuTaskFailed { .. }
             | UploadError::MpuResumeFailed { .. }
             | UploadError::Network(_)
-            | UploadError::Io(_)
-            | UploadError::CaptureEmbed { .. }
-            | UploadError::Database(_) => false,
+            | UploadError::CaptureEmbed { .. } => false,
+        }
+    }
+
+    /// Map an IO error from opening/statting the upload source against `path`
+    /// into the most specific variant: a missing file/path (ENOENT; Windows
+    /// `os error 2`/`3`) becomes the permanent, user-actionable
+    /// [`Self::SourceFileMissing`]; everything else stays [`Self::Io`].
+    pub fn from_source_io(err: std::io::Error, path: &Path) -> Self {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            UploadError::SourceFileMissing {
+                path: path.to_path_buf(),
+            }
+        } else {
+            UploadError::Io(err)
         }
     }
 
@@ -199,6 +246,16 @@ impl UploadError {
             tracing::error!("{context} failed: {self}");
         }
     }
+}
+
+/// True for a raw OS IO error that means the source file/path is gone
+/// (ENOENT; Windows `os error 2`/`3` → `ErrorKind::NotFound`) or the disk is
+/// full (ENOSPC = 28; Windows `ERROR_HANDLE_DISK_FULL` = 39,
+/// `ERROR_DISK_FULL` = 112). Both are user-environment conditions, never a
+/// transient transport hiccup, so they are neither Sentry-loud nor retryable.
+fn io_is_missing_or_full(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
+        || matches!(e.raw_os_error(), Some(28) | Some(39) | Some(112))
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -149,7 +149,9 @@ pub async fn upload_file_chunked(
     max_retries: u32,
     on_progress: &ProgressFn,
 ) -> Result<u64, UploadError> {
-    let mut file = tokio::fs::File::open(file_path).await?;
+    let mut file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|e| UploadError::from_source_io(e, file_path))?;
     let total = session.total_size;
     let mut offset = start_offset;
     let chunk_size = if chunk_size > 0 {
@@ -642,7 +644,9 @@ async fn put_part_once(
     offset: u64,
     len: u64,
 ) -> Result<String, UploadError> {
-    let mut file = tokio::fs::File::open(file_path).await?;
+    let mut file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|e| UploadError::from_source_io(e, file_path))?;
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     let mut buf = vec![0u8; len as usize];
     // A short read means the file shrank since the part layout was computed —

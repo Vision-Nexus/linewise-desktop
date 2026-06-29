@@ -478,6 +478,14 @@ impl Database {
     }
 
     /// Get failed uploads that are retryable (network errors, server errors, interrupted).
+    ///
+    /// The `error_message LIKE …` allow-list below is the auto-retry gate: a
+    /// `Failed` row is re-queued only when its message matches a transient
+    /// transport marker. Permanent failures — a missing source file
+    /// ([`crate::error::UploadError::SourceFileMissing`]), a full disk, a 4xx,
+    /// a file that changed on disk — match none of these and are never
+    /// auto-retried; the user resumes them manually (per-row Retry) after
+    /// fixing the cause.
     pub async fn get_failed_retryable(&self) -> Result<Vec<UploadTask>, DbError> {
         let rows = sqlx::query_as!(
             UploadRow,

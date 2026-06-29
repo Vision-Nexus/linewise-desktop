@@ -145,7 +145,8 @@ fn stage_error_toast(path: &Path, err: &UploadError) -> String {
         | UploadError::FileNotFound(_)
         | UploadError::Cancelled
         | UploadError::QualityCheckPayloadTooLarge { .. }
-        | UploadError::FileChangedDuringUpload { .. } => {
+        | UploadError::FileChangedDuringUpload { .. }
+        | UploadError::SourceFileMissing { .. } => {
             format!("Cannot upload \"{filename}\": {err}")
         }
         UploadError::UnsupportedContainer { kind } => {
@@ -527,11 +528,18 @@ pub fn TransferPanel() -> Element {
     };
 
     let mut app_state_clear = app_state.clone();
-    let db_for_clear = services.db.clone();
+    let engine_for_clear = services.upload_engine.clone();
     let on_clear = move |task_id: String| {
-        let db = db_for_clear.clone();
+        let engine = engine_for_clear.clone();
         spawn(async move {
-            let _ = db.delete_upload_task(&task_id).await;
+            // Abort any in-flight GCS resumable session / incomplete MPU before
+            // dropping the row, so removing a partially-uploaded failure doesn't
+            // orphan an upload on the server. Completed rows skip the abort
+            // inside the engine; the abort is best-effort and never blocks the
+            // local delete.
+            if let Err(e) = engine.abort_in_flight_and_remove(&task_id).await {
+                tracing::error!("Failed to remove upload {task_id}: {e}");
+            }
             app_state_clear
                 .upload_tasks
                 .write()
