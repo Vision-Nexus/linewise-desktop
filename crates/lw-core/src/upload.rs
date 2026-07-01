@@ -2282,7 +2282,10 @@ impl UploadEngine {
         // (e.g. re-added after a manual clear). Best-effort: a failed reset only
         // means the stale count lingers on an already-completed row.
         if let Err(e) = self.db.reset_retry_count(&task.id).await {
-            tracing::warn!("Failed to reset retry_count on completion of {}: {e}", task.id);
+            tracing::warn!(
+                "Failed to reset retry_count on completion of {}: {e}",
+                task.id
+            );
         }
         let _ = self.event_tx.send(UploadEvent::Completed {
             task_id: task.id.clone(),
@@ -2659,9 +2662,7 @@ impl UploadEngine {
                     // Storage unreachable — don't churn retries into a wall.
                     continue;
                 }
-                engine
-                    .run_retry_tick(&mut last_attempt, reading)
-                    .await;
+                engine.run_retry_tick(&mut last_attempt, reading).await;
             }
         })
     }
@@ -2692,8 +2693,7 @@ impl UploadEngine {
         };
         // Drop pacing entries for tasks no longer failing, so a file that fails
         // again later starts its backoff fresh.
-        let live: std::collections::HashSet<&str> =
-            failed.iter().map(|t| t.id.as_str()).collect();
+        let live: std::collections::HashSet<&str> = failed.iter().map(|t| t.id.as_str()).collect();
         last_attempt.retain(|id, _| live.contains(id.as_str()));
 
         // Only launch as many retries as there are free upload slots: a backlog
@@ -3142,7 +3142,11 @@ mod collect_videos_tests {
         // At the cap: never due (would move to GaveUp instead) — this is the
         // give-up axis the persisted retry_count now drives.
         assert!(!auto_retry_due(AUTO_RETRY_MAX_ATTEMPTS, None, now));
-        assert!(!auto_retry_due(AUTO_RETRY_MAX_ATTEMPTS, Some(now - Duration::from_secs(3600)), now));
+        assert!(!auto_retry_due(
+            AUTO_RETRY_MAX_ATTEMPTS,
+            Some(now - Duration::from_secs(3600)),
+            now
+        ));
         // Below the cap but too soon since the last attempt: not yet due
         // (retry_count=1 needs 60s of backoff).
         assert!(!auto_retry_due(1, Some(now - Duration::from_secs(30)), now));
@@ -3176,24 +3180,12 @@ mod collect_videos_tests {
             status: 503,
             message: "error sending request".to_string(),
         };
-        let permanent = UploadError::FileTooLarge {
-            size: 1,
-            max: 0,
-        };
+        let permanent = UploadError::FileTooLarge { size: 1, max: 0 };
         // Weak link + transport-transient error → network-specific copy.
-        assert!(
-            compose_give_up_message(10, &transient, weak)
-                .contains("网络太弱")
-        );
+        assert!(compose_give_up_message(10, &transient, weak).contains("网络太弱"));
         // Healthy link (even with a transient error) → generic copy with count.
-        assert!(
-            compose_give_up_message(10, &transient, good)
-                .contains("已尝试 10 次")
-        );
+        assert!(compose_give_up_message(10, &transient, good).contains("已尝试 10 次"));
         // Weak link but a permanent error → generic copy, not network copy.
-        assert!(
-            compose_give_up_message(10, &permanent, weak)
-                .contains("已尝试 10 次")
-        );
+        assert!(compose_give_up_message(10, &permanent, weak).contains("已尝试 10 次"));
     }
 }

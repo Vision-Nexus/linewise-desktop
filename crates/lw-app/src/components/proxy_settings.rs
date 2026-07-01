@@ -48,8 +48,8 @@ pub fn ProxySettingsPane() -> Element {
         next.server.proxy_url = value;
         // Pin the concurrency into range before persisting so a hand-edited or
         // stepper-overshot value can never build a 0-permit / thrashing backend.
-        next.upload.mpu_part_concurrency = (*mpu_concurrency.read())
-            .clamp(MPU_CONCURRENCY_MIN, MPU_CONCURRENCY_MAX);
+        next.upload.mpu_part_concurrency =
+            (*mpu_concurrency.read()).clamp(MPU_CONCURRENCY_MIN, MPU_CONCURRENCY_MAX);
         match app_state.save_config(next) {
             Ok(()) => {
                 app_state.show_toast(

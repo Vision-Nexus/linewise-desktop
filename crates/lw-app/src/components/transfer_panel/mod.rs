@@ -51,12 +51,12 @@ use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use failed::FailedList;
 use in_progress::InProgressList;
-use network_chip::NetworkChip;
 use lw_core::error::UploadError;
 use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload;
 use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
+use network_chip::NetworkChip;
 use std::path::{Path, PathBuf};
 use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
 
