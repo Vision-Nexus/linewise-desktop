@@ -132,6 +132,16 @@ impl StorageBackend {
             Self::S3(b) => b.abort_upload(session).await,
         }
     }
+
+    /// The backend's own upload client. The connectivity probe in
+    /// [`wait_for_network`] reuses it so the check follows the same
+    /// (proxy-aware) path as the chunk/part PUTs.
+    fn client(&self) -> &reqwest::Client {
+        match self {
+            Self::Gcs(b) => &b.client,
+            Self::S3(b) => &b.client,
+        }
+    }
 }
 
 /// Upload a file with chunked resumable protocol.
@@ -316,12 +326,14 @@ async fn upload_chunk_with_retry(
         max_attempts: max_retries,
         max_elapsed: MAX_RETRY_WALL_CLOCK,
     };
-    // `wait_for_network` polls connectivity before each backoff sleep.
+    // `wait_for_network` polls connectivity before each backoff sleep, through
+    // the backend's own (proxy-aware) client so the probe path matches the PUTs.
+    let probe = backend.client();
     retry_io(
         budget,
         "Chunk upload",
         || backend.upload_chunk(session, data, offset),
-        wait_for_network,
+        |ms| wait_for_network(probe, ms),
     )
     .await
 }
@@ -343,8 +355,15 @@ fn is_retryable(err: &UploadError) -> bool {
 }
 
 /// Wait for network recovery with exponential backoff.
-/// Checks connectivity by attempting a lightweight request.
-async fn wait_for_network(max_wait_ms: u64) {
+///
+/// `client` is the backend's own proxy-aware upload client (see
+/// [`GcsBackend::new`]). Probing through it — rather than a fresh
+/// `reqwest::Client::new()` — means the connectivity check follows the exact
+/// same path the chunk/part PUTs take: a user who set `proxy_url` has their
+/// probe tunnel through v2ray's HTTP inbound too, instead of hitting
+/// `storage.googleapis.com` directly (which is what wedges on CN/HK links) and
+/// reporting a false "network back" the moment the direct route flickers.
+async fn wait_for_network(client: &reqwest::Client, max_wait_ms: u64) {
     let check_interval = std::time::Duration::from_secs(2);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(max_wait_ms);
 
@@ -357,7 +376,7 @@ async fn wait_for_network(max_wait_ms: u64) {
         if tokio::time::Instant::now() > extended_deadline {
             break; // Give up waiting, let the retry logic handle it
         }
-        match reqwest::Client::new()
+        match client
             .head("https://storage.googleapis.com")
             .timeout(std::time::Duration::from_secs(5))
             .send()
@@ -622,11 +641,12 @@ async fn put_part_with_retry(
         max_elapsed: MAX_RETRY_WALL_CLOCK,
     };
     let label = format!("Multipart part {} upload", part.part_number);
+    // Probe connectivity through the same (proxy-aware) client the part PUT uses.
     retry_io(
         budget,
         &label,
         || put_part_once(client, file_path, part, offset, len),
-        wait_for_network,
+        |ms| wait_for_network(client, ms),
     )
     .await
 }
