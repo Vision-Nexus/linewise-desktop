@@ -687,13 +687,16 @@ pub fn UploadTaskRow(
         format_size(task.size)
     };
 
-    // Stall hint: an Uploading row whose rate is 0/unknown AND whose last
-    // Progress event is older than the threshold is wedged on a chunk (the
-    // weak-network case where PUTs hang at the transport layer). No UI ticker —
-    // this recomputes on the next Progress/StateChanged re-render, which is
-    // exactly when the condition can flip.
+    // Stall hint: an Uploading row with no byte progress for longer than the
+    // threshold is wedged on a chunk (the weak-network case where PUTs hang at
+    // the transport layer). Key purely off the last-progress timestamp — NOT
+    // upload_speed, which can freeze at its last non-zero value during a stall
+    // and would suppress the hint (a false negative we hit in testing).
+    // last_progress_at is stamped on entering Uploading and on every Progress
+    // event, so the clock starts the moment the upload does. No UI ticker — this
+    // recomputes on the next Progress/StateChanged re-render, which is exactly
+    // when the condition can flip.
     let stalled = task.state == UploadState::Uploading
-        && upload_speed.read().get(&task.id).copied().unwrap_or(0.0) <= 0.0
         && app_state
             .last_progress_at
             .read()
@@ -854,7 +857,7 @@ pub fn UploadTaskRow(
             if stalled {
                 div {
                     style: "font-size: 12px; color: var(--warning); margin-top: 4px; padding: 6px 8px; background: var(--warning-bg); border-radius: 4px;",
-                    "连接停滞,正在重试…"
+                    "Connection stalled — retrying…"
                 }
             }
 

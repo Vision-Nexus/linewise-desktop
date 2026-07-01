@@ -258,6 +258,15 @@ fn handle_upload_event(
             if state != UploadState::Staged {
                 app_state.embed_progress.write().remove(&task_id);
             }
+            // Start (or reset) the stall clock when a row enters Uploading, so
+            // the "Connection stalled" hint fires even if the first chunk hangs
+            // before any Progress event, and a resumed upload starts fresh.
+            if state == UploadState::Uploading {
+                app_state
+                    .last_progress_at
+                    .write()
+                    .insert(task_id.clone(), std::time::Instant::now());
+            }
             update_task(app_state, &task_id, |t| t.state = state);
         }
         UploadEvent::Progress {

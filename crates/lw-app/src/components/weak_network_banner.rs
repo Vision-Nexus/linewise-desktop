@@ -23,7 +23,7 @@ const WEAK_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 pub fn WeakNetworkBanner() -> Element {
     let mut app_state = use_context::<AppState>();
     // `show`: the grace period elapsed while still weak. `dismissed`: the user
-    // clicked "本次不再提示" for the current weak episode. Both reset when the
+    // clicked "Dismiss" for the current weak episode. Both reset when the
     // link recovers, so a later episode can prompt again.
     let mut show = use_signal(|| false);
     let mut dismissed = use_signal(|| false);
@@ -95,7 +95,7 @@ pub fn WeakNetworkBanner() -> Element {
                     color: var(--text); font-size: 13px;",
             span {
                 style: "flex: 1;",
-                "网络太弱,无法连接存储。请更换更稳定的网络,或在 设置 → 网络 中配置代理。"
+                "Your network can't reach storage. Switch to a more stable network, or set a proxy in Settings → Network."
             }
             button {
                 class: "btn-primary",
@@ -103,14 +103,14 @@ pub fn WeakNetworkBanner() -> Element {
                         background: var(--btn-primary); color: white; \
                         border: none; cursor: pointer; font-size: 12px; font-weight: 600;",
                 onclick: move |_| app_state.show_settings.set(true),
-                "打开设置"
+                "Open Settings"
             }
             button {
                 style: "padding: 6px 12px; border-radius: 6px; \
                         background: transparent; color: var(--text-secondary); \
                         border: 1px solid var(--border); cursor: pointer; font-size: 12px;",
                 onclick: move |_| dismissed.set(true),
-                "本次不再提示"
+                "Don't show again"
             }
         }
     }

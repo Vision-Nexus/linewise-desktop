@@ -36,23 +36,23 @@ fn chip_style(health: NetworkHealth) -> ChipStyle {
         NetworkHealth::Weak => ChipStyle {
             lit_bars: 2,
             color: "var(--warning)",
-            label: "网络较差",
+            label: "Weak",
         },
         NetworkHealth::Offline => ChipStyle {
             lit_bars: 1,
             color: "var(--error)",
-            label: "已离线",
+            label: "Offline",
         },
     }
 }
 
 /// Hover-title text: the probe RTT when known, else a plain tier note. Ok/Weak
-/// use the orange `--warning`; only Offline is red, so "网络较差" reads as
-/// distinct from "已离线".
+/// use the orange `--warning`; only Offline is red, so "Weak" reads as
+/// distinct from "Offline".
 fn hover_title(reading: NetworkReading) -> String {
     match reading.rtt_ms {
         Some(ms) => format!("ping {ms}ms"),
-        None => "网络不可达".to_string(),
+        None => "Unreachable".to_string(),
     }
 }
 

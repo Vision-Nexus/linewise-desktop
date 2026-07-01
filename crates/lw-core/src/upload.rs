@@ -3013,13 +3013,14 @@ fn classify_rtt(rtt_ms: u128) -> NetworkHealth {
 /// transport-transient error (the same markers `get_failed_retryable` allow-lists
 /// — Network / timeout / no healthy upstream / Interrupted / error sending
 /// request), give actionable network copy; otherwise a generic "stopped after N
-/// tries" line. Chinese, because the give-up surfaces directly to CN/HK users.
+/// tries" line. English, to match the rest of the desktop UI (the app has no
+/// i18n and every other user-facing string is English).
 fn compose_give_up_message(attempt: u32, err: &UploadError, reading: NetworkReading) -> String {
     let weak = matches!(reading.health, NetworkHealth::Weak | NetworkHealth::Offline);
     if weak && is_transport_transient(err) {
-        return "网络太弱,多次重试后仍无法连接存储 —— 请更换网络或在设置里配置代理。".to_string();
+        return "Network too weak — couldn't reach storage after several retries. Switch to a more stable network, or set a proxy in Settings → Network.".to_string();
     }
-    format!("已停止自动重试(已尝试 {attempt} 次),请手动重试。")
+    format!("Stopped auto-retrying after {attempt} attempts — retry manually.")
 }
 
 /// Whether an error message carries one of the transient/transport markers the
@@ -3195,10 +3196,10 @@ mod collect_videos_tests {
         };
         let permanent = UploadError::FileTooLarge { size: 1, max: 0 };
         // Weak link + transport-transient error → network-specific copy.
-        assert!(compose_give_up_message(10, &transient, weak).contains("网络太弱"));
+        assert!(compose_give_up_message(10, &transient, weak).contains("Network too weak"));
         // Healthy link (even with a transient error) → generic copy with count.
-        assert!(compose_give_up_message(10, &transient, good).contains("已尝试 10 次"));
+        assert!(compose_give_up_message(10, &transient, good).contains("10 attempts"));
         // Weak link but a permanent error → generic copy, not network copy.
-        assert!(compose_give_up_message(10, &permanent, weak).contains("已尝试 10 次"));
+        assert!(compose_give_up_message(10, &permanent, weak).contains("10 attempts"));
     }
 }
