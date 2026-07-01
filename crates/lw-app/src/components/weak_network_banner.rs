@@ -45,7 +45,11 @@ pub fn WeakNetworkBanner() -> Element {
     // reveals the banner iff still weak AND its epoch is still current on
     // expiry; recovering hides it and clears the dismiss.
     use_effect(use_reactive!(|weak| {
-        let my_epoch = epoch() + 1;
+        // Read `epoch` with peek() (UNTRACKED). A tracked read (`epoch()`) here
+        // would subscribe this effect to `epoch`, and the `epoch.set` below would
+        // then re-trigger the effect endlessly — a main-thread busy loop that
+        // freezes the UI. This effect must re-run only on `weak` (via use_reactive!).
+        let my_epoch = (*epoch.peek()).wrapping_add(1);
         epoch.set(my_epoch);
         if !weak {
             show.set(false);
@@ -54,7 +58,9 @@ pub fn WeakNetworkBanner() -> Element {
         }
         spawn(async move {
             tokio::time::sleep(WEAK_GRACE).await;
-            if epoch() != my_epoch {
+            // Untracked read — this runs in a spawned future, and peek() also
+            // keeps it from ever subscribing anything.
+            if *epoch.peek() != my_epoch {
                 return;
             }
             let still_weak = (*app_state.network_health.read())
