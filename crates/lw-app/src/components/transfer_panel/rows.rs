@@ -659,7 +659,7 @@ pub fn UploadTaskRow(
 
     let (status_color, status_bg) = match task.state {
         UploadState::Completed => ("var(--success)", "var(--success-bg)"),
-        UploadState::Failed => ("var(--error)", "var(--error-bg)"),
+        UploadState::Failed | UploadState::GaveUp => ("var(--error)", "var(--error-bg)"),
         UploadState::Uploading => ("var(--info)", "var(--info-bg)"),
         UploadState::Paused => ("var(--warning)", "var(--warning-bg)"),
         _ => ("var(--text-muted)", "var(--bg-secondary)"),
@@ -737,7 +737,10 @@ pub fn UploadTaskRow(
                                     "Remove"
                                 }
                             },
-                            UploadState::Failed => rsx! {
+                            // Failed and GaveUp both offer manual Retry + Remove.
+                            // Retrying a GaveUp row resets its durable retry_count
+                            // and re-enters the normal flow (see `on_retry`).
+                            UploadState::Failed | UploadState::GaveUp => rsx! {
                                 button {
                                     class: "btn-primary",
                                     style: "{small_btn} background: var(--btn-primary); color: white; border: none;",
@@ -879,7 +882,8 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
         | UploadState::Staged
         | UploadState::Rejected
         | UploadState::Completed
-        | UploadState::Failed => String::new(),
+        | UploadState::Failed
+        | UploadState::GaveUp => String::new(),
     }
 }
 

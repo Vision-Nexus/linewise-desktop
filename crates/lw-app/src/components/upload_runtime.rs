@@ -270,10 +270,18 @@ fn handle_upload_event(
             // retries legitimately reset the byte counter mid-stream, but the
             // wire-side progress never regresses — acknowledged bytes stay
             // acknowledged across sessions.
-            let mut guard = upload_progress.write();
-            let entry = guard.entry(task_id).or_insert((0, total_bytes));
-            entry.0 = entry.0.max(bytes_uploaded);
-            entry.1 = total_bytes;
+            {
+                let mut guard = upload_progress.write();
+                let entry = guard.entry(task_id.clone()).or_insert((0, total_bytes));
+                entry.0 = entry.0.max(bytes_uploaded);
+                entry.1 = total_bytes;
+            }
+            // Stamp the last-progress instant so a row can detect a stall (speed
+            // 0 + no progress for a while) without a UI ticker.
+            app_state
+                .last_progress_at
+                .write()
+                .insert(task_id, std::time::Instant::now());
         }
         UploadEvent::HashProgress {
             task_id,
@@ -361,12 +369,17 @@ fn handle_upload_event(
             upload_progress.write().remove(&task_id);
             transcode_progress.write().remove(&task_id);
             hash_progress.write().remove(&task_id);
+            app_state.last_progress_at.write().remove(&task_id);
             update_task(app_state, &task_id, |t| t.state = UploadState::Completed);
         }
         UploadEvent::Failed { task_id, error } => {
             upload_progress.write().remove(&task_id);
             transcode_progress.write().remove(&task_id);
             hash_progress.write().remove(&task_id);
+            app_state.last_progress_at.write().remove(&task_id);
+            // A give-up arrives as this `Failed` event (carrying the terminal
+            // message) followed by a `StateChanged → GaveUp`; keep the message
+            // and let the later StateChanged flip the state.
             update_task(app_state, &task_id, |t| {
                 t.state = UploadState::Failed;
                 t.error_message = Some(error);
@@ -381,6 +394,11 @@ fn handle_upload_event(
                 t.retry_count = attempt;
                 t.error_message = None;
             });
+        }
+        UploadEvent::NetworkQuality(reading) => {
+            // Debounced tier change from the engine's probe — publish it for the
+            // signal-strength chip and the weak-network banner to read.
+            app_state.network_health.set(Some(reading));
         }
     }
 }

@@ -135,9 +135,54 @@ fn near_duplicate_message(near: &NearDuplicateMatch) -> String {
     )
 }
 
+/// Coarse connectivity tier reported by the auto-retry loop's periodic probe,
+/// classified from the round-trip time of a HEAD to `storage.googleapis.com`
+/// (through the same proxy-aware client the uploads use). A "game ping"-style
+/// signal for the UI: the exact millisecond count is advisory, the tier drives
+/// the indicator colour and the weak-network prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkHealth {
+    /// Probe succeeded quickly — storage is comfortably reachable.
+    Good,
+    /// Probe succeeded but slow — uploads will work, just not fast.
+    Ok,
+    /// Probe succeeded very slowly, or is failing intermittently within the
+    /// window — uploads will struggle. This is the "weak network" tier that
+    /// drives the prompts.
+    Weak,
+    /// Probe has failed on consecutive ticks — storage is unreachable.
+    Offline,
+}
+
+impl NetworkHealth {
+    /// Whether this tier is the "weak network" band that drives the prompts —
+    /// [`NetworkHealth::Weak`] or [`NetworkHealth::Offline`]. `Good`/`Ok` are
+    /// healthy. Exposed so the UI banner and chip share one definition.
+    pub fn is_weak(self) -> bool {
+        match self {
+            Self::Good | Self::Ok => false,
+            Self::Weak | Self::Offline => true,
+        }
+    }
+}
+
+/// One connectivity reading emitted to the UI. `rtt_ms` is the probe
+/// round-trip in milliseconds when the probe succeeded, `None` when it failed
+/// (tier is then [`NetworkHealth::Weak`] or [`NetworkHealth::Offline`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkReading {
+    pub health: NetworkHealth,
+    pub rtt_ms: Option<u32>,
+}
+
 /// Events emitted by the upload engine to the UI
 #[derive(Debug, Clone)]
 pub enum UploadEvent {
+    /// A connectivity-tier change observed by the auto-retry loop's periodic
+    /// probe. Emitted only on a tier transition (debounced), so the UI's
+    /// signal-strength chip and weak-network banner update on change rather
+    /// than every 30s tick. See [`NetworkReading`].
+    NetworkQuality(NetworkReading),
     TaskAdded(Box<UploadTask>),
     StateChanged {
         task_id: String,
@@ -272,6 +317,13 @@ pub struct UploadEngine {
     api: Arc<ApiClient>,
     storage: Arc<StorageBackend>,
     event_tx: mpsc::UnboundedSender<UploadEvent>,
+    /// Dedicated client for the auto-retry loop's liveness/health probe, built
+    /// once from `ServerConfig::proxy_url` so the probe follows the same path as
+    /// the uploads (a proxied user's probe tunnels through v2ray too, instead of
+    /// hitting `storage.googleapis.com` directly and reporting a false "online"
+    /// while the direct route to GCS is what's actually wedged). Short connect +
+    /// total timeouts keep the probe snappy; it never carries a request body.
+    probe_client: reqwest::Client,
     /// Whether to delete the original file on disk after a successful upload.
     /// Flipped live from the settings UI; reads are `Relaxed` because each
     /// upload task reads this exactly once, after the upload has already
@@ -347,12 +399,26 @@ impl UploadEngine {
         transcode_config: TranscodeConfig,
         chunk_size_mb: u32,
         max_concurrent: u32,
+        proxy: Option<&str>,
     ) -> Self {
+        // Probe client: proxy-aware (so the health check matches the upload
+        // path) with tight timeouts — a probe should resolve in seconds, and a
+        // dead/wrong proxy must fail fast rather than stall the 30s tick loop.
+        // A bad proxy URL degrades to no-proxy inside `build_http_client`
+        // rather than panicking, so a settings typo can never brick the engine.
+        let probe_client = crate::net::build_http_client(
+            proxy,
+            Some(std::time::Duration::from_secs(5)),
+            std::time::Duration::from_secs(5),
+            None,
+        )
+        .expect("failed to build probe reqwest client");
         Self {
             db,
             api,
             storage,
             event_tx,
+            probe_client,
             auto_clean: AtomicBool::new(auto_clean),
             transcode_config,
             chunk_size: (chunk_size_mb as u64) * 1024 * 1024,
@@ -2211,6 +2277,13 @@ impl UploadEngine {
 
         // Complete
         self.update_state(task, UploadState::Completed).await;
+        // Zero the durable auto-retry count on success so a row that once flirted
+        // with the give-up cap starts fresh if it is somehow re-uploaded later
+        // (e.g. re-added after a manual clear). Best-effort: a failed reset only
+        // means the stale count lingers on an already-completed row.
+        if let Err(e) = self.db.reset_retry_count(&task.id).await {
+            tracing::warn!("Failed to reset retry_count on completion of {}: {e}", task.id);
+        }
         let _ = self.event_tx.send(UploadEvent::Completed {
             task_id: task.id.clone(),
         });
@@ -2553,76 +2626,124 @@ impl UploadEngine {
     /// are free upload slots are launched per tick — so one flaky-network window
     /// no longer re-queues every failed file every 30s (the storm that kept
     /// dozens of files cycling through PENDING all night and starved the slots).
+    ///
+    /// Two responsibilities beyond re-queueing:
+    /// * **Give-up is durable.** The cap and backoff are driven from the
+    ///   *persisted* `task.retry_count` (incremented in the DB before each
+    ///   retry), not the loop-local `retry_state`. That map is kept only for
+    ///   backoff *pacing* (last-attempt instant); losing it (restart) no longer
+    ///   resets the cap, and the old `retain(live)` prune can no longer defeat
+    ///   it — the count lives in SQLite and only [`Self::retry_task`] moves it.
+    /// * **Network health.** Each tick times the (proxy-aware) probe and
+    ///   classifies a [`NetworkReading`]; a [`UploadEvent::NetworkQuality`] is
+    ///   emitted only when the tier changes (debounced), and the latest tier is
+    ///   handed to `retry_task` so a give-up on a weak link gets actionable copy.
     pub fn spawn_auto_retry(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let engine = Arc::clone(self);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-            // Per-task bookkeeping: task_id -> (auto-retries done, last attempt).
-            // Local to this single loop task, so no shared-state synchronization.
-            let mut retry_state: std::collections::HashMap<String, (u32, std::time::Instant)> =
+            // Loop-local backoff pacing: task_id -> last-attempt instant. Cap
+            // and attempt count come from the DB, so this map is pacing-only and
+            // its loss (restart) is harmless.
+            let mut last_attempt: std::collections::HashMap<String, std::time::Instant> =
                 std::collections::HashMap::new();
+            // Loop-local health debounce state (consecutive failures + last tier
+            // emitted). No shared mutable global state — a Copy value threaded
+            // through the tick.
+            let mut probe_state = ProbeState::default();
             loop {
                 interval.tick().await;
-
-                // Check if network is available
-                let online = reqwest::Client::new()
-                    .head("https://storage.googleapis.com")
-                    .timeout(std::time::Duration::from_secs(5))
-                    .send()
-                    .await
-                    .is_ok();
-
-                if !online {
+                let reading = probe_network(&engine.probe_client, &mut probe_state).await;
+                engine.emit_health_on_change(&mut probe_state, reading);
+                if matches!(reading.health, NetworkHealth::Offline) {
+                    // Storage unreachable — don't churn retries into a wall.
                     continue;
                 }
-
-                // Find failed tasks that are retryable (network errors)
-                let failed = match engine.db.get_failed_retryable().await {
-                    Ok(tasks) => tasks,
-                    Err(_) => continue,
-                };
-
-                // Drop bookkeeping for tasks that are no longer failing, so a
-                // file that fails again later starts its backoff fresh.
-                let live: std::collections::HashSet<String> =
-                    failed.iter().map(|t| t.id.clone()).collect();
-                retry_state.retain(|id, _| live.contains(id));
-
-                // Only launch as many retries as there are free upload slots:
-                // a backlog backs off in the queue instead of all flipping to
-                // PENDING and contending for the (default 2) upload permits.
-                let free = engine.upload_semaphore.available_permits();
-                if free == 0 {
-                    continue;
-                }
-                let now = std::time::Instant::now();
-                let to_launch: Vec<UploadTask> = failed
-                    .into_iter()
-                    .filter(|t| auto_retry_due(&retry_state, &t.id, now))
-                    .take(free)
-                    .collect();
-                if to_launch.is_empty() {
-                    continue;
-                }
-
-                tracing::info!(
-                    "Auto-retrying {} failed uploads (backoff-paced, {free} slots free)",
-                    to_launch.len()
-                );
-
-                for task in to_launch {
-                    let attempts_done = retry_state.get(&task.id).map_or(0, |&(c, _)| c);
-                    let attempt = attempts_done + 1;
-                    retry_state.insert(task.id.clone(), (attempt, now));
-                    let eng = Arc::clone(&engine);
-                    let sem = Arc::clone(&engine.upload_semaphore);
-                    tokio::spawn(Self::retry_task(eng, sem, task, attempt));
-                }
+                engine
+                    .run_retry_tick(&mut last_attempt, reading)
+                    .await;
             }
         })
     }
 
-    async fn retry_task(eng: Arc<Self>, sem: Arc<Semaphore>, mut task: UploadTask, attempt: u32) {
+    /// Emit a [`UploadEvent::NetworkQuality`] only when the tier changed since
+    /// the last emit (debounce), then record the new tier. Keeps the UI chip and
+    /// banner reacting to transitions, not to every 30s tick.
+    fn emit_health_on_change(&self, state: &mut ProbeState, reading: NetworkReading) {
+        if state.last_emitted == Some(reading.health) {
+            return;
+        }
+        state.last_emitted = Some(reading.health);
+        let _ = self.event_tx.send(UploadEvent::NetworkQuality(reading));
+    }
+
+    /// One auto-retry pass: load retryable failures, launch as many as there are
+    /// free upload slots (backoff-paced from the persisted count), and record the
+    /// attempt instant for pacing. `reading` is forwarded to each `retry_task` so
+    /// a give-up can compose weak-network copy.
+    async fn run_retry_tick(
+        self: &Arc<Self>,
+        last_attempt: &mut std::collections::HashMap<String, std::time::Instant>,
+        reading: NetworkReading,
+    ) {
+        let failed = match self.db.get_failed_retryable().await {
+            Ok(tasks) => tasks,
+            Err(_) => return,
+        };
+        // Drop pacing entries for tasks no longer failing, so a file that fails
+        // again later starts its backoff fresh.
+        let live: std::collections::HashSet<&str> =
+            failed.iter().map(|t| t.id.as_str()).collect();
+        last_attempt.retain(|id, _| live.contains(id.as_str()));
+
+        // Only launch as many retries as there are free upload slots: a backlog
+        // backs off in the queue instead of all flipping to PENDING and
+        // contending for the (default 2) upload permits.
+        let free = self.upload_semaphore.available_permits();
+        if free == 0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let to_launch: Vec<UploadTask> = failed
+            .into_iter()
+            .filter(|t| auto_retry_due(t.retry_count, last_attempt.get(&t.id).copied(), now))
+            .take(free)
+            .collect();
+        if to_launch.is_empty() {
+            return;
+        }
+        tracing::info!(
+            "Auto-retrying {} failed uploads (backoff-paced, {free} slots free)",
+            to_launch.len()
+        );
+        for task in to_launch {
+            last_attempt.insert(task.id.clone(), now);
+            // Persist the attempt BEFORE spawning: the count is durable (survives
+            // restart) and immune to any in-process bookkeeping loss.
+            if let Err(e) = self.db.increment_retry_count(&task.id).await {
+                tracing::warn!("Failed to persist retry_count for {}: {e}", task.id);
+            }
+            let attempt = task.retry_count + 1;
+            let eng = Arc::clone(self);
+            let sem = Arc::clone(&self.upload_semaphore);
+            tokio::spawn(Self::retry_task(eng, sem, task, attempt, reading));
+        }
+    }
+
+    /// Run one auto-retry attempt for `task`. `attempt` is the 1-based, already
+    /// persisted retry number (`retry_count` after the increment). On failure,
+    /// decide give-up vs. keep-failing from that persisted count: at
+    /// [`AUTO_RETRY_MAX_ATTEMPTS`] the row settles [`UploadState::GaveUp`] with a
+    /// terminal message composed from `reading` (weak-network copy when the link
+    /// is Weak/Offline and the error is transport-transient); otherwise it stays
+    /// [`UploadState::Failed`] for the next tick.
+    async fn retry_task(
+        eng: Arc<Self>,
+        sem: Arc<Semaphore>,
+        mut task: UploadTask,
+        attempt: u32,
+        reading: NetworkReading,
+    ) {
         let _permit = sem.acquire().await.expect("semaphore closed");
         // Surface the retry so the row reads "retrying (attempt N)" instead of a
         // silent PENDING while it waits for / holds one of the upload slots.
@@ -2641,18 +2762,47 @@ impl UploadEngine {
         task.state = UploadState::Pending;
         match eng.process_task(&mut task).await {
             Ok(()) => tracing::info!("Auto-retry succeeded: {}", task.filename),
-            Err(e) => {
-                tracing::warn!("Auto-retry failed for {}: {e}", task.filename);
-                let _ = eng
-                    .db
-                    .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
-                    .await;
-                let _ = eng.event_tx.send(UploadEvent::Failed {
-                    task_id: task.id,
-                    error: e.to_string(),
-                });
-            }
+            Err(e) => eng.settle_retry_failure(&task, attempt, &e, reading).await,
         }
+    }
+
+    /// Persist + announce the terminal state after an auto-retry attempt failed.
+    /// Give up (settle [`UploadState::GaveUp`]) once `attempt` has reached the
+    /// cap; otherwise keep the row [`UploadState::Failed`] so the next tick can
+    /// retry it. The give-up message is composed by [`compose_give_up_message`].
+    async fn settle_retry_failure(
+        &self,
+        task: &UploadTask,
+        attempt: u32,
+        err: &UploadError,
+        reading: NetworkReading,
+    ) {
+        if attempt >= AUTO_RETRY_MAX_ATTEMPTS {
+            let message = compose_give_up_message(attempt, err, reading);
+            tracing::warn!("Giving up auto-retry for {}: {err}", task.filename);
+            let _ = self
+                .db
+                .update_upload_state(&task.id, UploadState::GaveUp, Some(&message))
+                .await;
+            let _ = self.event_tx.send(UploadEvent::Failed {
+                task_id: task.id.clone(),
+                error: message,
+            });
+            let _ = self.event_tx.send(UploadEvent::StateChanged {
+                task_id: task.id.clone(),
+                state: UploadState::GaveUp,
+            });
+            return;
+        }
+        tracing::warn!("Auto-retry failed for {}: {err}", task.filename);
+        let _ = self
+            .db
+            .update_upload_state(&task.id, UploadState::Failed, Some(&err.to_string()))
+            .await;
+        let _ = self.event_tx.send(UploadEvent::Failed {
+            task_id: task.id.clone(),
+            error: err.to_string(),
+        });
     }
 
     /// Returns Ok(Some(path)) if transcoded, Ok(None) if not requested, Err if failed.
@@ -2744,10 +2894,14 @@ const AUTO_RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(30);
 /// Plateau for the auto-retry backoff: a long-dead file is re-checked every
 /// 15 min rather than hammered every 30s or abandoned outright.
 const AUTO_RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(900);
-/// Give up auto-retrying a file after this many attempts; it stays `Failed`
-/// for the user to retry manually. Bounds a permanently-dead file instead of
-/// re-queueing it forever (the shipped `retry_count < 10` guard never fired
-/// because `retry_count` was never incremented).
+/// Give up auto-retrying a file after this many attempts; it moves to the
+/// terminal [`UploadState::GaveUp`] state for the user to retry manually.
+/// Bounds a permanently-dead file instead of re-queueing it forever. The
+/// count is now the *persisted* `retry_count` (incremented in the DB before
+/// each retry — see [`UploadEngine::run_retry_tick`]); the shipped
+/// `retry_count < 10` guard never fired because `retry_count` was never
+/// incremented, and the in-process counter was pruned by the `retain(live)`
+/// call before it could reach the cap.
 pub(crate) const AUTO_RETRY_MAX_ATTEMPTS: u32 = 10;
 
 /// Per-task backoff before a failed upload is auto-retried again, doubling with
@@ -2768,22 +2922,120 @@ fn should_auto_retry(retry_count: u32, since_last_attempt: std::time::Duration) 
     since_last_attempt >= auto_retry_backoff(retry_count)
 }
 
-/// Decide whether `id` is due for an auto-retry this tick, given the loop's
-/// per-task bookkeeping (`attempts_done`, `last_attempt`). A task never seen
-/// before is eligible immediately; a task that has exhausted
-/// [`AUTO_RETRY_MAX_ATTEMPTS`] is left `Failed` for manual retry.
+/// Decide whether a failed task is due for an auto-retry this tick.
+///
+/// `retry_count` is the task's *persisted* auto-retry count (the give-up axis);
+/// `last_attempt` is the loop-local instant of its previous auto-retry, if any
+/// (the pacing axis). A task never attempted this session is due immediately
+/// (subject only to the cap); one already at [`AUTO_RETRY_MAX_ATTEMPTS`] is left
+/// for [`UploadEngine::settle_retry_failure`] to move to `GaveUp`, and is never
+/// relaunched here — but note it is also excluded upstream because a `GaveUp`
+/// row no longer matches `get_failed_retryable`'s `state = 'FAILED'`.
 fn auto_retry_due(
-    state: &std::collections::HashMap<String, (u32, std::time::Instant)>,
-    id: &str,
+    retry_count: u32,
+    last_attempt: Option<std::time::Instant>,
     now: std::time::Instant,
 ) -> bool {
-    match state.get(id) {
-        None => true,
-        Some(&(attempts_done, last)) => {
-            attempts_done < AUTO_RETRY_MAX_ATTEMPTS
-                && should_auto_retry(attempts_done, now.duration_since(last))
-        }
+    if retry_count >= AUTO_RETRY_MAX_ATTEMPTS {
+        return false;
     }
+    match last_attempt {
+        None => true,
+        Some(last) => should_auto_retry(retry_count, now.duration_since(last)),
+    }
+}
+
+/// Loop-local network-probe debounce state for [`UploadEngine::spawn_auto_retry`].
+/// `consecutive_failures` counts probe failures back-to-back (drives `Offline`);
+/// `last_emitted` is the last tier pushed to the UI (drives the debounce so
+/// [`UploadEvent::NetworkQuality`] fires only on a tier change).
+#[derive(Default)]
+struct ProbeState {
+    consecutive_failures: u32,
+    last_emitted: Option<NetworkHealth>,
+}
+
+/// A HEAD to `storage.googleapis.com` succeeding slower than this is classified
+/// [`NetworkHealth::Weak`]; below it (but at/above [`HEALTH_GOOD_MS`]) is `Ok`.
+const HEALTH_WEAK_MS: u128 = 1200;
+/// A probe faster than this is [`NetworkHealth::Good`].
+const HEALTH_GOOD_MS: u128 = 300;
+/// Consecutive failed probes that flip the tier to [`NetworkHealth::Offline`].
+const HEALTH_OFFLINE_STREAK: u32 = 2;
+
+/// Time the (proxy-aware) liveness probe and classify a [`NetworkReading`],
+/// updating `state.consecutive_failures`. A success below [`HEALTH_GOOD_MS`] is
+/// `Good`, up to [`HEALTH_WEAK_MS`] is `Ok`, and slower is `Weak`. A failure is
+/// `Weak` until it has failed [`HEALTH_OFFLINE_STREAK`] times in a row, then
+/// `Offline` — so a single flaky probe reads as "weak", not "offline".
+async fn probe_network(client: &reqwest::Client, state: &mut ProbeState) -> NetworkReading {
+    let started = std::time::Instant::now();
+    let ok = client
+        .head("https://storage.googleapis.com")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .is_ok();
+    if !ok {
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        let health = if state.consecutive_failures >= HEALTH_OFFLINE_STREAK {
+            NetworkHealth::Offline
+        } else {
+            NetworkHealth::Weak
+        };
+        return NetworkReading {
+            health,
+            rtt_ms: None,
+        };
+    }
+    state.consecutive_failures = 0;
+    let rtt = started.elapsed().as_millis();
+    let health = classify_rtt(rtt);
+    NetworkReading {
+        health,
+        rtt_ms: Some(rtt.min(u32::MAX as u128) as u32),
+    }
+}
+
+/// Map a successful-probe round-trip (ms) to a health tier. Failure tiers
+/// (`Offline`) are decided by the failure streak in [`probe_network`], not here.
+fn classify_rtt(rtt_ms: u128) -> NetworkHealth {
+    if rtt_ms < HEALTH_GOOD_MS {
+        NetworkHealth::Good
+    } else if rtt_ms < HEALTH_WEAK_MS {
+        NetworkHealth::Ok
+    } else {
+        NetworkHealth::Weak
+    }
+}
+
+/// Compose the terminal message for a give-up. On a weak/offline link AND a
+/// transport-transient error (the same markers `get_failed_retryable` allow-lists
+/// — Network / timeout / no healthy upstream / Interrupted / error sending
+/// request), give actionable network copy; otherwise a generic "stopped after N
+/// tries" line. Chinese, because the give-up surfaces directly to CN/HK users.
+fn compose_give_up_message(attempt: u32, err: &UploadError, reading: NetworkReading) -> String {
+    let weak = matches!(reading.health, NetworkHealth::Weak | NetworkHealth::Offline);
+    if weak && is_transport_transient(err) {
+        return "网络太弱,多次重试后仍无法连接存储 —— 请更换网络或在设置里配置代理。".to_string();
+    }
+    format!("已停止自动重试(已尝试 {attempt} 次),请手动重试。")
+}
+
+/// Whether an error message carries one of the transient/transport markers the
+/// auto-retry allow-list keys on (mirrors the `error_message LIKE` clauses in
+/// [`crate::db::Database::get_failed_retryable`]). Used only to decide whether a
+/// give-up shows network-specific copy — the retry gate itself is the DB query.
+fn is_transport_transient(err: &UploadError) -> bool {
+    let msg = err.to_string();
+    const MARKERS: [&str; 5] = [
+        "Network",
+        "timeout",
+        "no healthy upstream",
+        "Interrupted",
+        "error sending request",
+    ];
+    MARKERS.iter().any(|m| msg.contains(m))
 }
 
 #[cfg(test)]
@@ -2878,5 +3130,70 @@ mod collect_videos_tests {
         // A fresh failure (retry_count=0) is eligible after the first 30s tick.
         assert!(!super::should_auto_retry(0, Duration::from_secs(10)));
         assert!(super::should_auto_retry(0, Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn auto_retry_due_respects_cap_and_pacing() {
+        use super::{AUTO_RETRY_MAX_ATTEMPTS, auto_retry_due};
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        // Never attempted this session: due immediately (below the cap).
+        assert!(auto_retry_due(0, None, now));
+        // At the cap: never due (would move to GaveUp instead) — this is the
+        // give-up axis the persisted retry_count now drives.
+        assert!(!auto_retry_due(AUTO_RETRY_MAX_ATTEMPTS, None, now));
+        assert!(!auto_retry_due(AUTO_RETRY_MAX_ATTEMPTS, Some(now - Duration::from_secs(3600)), now));
+        // Below the cap but too soon since the last attempt: not yet due
+        // (retry_count=1 needs 60s of backoff).
+        assert!(!auto_retry_due(1, Some(now - Duration::from_secs(30)), now));
+        assert!(auto_retry_due(1, Some(now - Duration::from_secs(60)), now));
+    }
+
+    #[test]
+    fn classify_rtt_maps_bands() {
+        use super::{NetworkHealth, classify_rtt};
+        assert_eq!(classify_rtt(50), NetworkHealth::Good);
+        assert_eq!(classify_rtt(299), NetworkHealth::Good);
+        assert_eq!(classify_rtt(300), NetworkHealth::Ok);
+        assert_eq!(classify_rtt(1199), NetworkHealth::Ok);
+        assert_eq!(classify_rtt(1200), NetworkHealth::Weak);
+        assert_eq!(classify_rtt(5000), NetworkHealth::Weak);
+    }
+
+    #[test]
+    fn give_up_message_is_actionable_on_weak_transport_failure() {
+        use super::{NetworkHealth, NetworkReading, compose_give_up_message};
+        use crate::error::UploadError;
+        let weak = NetworkReading {
+            health: NetworkHealth::Weak,
+            rtt_ms: Some(3000),
+        };
+        let good = NetworkReading {
+            health: NetworkHealth::Good,
+            rtt_ms: Some(50),
+        };
+        let transient = UploadError::Api {
+            status: 503,
+            message: "error sending request".to_string(),
+        };
+        let permanent = UploadError::FileTooLarge {
+            size: 1,
+            max: 0,
+        };
+        // Weak link + transport-transient error → network-specific copy.
+        assert!(
+            compose_give_up_message(10, &transient, weak)
+                .contains("网络太弱")
+        );
+        // Healthy link (even with a transient error) → generic copy with count.
+        assert!(
+            compose_give_up_message(10, &transient, good)
+                .contains("已尝试 10 次")
+        );
+        // Weak link but a permanent error → generic copy, not network copy.
+        assert!(
+            compose_give_up_message(10, &permanent, weak)
+                .contains("已尝试 10 次")
+        );
     }
 }

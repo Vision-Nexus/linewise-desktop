@@ -52,9 +52,13 @@ pub fn FailedList(
         .filter(|t| t.state == UploadState::Rejected)
         .cloned()
         .collect();
+    // Network sub-tab holds both retryable `Failed` rows and terminal `GaveUp`
+    // rows (auto-retry exhausted). Both render through `UploadTaskRow`, which
+    // offers a working manual `[Retry]` — retrying a GaveUp row resets its
+    // durable retry_count and re-enters the normal flow.
     let network: Vec<_> = tasks
         .iter()
-        .filter(|t| t.state == UploadState::Failed)
+        .filter(|t| matches!(t.state, UploadState::Failed | UploadState::GaveUp))
         .cloned()
         .collect();
 

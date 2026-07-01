@@ -248,6 +248,33 @@ impl Database {
         Ok(())
     }
 
+    /// Bump the durable auto-retry count for a task by one. Called by
+    /// `spawn_auto_retry` immediately BEFORE launching a retry so the count
+    /// survives an app restart and can't be defeated by in-process bookkeeping
+    /// loss — it is the give-up axis (see `AUTO_RETRY_MAX_ATTEMPTS`).
+    pub async fn increment_retry_count(&self, id: &str) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE upload_queue SET retry_count = retry_count + 1, updated_at = datetime('now') WHERE id = ?",
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Zero the durable auto-retry count. Called on a successful upload and on a
+    /// user-triggered manual retry, so a row starts its give-up budget fresh
+    /// rather than inheriting a count that already reached the cap.
+    pub async fn reset_retry_count(&self, id: &str) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE upload_queue SET retry_count = 0, updated_at = datetime('now') WHERE id = ?",
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn update_upload_progress(
         &self,
         id: &str,

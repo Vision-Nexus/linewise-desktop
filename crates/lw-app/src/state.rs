@@ -112,6 +112,7 @@ impl CoreServices {
             config.transcode.clone(),
             config.upload.chunk_size_mb,
             config.upload.max_concurrent_uploads,
+            proxy_url.as_deref(),
         ));
 
         // Spawn background auto-retry for failed uploads on network
@@ -159,6 +160,18 @@ pub struct AppState {
     /// shown yet). Updated at chunk granularity — one sample per landed chunk —
     /// and cleared when a task reaches a terminal state.
     pub upload_speed: Signal<HashMap<String, f64>>,
+    /// Latest connectivity reading from the auto-retry loop's periodic probe,
+    /// written by the resident `UploadRuntime` on each `UploadEvent::NetworkQuality`
+    /// (which fires only on a tier change). `None` until the first probe lands —
+    /// the signal-strength chip renders nothing until then. Drives both the chip
+    /// and the weak-network banner.
+    pub network_health: Signal<Option<lw_core::upload::NetworkReading>>,
+    /// Wall-clock instant of the last `Progress` event per task, written by the
+    /// resident `UploadRuntime`. Read by the upload rows to show a "connection
+    /// stalled" hint when an Uploading task's speed is 0/absent and its last
+    /// progress is older than a threshold. Kept out of `upload_tasks` so a
+    /// progress tick doesn't churn the whole list; cleared on terminal states.
+    pub last_progress_at: Signal<HashMap<String, std::time::Instant>>,
     pub projects: Signal<Vec<Project>>,
     pub tenant_projects: Signal<HashMap<String, Vec<Project>>>,
     pub is_loading: Signal<bool>,
@@ -263,6 +276,8 @@ impl AppState {
             hash_progress: Signal::new(HashMap::new()),
             embed_progress: Signal::new(HashMap::new()),
             upload_speed: Signal::new(HashMap::new()),
+            network_health: Signal::new(None),
+            last_progress_at: Signal::new(HashMap::new()),
             projects: Signal::new(Vec::new()),
             tenant_projects: Signal::new(HashMap::new()),
             is_loading: Signal::new(false),
