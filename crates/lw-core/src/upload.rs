@@ -3136,21 +3136,34 @@ mod collect_videos_tests {
     fn auto_retry_due_respects_cap_and_pacing() {
         use super::{AUTO_RETRY_MAX_ATTEMPTS, auto_retry_due};
         use std::time::{Duration, Instant};
-        let now = Instant::now();
+        // Advance the `now` argument forward from a fixed base rather than
+        // subtracting from `Instant::now()`: `Instant - Duration` panics with
+        // "overflow when subtracting duration from instant" on a platform whose
+        // monotonic clock starts near boot (e.g. a freshly-booted Windows CI
+        // runner). Adding to an Instant is always safe here.
+        let base = Instant::now();
         // Never attempted this session: due immediately (below the cap).
-        assert!(auto_retry_due(0, None, now));
+        assert!(auto_retry_due(0, None, base));
         // At the cap: never due (would move to GaveUp instead) — this is the
         // give-up axis the persisted retry_count now drives.
-        assert!(!auto_retry_due(AUTO_RETRY_MAX_ATTEMPTS, None, now));
+        assert!(!auto_retry_due(AUTO_RETRY_MAX_ATTEMPTS, None, base));
         assert!(!auto_retry_due(
             AUTO_RETRY_MAX_ATTEMPTS,
-            Some(now - Duration::from_secs(3600)),
-            now
+            Some(base),
+            base + Duration::from_secs(3600)
         ));
         // Below the cap but too soon since the last attempt: not yet due
         // (retry_count=1 needs 60s of backoff).
-        assert!(!auto_retry_due(1, Some(now - Duration::from_secs(30)), now));
-        assert!(auto_retry_due(1, Some(now - Duration::from_secs(60)), now));
+        assert!(!auto_retry_due(
+            1,
+            Some(base),
+            base + Duration::from_secs(30)
+        ));
+        assert!(auto_retry_due(
+            1,
+            Some(base),
+            base + Duration::from_secs(60)
+        ));
     }
 
     #[test]
