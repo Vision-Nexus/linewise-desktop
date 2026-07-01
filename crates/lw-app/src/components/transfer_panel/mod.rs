@@ -31,6 +31,7 @@
 mod completed;
 mod failed;
 mod in_progress;
+mod network_chip;
 mod rows;
 mod tabs;
 
@@ -50,6 +51,7 @@ use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use failed::FailedList;
 use in_progress::InProgressList;
+use network_chip::NetworkChip;
 use lw_core::error::UploadError;
 use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload;
@@ -705,7 +707,12 @@ pub fn TransferPanel() -> Element {
             // offers files-or-folder) + the held-transcode "Upload N" button.
             div {
                 style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;",
-                h2 { style: "margin: 0; font-size: 16px;", "Transfers" }
+                div {
+                    style: "display: flex; align-items: center; gap: 10px;",
+                    h2 { style: "margin: 0; font-size: 16px;", "Transfers" }
+                    // Signal-strength chip — renders nothing until the first probe.
+                    NetworkChip {}
+                }
                 div {
                     style: "display: flex; gap: 8px; align-items: center;",
                     if can_upload {

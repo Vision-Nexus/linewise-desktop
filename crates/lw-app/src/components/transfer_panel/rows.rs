@@ -17,6 +17,13 @@ use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
 use std::collections::HashMap;
 
+/// How long an Uploading row can sit with no forward progress and no known rate
+/// before it shows the "connection stalled" hint. 15s comfortably exceeds the
+/// gap between chunk-granularity `Progress` events on a healthy link, so it
+/// fires only on a genuine transport stall (the weak-network wedge), not between
+/// normal chunks.
+const STALL_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Compact one-line summary of the capture metadata set for a clip, for the
 /// inline "✓ set" row. Only present fields appear, joined by " · ".
 fn capture_summary(m: &lw_core::capture::CaptureMetadata) -> String {
@@ -680,6 +687,19 @@ pub fn UploadTaskRow(
         format_size(task.size)
     };
 
+    // Stall hint: an Uploading row whose rate is 0/unknown AND whose last
+    // Progress event is older than the threshold is wedged on a chunk (the
+    // weak-network case where PUTs hang at the transport layer). No UI ticker —
+    // this recomputes on the next Progress/StateChanged re-render, which is
+    // exactly when the condition can flip.
+    let stalled = task.state == UploadState::Uploading
+        && upload_speed.read().get(&task.id).copied().unwrap_or(0.0) <= 0.0
+        && app_state
+            .last_progress_at
+            .read()
+            .get(&task.id)
+            .is_some_and(|t| t.elapsed() > STALL_THRESHOLD);
+
     rsx! {
         div {
             class: "card-row",
@@ -828,6 +848,13 @@ pub fn UploadTaskRow(
                             }
                         }
                     }
+                }
+            }
+
+            if stalled {
+                div {
+                    style: "font-size: 12px; color: var(--warning); margin-top: 4px; padding: 6px 8px; background: var(--warning-bg); border-radius: 4px;",
+                    "连接停滞,正在重试…"
                 }
             }
 
