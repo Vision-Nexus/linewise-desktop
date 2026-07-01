@@ -82,6 +82,17 @@ pub struct PartUrl {
 /// Progress callback signature
 pub type ProgressFn = Box<dyn Fn(u64, u64) + Send + Sync>;
 
+/// Per-attempt retry callback signature. Invoked by the shared retry loop
+/// ([`retry_io`]) once per failed-and-retryable attempt, right before the
+/// backoff wait, with the 1-based failed-attempt count. The MPU driver builds
+/// one of these to surface each part retry to the UI as
+/// [`crate::upload::UploadEvent::PartRetrying`], so a wedged big-file part shows
+/// a "connection stalled" hint that is driven by real retry state rather than a
+/// byte-progress timeout (a healthy 64 MiB part legitimately reports no progress
+/// for tens of seconds). Wrapped in an [`Arc`] by `upload_file_mpu` so the same
+/// callback can be shared across the parallel per-part tasks.
+pub type RetryFn = Box<dyn Fn(u32) + Send + Sync>;
+
 /// Cloud storage backend — enum dispatch, no dyn trait needed
 pub enum StorageBackend {
     Gcs(GcsBackend),
@@ -270,11 +281,15 @@ impl RetryBudget {
 /// then surface the last error. A terminal (non-retryable) error returns
 /// immediately. `sleep` is the inter-attempt wait — production passes
 /// [`wait_for_network`]; tests pass a no-op so they neither wait nor hit the
-/// network. `label` names the operation in the retry warning. Shared by the
-/// resumable-chunk and multipart-part paths so both honour the same budget.
+/// network. `label` names the operation in the retry warning. `on_retry`, when
+/// present, is invoked once per failed-and-retryable attempt (with the 1-based
+/// attempt count) immediately before the backoff wait, so the driver can surface
+/// each retry to the UI. Shared by the resumable-chunk and multipart-part paths
+/// so both honour the same budget.
 async fn retry_io<T, F, Fut, S, SFut>(
     budget: RetryBudget,
     label: &str,
+    on_retry: Option<&RetryFn>,
     mut op: F,
     sleep: S,
 ) -> Result<T, UploadError>
@@ -296,6 +311,9 @@ where
                     "{label} failed (attempt {attempt}/{}), retrying in {delay}ms: {e}",
                     budget.max_attempts
                 );
+                if let Some(on_retry) = on_retry {
+                    on_retry(attempt);
+                }
                 sleep(delay).await;
             }
             Err(e) => return Err(e),
@@ -332,9 +350,12 @@ async fn upload_chunk_with_retry(
     // `wait_for_network` polls connectivity before each backoff sleep, through
     // the backend's own (proxy-aware) client so the probe path matches the PUTs.
     let probe = backend.client();
+    // The resumable-chunk path does not surface per-attempt retries to the UI
+    // (MPU is the priority for the stall hint), so it passes no `on_retry`.
     retry_io(
         budget,
         "Chunk upload",
+        None,
         || backend.upload_chunk(session, data, offset),
         |ms| wait_for_network(probe, ms),
     )
@@ -549,8 +570,13 @@ impl GcsBackend {
     ///
     /// `on_progress(confirmed, total)` fires once per part as it lands, summing
     /// confirmed bytes across parts so the existing speed/ETA UI keeps working.
-    /// The first error aborts the remaining in-flight tasks and propagates; the
-    /// caller is responsible for the best-effort `abort_multipart_upload`.
+    /// `on_retry`, when present, fires once per failed-and-retryable part attempt
+    /// (with the 1-based attempt count) so the driver can surface a "connection
+    /// stalled — retrying" hint from real retry state. It is shared across the
+    /// parallel per-part tasks via an [`Arc`]. The first error aborts the
+    /// remaining in-flight tasks and propagates; the caller is responsible for
+    /// the best-effort `abort_multipart_upload`.
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip_all, fields(
         filename = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
         total_size,
@@ -565,6 +591,7 @@ impl GcsBackend {
         total_size: u64,
         max_retries: u32,
         on_progress: &ProgressFn,
+        on_retry: Option<&Arc<RetryFn>>,
     ) -> Result<Vec<(u32, String)>, UploadError> {
         // The part layout (per-part offsets/lengths) was computed from
         // `total_size`. If the file is no longer that size, it was mutated after
@@ -589,6 +616,9 @@ impl GcsBackend {
             let client = self.client.clone();
             let path = path.clone();
             let part = part.clone();
+            // Each parallel part task gets its own clone of the shared retry
+            // callback (an `Arc`, so cheap); `RetryFn` itself is not `Clone`.
+            let on_retry = on_retry.map(Arc::clone);
             let offset = (part.part_number.saturating_sub(1)) as u64 * part_size;
             // Last part is the remainder; clamp so we never read past EOF.
             let len = part_size.min(total_size.saturating_sub(offset));
@@ -601,8 +631,16 @@ impl GcsBackend {
                         reason: "concurrency semaphore closed".to_string(),
                     }
                 })?;
-                let etag =
-                    put_part_with_retry(&client, &path, &part, offset, len, max_retries).await?;
+                let etag = put_part_with_retry(
+                    &client,
+                    &path,
+                    &part,
+                    offset,
+                    len,
+                    max_retries,
+                    on_retry.as_deref(),
+                )
+                .await?;
                 Ok(PartOutcome {
                     part_number: part.part_number,
                     etag,
@@ -645,7 +683,10 @@ struct PartOutcome {
 }
 
 /// PUT a single multipart part with the shared capped-backoff retry policy.
-/// Returns the verbatim `ETag` response header on success.
+/// Returns the verbatim `ETag` response header on success. `on_retry`, when
+/// present, is invoked once per failed-and-retryable attempt (with the 1-based
+/// attempt count) so the driver can surface a per-part "connection stalled"
+/// hint from real retry state.
 async fn put_part_with_retry(
     client: &reqwest::Client,
     file_path: &Path,
@@ -653,6 +694,7 @@ async fn put_part_with_retry(
     offset: u64,
     len: u64,
     max_retries: u32,
+    on_retry: Option<&RetryFn>,
 ) -> Result<String, UploadError> {
     let budget = RetryBudget {
         max_attempts: max_retries,
@@ -663,6 +705,7 @@ async fn put_part_with_retry(
     retry_io(
         budget,
         &label,
+        on_retry,
         || put_part_once(client, file_path, part, offset, len),
         |ms| wait_for_network(client, ms),
     )
@@ -1034,6 +1077,7 @@ mod tests {
         let result: Result<u64, UploadError> = retry_io(
             budget,
             "test",
+            None,
             || {
                 calls.set(calls.get() + 1);
                 async { Err(transient()) }
@@ -1056,6 +1100,7 @@ mod tests {
         let result: Result<u64, UploadError> = retry_io(
             budget,
             "test",
+            None,
             || {
                 let n = calls.get() + 1;
                 calls.set(n);
@@ -1082,6 +1127,7 @@ mod tests {
         let result: Result<u64, UploadError> = retry_io(
             budget,
             "test",
+            None,
             || {
                 calls.set(calls.get() + 1);
                 async {

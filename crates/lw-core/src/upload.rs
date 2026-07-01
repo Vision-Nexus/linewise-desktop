@@ -164,6 +164,21 @@ impl NetworkHealth {
             Self::Weak | Self::Offline => true,
         }
     }
+
+    /// This tier floored at [`NetworkHealth::Weak`]: `Good`/`Ok` degrade to
+    /// `Weak`, while the already-worse `Weak`/`Offline` pass through unchanged.
+    ///
+    /// The transfer-panel chip uses this so a green PROBE reading cannot show a
+    /// healthy tier while actual part PUTs are failing and retrying — a case
+    /// proven live (a lightweight HEAD probe to storage reads Good while 64 MiB
+    /// part PUTs fail through a flaky proxy). The chip takes the worse of the
+    /// probe tier and this floor whenever any part is retrying.
+    pub fn at_least_weak(self) -> Self {
+        match self {
+            Self::Good | Self::Ok | Self::Weak => Self::Weak,
+            Self::Offline => Self::Offline,
+        }
+    }
 }
 
 /// One connectivity reading emitted to the UI. `rtt_ms` is the probe
@@ -263,6 +278,24 @@ pub enum UploadEvent {
     /// re-queued file reads as "retrying (attempt N)" instead of a silent
     /// PENDING/UPLOADING row.
     Retrying {
+        task_id: String,
+        attempt: u32,
+    },
+    /// An in-flight multipart part PUT failed a transport attempt and is backing
+    /// off before the next try — emitted from the storage retry loop
+    /// (`put_part_with_retry` → `retry_io`) via the driver's on-retry callback.
+    /// `attempt` is the 1-based failed-attempt count for that part.
+    ///
+    /// This is the event-driven signal that replaces the old byte-progress
+    /// timeout for the per-row "connection stalled" hint: a HEALTHY big-file
+    /// upload can legitimately show no `Progress` for tens of seconds (the
+    /// backend hands big files 64 MiB parts and MPU progress only fires per
+    /// completed part), so silence is not a stall — an actual failing part
+    /// retry is. The UI marks the row stalled on this event and clears it on the
+    /// next `Progress` (a part landed) or any terminal/non-`Uploading`
+    /// transition. Distinct from [`UploadEvent::Retrying`], which is the
+    /// whole-task auto-retry after a give-up, not a within-attempt part retry.
+    PartRetrying {
         task_id: String,
         attempt: u32,
     },
@@ -2374,6 +2407,7 @@ impl UploadEngine {
                 total_bytes: total,
             });
         });
+        let on_retry = self.mpu_retry_notifier(&task.id);
 
         let max_retries = storage::DEFAULT_MAX_RETRIES;
         tracing::info!(
@@ -2400,6 +2434,7 @@ impl UploadEngine {
             &[],
             max_retries,
             &on_progress,
+            Some(&on_retry),
         )
         .await?;
 
@@ -2487,6 +2522,7 @@ impl UploadEngine {
                 total_bytes: total,
             });
         });
+        let on_retry = self.mpu_retry_notifier(&task.id);
 
         let max_retries = storage::DEFAULT_MAX_RETRIES;
         tracing::info!(
@@ -2511,6 +2547,7 @@ impl UploadEngine {
             &completed,
             max_retries,
             &on_progress,
+            Some(&on_retry),
         )
         .await?;
 
@@ -2519,6 +2556,25 @@ impl UploadEngine {
 
         self.finalize_after_upload(task, hash, transcoded_path)
             .await
+    }
+
+    /// Build the per-part on-retry callback for a multipart upload of `task_id`.
+    ///
+    /// Each failed-and-retryable part attempt fires
+    /// [`UploadEvent::PartRetrying`] with the attempt count, which the UI turns
+    /// into an event-driven "connection stalled — retrying" hint on the row —
+    /// no byte-progress timeout. Returned as an [`Arc`] so the same callback is
+    /// shared across the parallel per-part tasks (see `storage::RetryFn`). Built
+    /// identically for the fresh and resume MPU paths.
+    fn mpu_retry_notifier(&self, task_id: &str) -> Arc<storage::RetryFn> {
+        let event_tx = self.event_tx.clone();
+        let task_id = task_id.to_string();
+        Arc::new(Box::new(move |attempt: u32| {
+            let _ = event_tx.send(UploadEvent::PartRetrying {
+                task_id: task_id.clone(),
+                attempt,
+            });
+        }) as storage::RetryFn)
     }
 
     /// Inner helper: upload `parts` in parallel and complete the MPU. Shared by
@@ -2542,6 +2598,7 @@ impl UploadEngine {
         already_completed: &[(u32, String)],
         max_retries: u32,
         on_progress: &storage::ProgressFn,
+        on_retry: Option<&Arc<storage::RetryFn>>,
     ) -> Result<(), UploadError> {
         let StorageBackend::Gcs(gcs) = self.storage.as_ref() else {
             // MPU is GCS-only; the S3 path never reaches here (it has no
@@ -2560,6 +2617,7 @@ impl UploadEngine {
                 upload_size,
                 max_retries,
                 on_progress,
+                on_retry,
             )
             .await?;
 
