@@ -27,6 +27,11 @@ pub fn WeakNetworkBanner() -> Element {
     // link recovers, so a later episode can prompt again.
     let mut show = use_signal(|| false);
     let mut dismissed = use_signal(|| false);
+    // Monotonic episode counter, bumped on every weak↔healthy edge. A grace
+    // timer captures the epoch when armed and no-ops if a later edge has since
+    // bumped it — so a stale timer from a prior weak episode can't reveal the
+    // banner early during a later one (weak→ok→weak flapping).
+    let mut epoch = use_signal(|| 0u64);
 
     // Current weak-band membership, derived from the latest reading. `None`
     // (no probe yet) counts as not-weak. `NetworkReading` is `Copy`, so read a
@@ -35,10 +40,13 @@ pub fn WeakNetworkBanner() -> Element {
         .map(|r| r.health.is_weak())
         .unwrap_or(false);
 
-    // Arm/disarm on the weak↔healthy edge. Entering weak spawns a single grace
-    // timer that reveals the banner iff still weak on expiry; recovering hides
-    // it and clears the dismiss.
+    // Arm/disarm on the weak↔healthy edge. Every edge bumps `epoch`, retiring
+    // any prior grace timer. Entering weak spawns a single grace timer that
+    // reveals the banner iff still weak AND its epoch is still current on
+    // expiry; recovering hides it and clears the dismiss.
     use_effect(use_reactive!(|weak| {
+        let my_epoch = epoch() + 1;
+        epoch.set(my_epoch);
         if !weak {
             show.set(false);
             dismissed.set(false);
@@ -46,6 +54,9 @@ pub fn WeakNetworkBanner() -> Element {
         }
         spawn(async move {
             tokio::time::sleep(WEAK_GRACE).await;
+            if epoch() != my_epoch {
+                return;
+            }
             let still_weak = (*app_state.network_health.read())
                 .map(|r| r.health.is_weak())
                 .unwrap_or(false);

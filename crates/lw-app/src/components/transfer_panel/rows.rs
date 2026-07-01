@@ -858,7 +858,10 @@ pub fn UploadTaskRow(
                 }
             }
 
-            if task.retry_count > 0 {
+            // Only while the row is still being auto-retried — a terminal
+            // `GaveUp` row keeps `retry_count` at the cap but must show its
+            // give-up message, not a contradictory "Retrying…" line.
+            if task.retry_count > 0 && task.state != UploadState::GaveUp {
                 div {
                     style: "font-size: 12px; color: var(--warning); margin-top: 4px; padding: 6px 8px; background: var(--warning-bg); border-radius: 4px;",
                     "Retrying after a network error (attempt {task.retry_count})…"
