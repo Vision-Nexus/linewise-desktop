@@ -31,6 +31,7 @@
 mod completed;
 mod failed;
 mod in_progress;
+mod network_chip;
 mod rows;
 mod tabs;
 
@@ -55,6 +56,7 @@ use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload;
 use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
+use network_chip::NetworkChip;
 use std::path::{Path, PathBuf};
 use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
 
@@ -429,6 +431,13 @@ pub fn TransferPanel() -> Element {
         let engine = engine_for_retry.clone();
         let db = db_for_retry.clone();
         spawn(async move {
+            // Manual retry: zero the durable auto-retry count so a row that hit
+            // the give-up cap (`GaveUp`) or accumulated retries starts its budget
+            // fresh and re-enters the normal auto-retry flow instead of giving up
+            // again on the first failure.
+            if let Err(e) = db.reset_retry_count(&task_id).await {
+                tracing::warn!("Failed to reset retry_count on manual retry of {task_id}: {e}");
+            }
             let _ = db
                 .update_upload_state(&task_id, UploadState::Pending, None)
                 .await;
@@ -436,6 +445,7 @@ pub fn TransferPanel() -> Element {
             if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
                 task.state = UploadState::Pending;
                 task.error_message = None;
+                task.retry_count = 0;
                 let mut task = task.clone();
                 drop(tasks);
                 let eng = engine.clone();
@@ -458,7 +468,7 @@ pub fn TransferPanel() -> Element {
                 .upload_tasks
                 .read()
                 .iter()
-                .filter(|t| t.state == UploadState::Failed)
+                .filter(|t| matches!(t.state, UploadState::Failed | UploadState::GaveUp))
                 .map(|t| t.id.clone())
                 .collect();
             for id in failed_ids {
@@ -697,7 +707,12 @@ pub fn TransferPanel() -> Element {
             // offers files-or-folder) + the held-transcode "Upload N" button.
             div {
                 style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;",
-                h2 { style: "margin: 0; font-size: 16px;", "Transfers" }
+                div {
+                    style: "display: flex; align-items: center; gap: 10px;",
+                    h2 { style: "margin: 0; font-size: 16px;", "Transfers" }
+                    // Signal-strength chip — renders nothing until the first probe.
+                    NetworkChip {}
+                }
                 div {
                     style: "display: flex; gap: 8px; align-items: center;",
                     if can_upload {

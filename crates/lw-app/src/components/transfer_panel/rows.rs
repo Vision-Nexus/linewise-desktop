@@ -659,7 +659,7 @@ pub fn UploadTaskRow(
 
     let (status_color, status_bg) = match task.state {
         UploadState::Completed => ("var(--success)", "var(--success-bg)"),
-        UploadState::Failed => ("var(--error)", "var(--error-bg)"),
+        UploadState::Failed | UploadState::GaveUp => ("var(--error)", "var(--error-bg)"),
         UploadState::Uploading => ("var(--info)", "var(--info-bg)"),
         UploadState::Paused => ("var(--warning)", "var(--warning-bg)"),
         _ => ("var(--text-muted)", "var(--bg-secondary)"),
@@ -678,6 +678,22 @@ pub fn UploadTaskRow(
         }
     } else {
         format_size(task.size)
+    };
+
+    // Stall hint: driven by REAL multipart part-retry state, not a byte-progress
+    // timeout. The engine emits `PartRetrying` from the part PUT retry loop and
+    // the runtime records the latest attempt in `part_retrying`; presence means a
+    // part is currently failing and backing off. A landed part (`Progress`) or
+    // any transition out of `Uploading` clears the entry. This avoids the false
+    // "stalled" the old `last_progress_at + STALL_THRESHOLD` heuristic produced
+    // on healthy big-file uploads — the backend hands big files 64 MiB parts and
+    // MPU progress only fires per completed part, so no progress for tens of
+    // seconds is normal, not a stall. No UI ticker — this recomputes on the next
+    // PartRetrying/Progress/StateChanged re-render, exactly when it can flip.
+    let stalled = if task.state == UploadState::Uploading {
+        app_state.part_retrying.read().get(&task.id).copied()
+    } else {
+        None
     };
 
     rsx! {
@@ -737,7 +753,10 @@ pub fn UploadTaskRow(
                                     "Remove"
                                 }
                             },
-                            UploadState::Failed => rsx! {
+                            // Failed and GaveUp both offer manual Retry + Remove.
+                            // Retrying a GaveUp row resets its durable retry_count
+                            // and re-enters the normal flow (see `on_retry`).
+                            UploadState::Failed | UploadState::GaveUp => rsx! {
                                 button {
                                     class: "btn-primary",
                                     style: "{small_btn} background: var(--btn-primary); color: white; border: none;",
@@ -828,7 +847,17 @@ pub fn UploadTaskRow(
                 }
             }
 
-            if task.retry_count > 0 {
+            if let Some(attempt) = stalled {
+                div {
+                    style: "font-size: 12px; color: var(--warning); margin-top: 4px; padding: 6px 8px; background: var(--warning-bg); border-radius: 4px;",
+                    "Connection stalled — retrying (attempt {attempt})…"
+                }
+            }
+
+            // Only while the row is still being auto-retried — a terminal
+            // `GaveUp` row keeps `retry_count` at the cap but must show its
+            // give-up message, not a contradictory "Retrying…" line.
+            if task.retry_count > 0 && task.state != UploadState::GaveUp {
                 div {
                     style: "font-size: 12px; color: var(--warning); margin-top: 4px; padding: 6px 8px; background: var(--warning-bg); border-radius: 4px;",
                     "Retrying after a network error (attempt {task.retry_count})…"
@@ -879,7 +908,8 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
         | UploadState::Staged
         | UploadState::Rejected
         | UploadState::Completed
-        | UploadState::Failed => String::new(),
+        | UploadState::Failed
+        | UploadState::GaveUp => String::new(),
     }
 }
 

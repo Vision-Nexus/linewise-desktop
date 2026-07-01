@@ -96,7 +96,10 @@ impl CoreServices {
         // Select storage backend based on config
         // TODO: Add S3 backend selection when China deployment is configured
         let storage = Arc::new(lw_core::storage::StorageBackend::Gcs(
-            lw_core::storage::GcsBackend::new(proxy_url.as_deref()),
+            lw_core::storage::GcsBackend::new(
+                proxy_url.as_deref(),
+                config.upload.mpu_part_concurrency as usize,
+            ),
         ));
 
         // Video quality rules now live on the server. The desktop ships
@@ -112,6 +115,7 @@ impl CoreServices {
             config.transcode.clone(),
             config.upload.chunk_size_mb,
             config.upload.max_concurrent_uploads,
+            proxy_url.as_deref(),
         ));
 
         // Spawn background auto-retry for failed uploads on network
@@ -159,6 +163,23 @@ pub struct AppState {
     /// shown yet). Updated at chunk granularity — one sample per landed chunk —
     /// and cleared when a task reaches a terminal state.
     pub upload_speed: Signal<HashMap<String, f64>>,
+    /// Latest connectivity reading from the auto-retry loop's periodic probe,
+    /// written by the resident `UploadRuntime` on each `UploadEvent::NetworkQuality`
+    /// (which fires only on a tier change). `None` until the first probe lands —
+    /// the signal-strength chip renders nothing until then. Drives both the chip
+    /// and the weak-network banner.
+    pub network_health: Signal<Option<lw_core::upload::NetworkReading>>,
+    /// Per-task latest multipart part-retry attempt (`task_id → attempt`),
+    /// written by the resident `UploadRuntime` from `UploadEvent::PartRetrying`.
+    /// Presence means a part PUT is currently failing and backing off — the row
+    /// shows an event-driven "connection stalled — retrying (attempt N)" hint,
+    /// and the network chip degrades to at least `Weak`. The entry is removed on
+    /// the next `Progress` (a part landed) and on any terminal/non-`Uploading`
+    /// transition. This replaces the old byte-progress `STALL_THRESHOLD` timeout,
+    /// which false-fired on healthy big-file uploads (64 MiB parts report no
+    /// `Progress` for tens of seconds). Kept out of `upload_tasks` so a retry
+    /// tick doesn't churn the whole list.
+    pub part_retrying: Signal<HashMap<String, u32>>,
     pub projects: Signal<Vec<Project>>,
     pub tenant_projects: Signal<HashMap<String, Vec<Project>>>,
     pub is_loading: Signal<bool>,
@@ -263,6 +284,8 @@ impl AppState {
             hash_progress: Signal::new(HashMap::new()),
             embed_progress: Signal::new(HashMap::new()),
             upload_speed: Signal::new(HashMap::new()),
+            network_health: Signal::new(None),
+            part_retrying: Signal::new(HashMap::new()),
             projects: Signal::new(Vec::new()),
             tenant_projects: Signal::new(HashMap::new()),
             is_loading: Signal::new(false),

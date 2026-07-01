@@ -82,6 +82,17 @@ pub struct PartUrl {
 /// Progress callback signature
 pub type ProgressFn = Box<dyn Fn(u64, u64) + Send + Sync>;
 
+/// Per-attempt retry callback signature. Invoked by the shared retry loop
+/// ([`retry_io`]) once per failed-and-retryable attempt, right before the
+/// backoff wait, with the 1-based failed-attempt count. The MPU driver builds
+/// one of these to surface each part retry to the UI as
+/// [`crate::upload::UploadEvent::PartRetrying`], so a wedged big-file part shows
+/// a "connection stalled" hint that is driven by real retry state rather than a
+/// byte-progress timeout (a healthy 64 MiB part legitimately reports no progress
+/// for tens of seconds). Wrapped in an [`Arc`] by `upload_file_mpu` so the same
+/// callback can be shared across the parallel per-part tasks.
+pub type RetryFn = Box<dyn Fn(u32) + Send + Sync>;
+
 /// Cloud storage backend — enum dispatch, no dyn trait needed
 pub enum StorageBackend {
     Gcs(GcsBackend),
@@ -130,6 +141,16 @@ impl StorageBackend {
         match self {
             Self::Gcs(b) => b.abort_upload(session).await,
             Self::S3(b) => b.abort_upload(session).await,
+        }
+    }
+
+    /// The backend's own upload client. The connectivity probe in
+    /// [`wait_for_network`] reuses it so the check follows the same
+    /// (proxy-aware) path as the chunk/part PUTs.
+    fn client(&self) -> &reqwest::Client {
+        match self {
+            Self::Gcs(b) => &b.client,
+            Self::S3(b) => &b.client,
         }
     }
 }
@@ -260,11 +281,15 @@ impl RetryBudget {
 /// then surface the last error. A terminal (non-retryable) error returns
 /// immediately. `sleep` is the inter-attempt wait — production passes
 /// [`wait_for_network`]; tests pass a no-op so they neither wait nor hit the
-/// network. `label` names the operation in the retry warning. Shared by the
-/// resumable-chunk and multipart-part paths so both honour the same budget.
+/// network. `label` names the operation in the retry warning. `on_retry`, when
+/// present, is invoked once per failed-and-retryable attempt (with the 1-based
+/// attempt count) immediately before the backoff wait, so the driver can surface
+/// each retry to the UI. Shared by the resumable-chunk and multipart-part paths
+/// so both honour the same budget.
 async fn retry_io<T, F, Fut, S, SFut>(
     budget: RetryBudget,
     label: &str,
+    on_retry: Option<&RetryFn>,
     mut op: F,
     sleep: S,
 ) -> Result<T, UploadError>
@@ -286,6 +311,9 @@ where
                     "{label} failed (attempt {attempt}/{}), retrying in {delay}ms: {e}",
                     budget.max_attempts
                 );
+                if let Some(on_retry) = on_retry {
+                    on_retry(attempt);
+                }
                 sleep(delay).await;
             }
             Err(e) => return Err(e),
@@ -293,13 +321,17 @@ where
     }
 }
 
-/// Bounded concurrency for the parallel multipart (XML MPU) upload path: the
-/// driver uploads at most this many parts at once. Six keeps a multi-GB upload
-/// saturating a fast link without fanning out to one TCP connection per part
-/// (which would thrash a slow/metered link and balloon peak RAM to
-/// `parts_in_flight * part_size`). A `const` for now; a later change can make
-/// it overridable from config.
-const MPU_PART_CONCURRENCY: usize = 6;
+/// Default bounded concurrency for the parallel multipart (XML MPU) upload
+/// path: the driver uploads at most this many parts at once. Three keeps a
+/// multi-GB upload moving without fanning out to one TCP connection per part —
+/// on a slow/metered/proxied link more parallelism just multiplies connection
+/// resets and balloons peak RAM to `parts_in_flight * part_size` (with 32 MiB
+/// parts, 3 in flight ≈ 96 MiB). This is now the *default* only — `GcsBackend`
+/// carries a configured value (`UploadConfig::mpu_part_concurrency`, 1–16) so a
+/// user on a fast link can raise it; the fallback here is used when a caller
+/// constructs a backend without a config (`GcsBackend::default`) and as a floor
+/// when a config value of 0 slips through.
+pub(crate) const MPU_PART_CONCURRENCY: usize = 3;
 
 /// Upload a single chunk with automatic retry on network errors.
 /// Exponential backoff capped at a 30s plateau (1s, 2s, 4s, 8s, 16s, 30s, ...),
@@ -316,12 +348,17 @@ async fn upload_chunk_with_retry(
         max_attempts: max_retries,
         max_elapsed: MAX_RETRY_WALL_CLOCK,
     };
-    // `wait_for_network` polls connectivity before each backoff sleep.
+    // `wait_for_network` polls connectivity before each backoff sleep, through
+    // the backend's own (proxy-aware) client so the probe path matches the PUTs.
+    let probe = backend.client();
+    // The resumable-chunk path does not surface per-attempt retries to the UI
+    // (MPU is the priority for the stall hint), so it passes no `on_retry`.
     retry_io(
         budget,
         "Chunk upload",
+        None,
         || backend.upload_chunk(session, data, offset),
-        wait_for_network,
+        |ms| wait_for_network(probe, ms),
     )
     .await
 }
@@ -343,8 +380,15 @@ fn is_retryable(err: &UploadError) -> bool {
 }
 
 /// Wait for network recovery with exponential backoff.
-/// Checks connectivity by attempting a lightweight request.
-async fn wait_for_network(max_wait_ms: u64) {
+///
+/// `client` is the backend's own proxy-aware upload client (see
+/// [`GcsBackend::new`]). Probing through it — rather than a fresh
+/// `reqwest::Client::new()` — means the connectivity check follows the exact
+/// same path the chunk/part PUTs take: a user who set `proxy_url` has their
+/// probe tunnel through v2ray's HTTP inbound too, instead of hitting
+/// `storage.googleapis.com` directly (which is what wedges on CN/HK links) and
+/// reporting a false "network back" the moment the direct route flickers.
+async fn wait_for_network(client: &reqwest::Client, max_wait_ms: u64) {
     let check_interval = std::time::Duration::from_secs(2);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(max_wait_ms);
 
@@ -357,7 +401,7 @@ async fn wait_for_network(max_wait_ms: u64) {
         if tokio::time::Instant::now() > extended_deadline {
             break; // Give up waiting, let the retry logic handle it
         }
-        match reqwest::Client::new()
+        match client
             .head("https://storage.googleapis.com")
             .timeout(std::time::Duration::from_secs(5))
             .send()
@@ -376,11 +420,15 @@ async fn wait_for_network(max_wait_ms: u64) {
 
 pub struct GcsBackend {
     client: reqwest::Client,
+    /// How many parts of one MPU upload run concurrently. Configured from
+    /// `UploadConfig::mpu_part_concurrency` (see [`Self::new`]); clamped to at
+    /// least 1 so a misconfigured 0 can never deadlock the semaphore.
+    part_concurrency: usize,
 }
 
 impl Default for GcsBackend {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(None, MPU_PART_CONCURRENCY)
     }
 }
 
@@ -393,7 +441,11 @@ impl GcsBackend {
     /// The 60s read timeout breaks a half-open connection (peer silently gone)
     /// in seconds and lets the retry loop recover, instead of letting one
     /// stalled PUT hold an upload slot for the full 5-minute total budget.
-    pub fn new(proxy: Option<&str>) -> Self {
+    ///
+    /// `part_concurrency` is how many parts of one MPU upload run at once
+    /// (`UploadConfig::mpu_part_concurrency`); it is clamped to at least 1 so a
+    /// misconfigured 0 can never build a zero-permit semaphore that deadlocks.
+    pub fn new(proxy: Option<&str>, part_concurrency: usize) -> Self {
         let client = crate::net::build_http_client(
             proxy,
             Some(std::time::Duration::from_secs(300)),
@@ -401,7 +453,10 @@ impl GcsBackend {
             Some(std::time::Duration::from_secs(60)),
         )
         .expect("failed to build reqwest client");
-        Self { client }
+        Self {
+            client,
+            part_concurrency: part_concurrency.max(1),
+        }
     }
 
     async fn initiate_upload(
@@ -502,8 +557,10 @@ impl GcsBackend {
     }
 
     /// Upload every part of `file_path` to its presigned PUT URL concurrently
-    /// (bounded by [`MPU_PART_CONCURRENCY`]) and return `(part_number, etag)`
-    /// for each part, ready to hand to `complete_multipart_upload`.
+    /// (bounded by `self.part_concurrency`, configured from
+    /// `UploadConfig::mpu_part_concurrency`, default [`MPU_PART_CONCURRENCY`]) and
+    /// return `(part_number, etag)` for each part, ready to hand to
+    /// `complete_multipart_upload`.
     ///
     /// Each part task opens its own `tokio::fs::File`, seeks to
     /// `(part_number - 1) * part_size`, reads exactly its slice (the last part
@@ -514,8 +571,13 @@ impl GcsBackend {
     ///
     /// `on_progress(confirmed, total)` fires once per part as it lands, summing
     /// confirmed bytes across parts so the existing speed/ETA UI keeps working.
-    /// The first error aborts the remaining in-flight tasks and propagates; the
-    /// caller is responsible for the best-effort `abort_multipart_upload`.
+    /// `on_retry`, when present, fires once per failed-and-retryable part attempt
+    /// (with the 1-based attempt count) so the driver can surface a "connection
+    /// stalled — retrying" hint from real retry state. It is shared across the
+    /// parallel per-part tasks via an [`Arc`]. The first error aborts the
+    /// remaining in-flight tasks and propagates; the caller is responsible for
+    /// the best-effort `abort_multipart_upload`.
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip_all, fields(
         filename = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
         total_size,
@@ -530,6 +592,7 @@ impl GcsBackend {
         total_size: u64,
         max_retries: u32,
         on_progress: &ProgressFn,
+        on_retry: Option<&Arc<RetryFn>>,
     ) -> Result<Vec<(u32, String)>, UploadError> {
         // The part layout (per-part offsets/lengths) was computed from
         // `total_size`. If the file is no longer that size, it was mutated after
@@ -543,7 +606,9 @@ impl GcsBackend {
                 actual: current_len,
             });
         }
-        let semaphore = Arc::new(Semaphore::new(MPU_PART_CONCURRENCY));
+        // `part_concurrency` was clamped to >= 1 at construction, so the
+        // semaphore always has at least one permit.
+        let semaphore = Arc::new(Semaphore::new(self.part_concurrency));
         let path: PathBuf = file_path.to_path_buf();
         let mut join_set: JoinSet<Result<PartOutcome, UploadError>> = JoinSet::new();
 
@@ -552,6 +617,9 @@ impl GcsBackend {
             let client = self.client.clone();
             let path = path.clone();
             let part = part.clone();
+            // Each parallel part task gets its own clone of the shared retry
+            // callback (an `Arc`, so cheap); `RetryFn` itself is not `Clone`.
+            let on_retry = on_retry.map(Arc::clone);
             let offset = (part.part_number.saturating_sub(1)) as u64 * part_size;
             // Last part is the remainder; clamp so we never read past EOF.
             let len = part_size.min(total_size.saturating_sub(offset));
@@ -564,8 +632,16 @@ impl GcsBackend {
                         reason: "concurrency semaphore closed".to_string(),
                     }
                 })?;
-                let etag =
-                    put_part_with_retry(&client, &path, &part, offset, len, max_retries).await?;
+                let etag = put_part_with_retry(
+                    &client,
+                    &path,
+                    &part,
+                    offset,
+                    len,
+                    max_retries,
+                    on_retry.as_deref(),
+                )
+                .await?;
                 Ok(PartOutcome {
                     part_number: part.part_number,
                     etag,
@@ -608,7 +684,10 @@ struct PartOutcome {
 }
 
 /// PUT a single multipart part with the shared capped-backoff retry policy.
-/// Returns the verbatim `ETag` response header on success.
+/// Returns the verbatim `ETag` response header on success. `on_retry`, when
+/// present, is invoked once per failed-and-retryable attempt (with the 1-based
+/// attempt count) so the driver can surface a per-part "connection stalled"
+/// hint from real retry state.
 async fn put_part_with_retry(
     client: &reqwest::Client,
     file_path: &Path,
@@ -616,17 +695,20 @@ async fn put_part_with_retry(
     offset: u64,
     len: u64,
     max_retries: u32,
+    on_retry: Option<&RetryFn>,
 ) -> Result<String, UploadError> {
     let budget = RetryBudget {
         max_attempts: max_retries,
         max_elapsed: MAX_RETRY_WALL_CLOCK,
     };
     let label = format!("Multipart part {} upload", part.part_number);
+    // Probe connectivity through the same (proxy-aware) client the part PUT uses.
     retry_io(
         budget,
         &label,
+        on_retry,
         || put_part_once(client, file_path, part, offset, len),
-        wait_for_network,
+        |ms| wait_for_network(client, ms),
     )
     .await
 }
@@ -996,6 +1078,7 @@ mod tests {
         let result: Result<u64, UploadError> = retry_io(
             budget,
             "test",
+            None,
             || {
                 calls.set(calls.get() + 1);
                 async { Err(transient()) }
@@ -1018,6 +1101,7 @@ mod tests {
         let result: Result<u64, UploadError> = retry_io(
             budget,
             "test",
+            None,
             || {
                 let n = calls.get() + 1;
                 calls.set(n);
@@ -1044,6 +1128,7 @@ mod tests {
         let result: Result<u64, UploadError> = retry_io(
             budget,
             "test",
+            None,
             || {
                 calls.set(calls.get() + 1);
                 async {

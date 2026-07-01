@@ -37,7 +37,9 @@ impl PrimaryTab {
     /// * **Completed** — terminal success. Reconciled duplicates also land
     ///   here (see the `DuplicateDetected` arm in `upload_runtime.rs`),
     ///   because a duplicate means the content is already stored.
-    /// * **Failed** — `Rejected` (quality) and `Failed` (network).
+    /// * **Failed** — `Rejected` (quality) and `Failed` / `GaveUp` (network).
+    ///   `GaveUp` is the terminal give-up state; it groups with `Failed` under
+    ///   the Network sub-tab (both are transport failures the user can retry).
     pub fn contains(self, state: &UploadState) -> bool {
         match self {
             PrimaryTab::InProgress => matches!(
@@ -54,9 +56,10 @@ impl PrimaryTab {
                     | UploadState::Paused
             ),
             PrimaryTab::Completed => matches!(state, UploadState::Completed),
-            PrimaryTab::Failed => {
-                matches!(state, UploadState::Rejected | UploadState::Failed)
-            }
+            PrimaryTab::Failed => matches!(
+                state,
+                UploadState::Rejected | UploadState::Failed | UploadState::GaveUp
+            ),
         }
     }
 }

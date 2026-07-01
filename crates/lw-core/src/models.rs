@@ -530,6 +530,15 @@ pub enum UploadState {
     Verifying,
     Completed,
     Failed,
+    /// Terminal give-up state: the upload failed and the durable auto-retry
+    /// count reached [`crate::upload::AUTO_RETRY_MAX_ATTEMPTS`], so the engine
+    /// stopped re-queueing it. Distinct from `Failed` — a `Failed` row is still
+    /// eligible for the 30s auto-retry loop, a `GaveUp` row is not (it dropped
+    /// out of `get_failed_retryable`), and only a user-triggered manual retry
+    /// (which resets `retry_count`) puts it back through the normal flow. Shown
+    /// in the transfer panel's terminal (Failed → Network) section with an
+    /// actionable, often weak-network, message.
+    GaveUp,
     Paused,
 }
 
@@ -548,6 +557,7 @@ impl UploadState {
             Self::Verifying => "VERIFYING",
             Self::Completed => "COMPLETED",
             Self::Failed => "FAILED",
+            Self::GaveUp => "GAVE_UP",
             Self::Paused => "PAUSED",
         }
     }
@@ -566,6 +576,7 @@ impl UploadState {
             "VERIFYING" => Self::Verifying,
             "COMPLETED" => Self::Completed,
             "FAILED" => Self::Failed,
+            "GAVE_UP" => Self::GaveUp,
             "PAUSED" => Self::Paused,
             _ => Self::Pending,
         }
