@@ -96,7 +96,10 @@ impl CoreServices {
         // Select storage backend based on config
         // TODO: Add S3 backend selection when China deployment is configured
         let storage = Arc::new(lw_core::storage::StorageBackend::Gcs(
-            lw_core::storage::GcsBackend::new(proxy_url.as_deref()),
+            lw_core::storage::GcsBackend::new(
+                proxy_url.as_deref(),
+                config.upload.mpu_part_concurrency as usize,
+            ),
         ));
 
         // Video quality rules now live on the server. The desktop ships

@@ -94,6 +94,15 @@ pub struct UploadConfig {
     /// load without a migration.
     #[serde(default)]
     pub sequential_uploads: bool,
+    /// How many parts of a single multipart (XML MPU) upload run concurrently.
+    /// Six keeps a multi-GB upload saturating a fast link without fanning out to
+    /// one TCP connection per part (which would thrash a slow/metered link and
+    /// balloon peak RAM to `parts_in_flight * part_size`). Weak-network users
+    /// (CN/HK) can lower it to 1–2 from the Network settings pane so a flaky link
+    /// isn't overwhelmed by parallel PUTs. `#[serde(default)]` keeps older
+    /// config.toml files loading without a migration.
+    #[serde(default = "default_mpu_concurrency")]
+    pub mpu_part_concurrency: u32,
 }
 
 fn default_true() -> bool {
@@ -106,6 +115,11 @@ fn default_concurrent() -> u32 {
 /// while large files scale up automatically. See `storage::pick_chunk_size`.
 fn default_chunk_size() -> u32 {
     8
+}
+/// Default multipart part concurrency. See [`UploadConfig::mpu_part_concurrency`]
+/// and `storage::MPU_PART_CONCURRENCY` for the rationale behind 6.
+fn default_mpu_concurrency() -> u32 {
+    6
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +257,7 @@ impl Default for AppConfig {
                 max_concurrent_uploads: 2,
                 chunk_size_mb: 8,
                 sequential_uploads: false,
+                mpu_part_concurrency: default_mpu_concurrency(),
             },
             transcode: TranscodeConfig::default(),
             camera: CameraConfig {

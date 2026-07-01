@@ -303,13 +303,16 @@ where
     }
 }
 
-/// Bounded concurrency for the parallel multipart (XML MPU) upload path: the
-/// driver uploads at most this many parts at once. Six keeps a multi-GB upload
-/// saturating a fast link without fanning out to one TCP connection per part
-/// (which would thrash a slow/metered link and balloon peak RAM to
-/// `parts_in_flight * part_size`). A `const` for now; a later change can make
-/// it overridable from config.
-const MPU_PART_CONCURRENCY: usize = 6;
+/// Default bounded concurrency for the parallel multipart (XML MPU) upload
+/// path: the driver uploads at most this many parts at once. Six keeps a
+/// multi-GB upload saturating a fast link without fanning out to one TCP
+/// connection per part (which would thrash a slow/metered link and balloon peak
+/// RAM to `parts_in_flight * part_size`). This is now the *default* only —
+/// `GcsBackend` carries a configured value (`UploadConfig::mpu_part_concurrency`)
+/// so weak-network users can lower it to 1–2; the fallback here is used when a
+/// caller constructs a backend without a config (`GcsBackend::default`) and as a
+/// floor when a config value of 0 slips through.
+pub(crate) const MPU_PART_CONCURRENCY: usize = 6;
 
 /// Upload a single chunk with automatic retry on network errors.
 /// Exponential backoff capped at a 30s plateau (1s, 2s, 4s, 8s, 16s, 30s, ...),
@@ -395,11 +398,15 @@ async fn wait_for_network(client: &reqwest::Client, max_wait_ms: u64) {
 
 pub struct GcsBackend {
     client: reqwest::Client,
+    /// How many parts of one MPU upload run concurrently. Configured from
+    /// `UploadConfig::mpu_part_concurrency` (see [`Self::new`]); clamped to at
+    /// least 1 so a misconfigured 0 can never deadlock the semaphore.
+    part_concurrency: usize,
 }
 
 impl Default for GcsBackend {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(None, MPU_PART_CONCURRENCY)
     }
 }
 
@@ -412,7 +419,11 @@ impl GcsBackend {
     /// The 60s read timeout breaks a half-open connection (peer silently gone)
     /// in seconds and lets the retry loop recover, instead of letting one
     /// stalled PUT hold an upload slot for the full 5-minute total budget.
-    pub fn new(proxy: Option<&str>) -> Self {
+    ///
+    /// `part_concurrency` is how many parts of one MPU upload run at once
+    /// (`UploadConfig::mpu_part_concurrency`); it is clamped to at least 1 so a
+    /// misconfigured 0 can never build a zero-permit semaphore that deadlocks.
+    pub fn new(proxy: Option<&str>, part_concurrency: usize) -> Self {
         let client = crate::net::build_http_client(
             proxy,
             Some(std::time::Duration::from_secs(300)),
@@ -420,7 +431,10 @@ impl GcsBackend {
             Some(std::time::Duration::from_secs(60)),
         )
         .expect("failed to build reqwest client");
-        Self { client }
+        Self {
+            client,
+            part_concurrency: part_concurrency.max(1),
+        }
     }
 
     async fn initiate_upload(
@@ -521,8 +535,10 @@ impl GcsBackend {
     }
 
     /// Upload every part of `file_path` to its presigned PUT URL concurrently
-    /// (bounded by [`MPU_PART_CONCURRENCY`]) and return `(part_number, etag)`
-    /// for each part, ready to hand to `complete_multipart_upload`.
+    /// (bounded by `self.part_concurrency`, configured from
+    /// `UploadConfig::mpu_part_concurrency`, default [`MPU_PART_CONCURRENCY`]) and
+    /// return `(part_number, etag)` for each part, ready to hand to
+    /// `complete_multipart_upload`.
     ///
     /// Each part task opens its own `tokio::fs::File`, seeks to
     /// `(part_number - 1) * part_size`, reads exactly its slice (the last part
@@ -562,7 +578,9 @@ impl GcsBackend {
                 actual: current_len,
             });
         }
-        let semaphore = Arc::new(Semaphore::new(MPU_PART_CONCURRENCY));
+        // `part_concurrency` was clamped to >= 1 at construction, so the
+        // semaphore always has at least one permit.
+        let semaphore = Arc::new(Semaphore::new(self.part_concurrency));
         let path: PathBuf = file_path.to_path_buf();
         let mut join_set: JoinSet<Result<PartOutcome, UploadError>> = JoinSet::new();
 
