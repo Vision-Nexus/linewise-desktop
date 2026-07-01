@@ -46,10 +46,15 @@ fn chip_style(health: NetworkHealth) -> ChipStyle {
     }
 }
 
-/// Hover-title text: the probe RTT when known, else a plain tier note. Ok/Weak
-/// use the orange `--warning`; only Offline is red, so "Weak" reads as
-/// distinct from "Offline".
-fn hover_title(reading: NetworkReading) -> String {
+/// Hover-title text. When parts are actively retrying we say so — the probe RTT
+/// would be misleading (a green probe alongside failing part PUTs is exactly the
+/// false-green case this chip corrects). Otherwise: the probe RTT when known,
+/// else a plain tier note. Ok/Weak use the orange `--warning`; only Offline is
+/// red, so "Weak" reads as distinct from "Offline".
+fn hover_title(reading: NetworkReading, retrying: bool) -> String {
+    if retrying {
+        return "Uploads retrying — weak connection".to_string();
+    }
     match reading.rtt_ms {
         Some(ms) => format!("ping {ms}ms"),
         None => "Unreachable".to_string(),
@@ -59,14 +64,27 @@ fn hover_title(reading: NetworkReading) -> String {
 /// Four-bar signal chip. Reads `network_health`; renders nothing while it is
 /// `None`. One bar element per slot: lit slots take the tier colour, unlit slots
 /// a muted track colour, with ascending heights for the classic signal look.
+///
+/// The displayed tier is the WORSE of the probe reading and — when any upload
+/// part is currently retrying (`part_retrying` non-empty) — a `Weak` floor. So a
+/// green probe alongside failing part PUTs renders orange "Weak" instead of a
+/// false "Good". Purely derived from the two signals it reads; no self-writing
+/// effect (avoids the tracked-read-then-write footgun).
 #[component]
 pub fn NetworkChip() -> Element {
     let app_state = use_context::<AppState>();
     let Some(reading) = *app_state.network_health.read() else {
         return rsx! {};
     };
-    let style = chip_style(reading.health);
-    let title = hover_title(reading);
+    // Any part in the retry map means part PUTs are actively failing/backing off.
+    let retrying = !app_state.part_retrying.read().is_empty();
+    let health = if retrying {
+        reading.health.at_least_weak()
+    } else {
+        reading.health
+    };
+    let style = chip_style(health);
+    let title = hover_title(reading, retrying);
     // Ascending bar heights (px) for slots 1..=4.
     let heights: [u8; 4] = [6, 9, 12, 15];
 

@@ -17,13 +17,6 @@ use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
 use std::collections::HashMap;
 
-/// How long an Uploading row can sit with no forward progress and no known rate
-/// before it shows the "connection stalled" hint. 15s comfortably exceeds the
-/// gap between chunk-granularity `Progress` events on a healthy link, so it
-/// fires only on a genuine transport stall (the weak-network wedge), not between
-/// normal chunks.
-const STALL_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(15);
-
 /// Compact one-line summary of the capture metadata set for a clip, for the
 /// inline "✓ set" row. Only present fields appear, joined by " · ".
 fn capture_summary(m: &lw_core::capture::CaptureMetadata) -> String {
@@ -687,21 +680,21 @@ pub fn UploadTaskRow(
         format_size(task.size)
     };
 
-    // Stall hint: an Uploading row with no byte progress for longer than the
-    // threshold is wedged on a chunk (the weak-network case where PUTs hang at
-    // the transport layer). Key purely off the last-progress timestamp — NOT
-    // upload_speed, which can freeze at its last non-zero value during a stall
-    // and would suppress the hint (a false negative we hit in testing).
-    // last_progress_at is stamped on entering Uploading and on every Progress
-    // event, so the clock starts the moment the upload does. No UI ticker — this
-    // recomputes on the next Progress/StateChanged re-render, which is exactly
-    // when the condition can flip.
-    let stalled = task.state == UploadState::Uploading
-        && app_state
-            .last_progress_at
-            .read()
-            .get(&task.id)
-            .is_some_and(|t| t.elapsed() > STALL_THRESHOLD);
+    // Stall hint: driven by REAL multipart part-retry state, not a byte-progress
+    // timeout. The engine emits `PartRetrying` from the part PUT retry loop and
+    // the runtime records the latest attempt in `part_retrying`; presence means a
+    // part is currently failing and backing off. A landed part (`Progress`) or
+    // any transition out of `Uploading` clears the entry. This avoids the false
+    // "stalled" the old `last_progress_at + STALL_THRESHOLD` heuristic produced
+    // on healthy big-file uploads — the backend hands big files 64 MiB parts and
+    // MPU progress only fires per completed part, so no progress for tens of
+    // seconds is normal, not a stall. No UI ticker — this recomputes on the next
+    // PartRetrying/Progress/StateChanged re-render, exactly when it can flip.
+    let stalled = if task.state == UploadState::Uploading {
+        app_state.part_retrying.read().get(&task.id).copied()
+    } else {
+        None
+    };
 
     rsx! {
         div {
@@ -854,10 +847,10 @@ pub fn UploadTaskRow(
                 }
             }
 
-            if stalled {
+            if let Some(attempt) = stalled {
                 div {
                     style: "font-size: 12px; color: var(--warning); margin-top: 4px; padding: 6px 8px; background: var(--warning-bg); border-radius: 4px;",
-                    "Connection stalled — retrying…"
+                    "Connection stalled — retrying (attempt {attempt})…"
                 }
             }
 

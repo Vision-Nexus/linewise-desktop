@@ -258,14 +258,13 @@ fn handle_upload_event(
             if state != UploadState::Staged {
                 app_state.embed_progress.write().remove(&task_id);
             }
-            // Start (or reset) the stall clock when a row enters Uploading, so
-            // the "Connection stalled" hint fires even if the first chunk hangs
-            // before any Progress event, and a resumed upload starts fresh.
-            if state == UploadState::Uploading {
-                app_state
-                    .last_progress_at
-                    .write()
-                    .insert(task_id.clone(), std::time::Instant::now());
+            // The part-retry stall hint only applies while a row is actively
+            // uploading. Any transition OUT of `Uploading` (Verifying, Completed,
+            // Failed, GaveUp, Paused, …) clears it, so a stale "retrying" hint
+            // can't outlive the upload phase. Entering `Uploading` starts clean —
+            // the first failing part re-inserts via `PartRetrying`.
+            if state != UploadState::Uploading {
+                app_state.part_retrying.write().remove(&task_id);
             }
             update_task(app_state, &task_id, |t| t.state = state);
         }
@@ -285,12 +284,10 @@ fn handle_upload_event(
                 entry.0 = entry.0.max(bytes_uploaded);
                 entry.1 = total_bytes;
             }
-            // Stamp the last-progress instant so a row can detect a stall (speed
-            // 0 + no progress for a while) without a UI ticker.
-            app_state
-                .last_progress_at
-                .write()
-                .insert(task_id, std::time::Instant::now());
+            // A landed part clears any "stalled — retrying" hint: forward
+            // progress means the transport recovered. The next failing part
+            // re-inserts via `PartRetrying`.
+            app_state.part_retrying.write().remove(&task_id);
         }
         UploadEvent::HashProgress {
             task_id,
@@ -368,6 +365,7 @@ fn handle_upload_event(
             upload_progress.write().remove(&task_id);
             transcode_progress.write().remove(&task_id);
             hash_progress.write().remove(&task_id);
+            app_state.part_retrying.write().remove(&task_id);
             update_task(app_state, &task_id, |t| {
                 t.state = UploadState::Completed;
                 t.error_message = Some(ALREADY_EXISTS_MARKER.to_string());
@@ -378,14 +376,14 @@ fn handle_upload_event(
             upload_progress.write().remove(&task_id);
             transcode_progress.write().remove(&task_id);
             hash_progress.write().remove(&task_id);
-            app_state.last_progress_at.write().remove(&task_id);
+            app_state.part_retrying.write().remove(&task_id);
             update_task(app_state, &task_id, |t| t.state = UploadState::Completed);
         }
         UploadEvent::Failed { task_id, error } => {
             upload_progress.write().remove(&task_id);
             transcode_progress.write().remove(&task_id);
             hash_progress.write().remove(&task_id);
-            app_state.last_progress_at.write().remove(&task_id);
+            app_state.part_retrying.write().remove(&task_id);
             // A give-up arrives as this `Failed` event (carrying the terminal
             // message) followed by a `StateChanged → GaveUp`; keep the message
             // and let the later StateChanged flip the state.
@@ -403,6 +401,13 @@ fn handle_upload_event(
                 t.retry_count = attempt;
                 t.error_message = None;
             });
+        }
+        UploadEvent::PartRetrying { task_id, attempt } => {
+            // A multipart part PUT is failing and backing off. Record the latest
+            // attempt so the row shows an event-driven "connection stalled —
+            // retrying (attempt N)" hint. Cleared by the next `Progress` (a part
+            // landed) or any transition out of `Uploading`.
+            app_state.part_retrying.write().insert(task_id, attempt);
         }
         UploadEvent::NetworkQuality(reading) => {
             // Debounced tier change from the engine's probe — publish it for the
