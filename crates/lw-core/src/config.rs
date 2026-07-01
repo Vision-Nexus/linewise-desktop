@@ -117,9 +117,9 @@ fn default_chunk_size() -> u32 {
     8
 }
 /// Default multipart part concurrency. See [`UploadConfig::mpu_part_concurrency`]
-/// and `storage::MPU_PART_CONCURRENCY` for the rationale behind 6.
+/// and `storage::MPU_PART_CONCURRENCY` for the rationale behind 3.
 fn default_mpu_concurrency() -> u32 {
-    6
+    3
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

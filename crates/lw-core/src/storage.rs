@@ -322,15 +322,16 @@ where
 }
 
 /// Default bounded concurrency for the parallel multipart (XML MPU) upload
-/// path: the driver uploads at most this many parts at once. Six keeps a
-/// multi-GB upload saturating a fast link without fanning out to one TCP
-/// connection per part (which would thrash a slow/metered link and balloon peak
-/// RAM to `parts_in_flight * part_size`). This is now the *default* only —
-/// `GcsBackend` carries a configured value (`UploadConfig::mpu_part_concurrency`)
-/// so weak-network users can lower it to 1–2; the fallback here is used when a
-/// caller constructs a backend without a config (`GcsBackend::default`) and as a
-/// floor when a config value of 0 slips through.
-pub(crate) const MPU_PART_CONCURRENCY: usize = 6;
+/// path: the driver uploads at most this many parts at once. Three keeps a
+/// multi-GB upload moving without fanning out to one TCP connection per part —
+/// on a slow/metered/proxied link more parallelism just multiplies connection
+/// resets and balloons peak RAM to `parts_in_flight * part_size` (with 32 MiB
+/// parts, 3 in flight ≈ 96 MiB). This is now the *default* only — `GcsBackend`
+/// carries a configured value (`UploadConfig::mpu_part_concurrency`, 1–16) so a
+/// user on a fast link can raise it; the fallback here is used when a caller
+/// constructs a backend without a config (`GcsBackend::default`) and as a floor
+/// when a config value of 0 slips through.
+pub(crate) const MPU_PART_CONCURRENCY: usize = 3;
 
 /// Upload a single chunk with automatic retry on network errors.
 /// Exponential backoff capped at a 30s plateau (1s, 2s, 4s, 8s, 16s, 30s, ...),
