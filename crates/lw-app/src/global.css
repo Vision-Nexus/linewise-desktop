@@ -1,16 +1,16 @@
 /* ── CSS Variables: Light theme (default) ─────────────────────────── */
 :root {
   --bg: #ffffff;
-  --bg-secondary: #f9fafb;
-  --bg-tertiary: #f3f4f6;
-  --text: #111827;
-  --text-secondary: #6b7280;
-  --text-muted: #9ca3af;
-  --border: #e5e7eb;
-  --border-hover: #d1d5db;
-  --border-focus: #2563eb;
+  --bg-secondary: oklch(0.985 0 0);
+  --bg-tertiary: oklch(0.97 0 0);
+  --text: oklch(0.145 0 0);
+  --text-secondary: oklch(0.556 0 0);
+  --text-muted: oklch(0.708 0 0);
+  --border: oklch(0.922 0 0);
+  --border-hover: oklch(0.87 0 0);
+  --border-focus: oklch(0.708 0 0); /* 方案A: neutral ring (was blue #2563eb) */
 
-  /* Status colors */
+  /* Status colors — semantic, intentionally kept */
   --success: #22c55e;
   --success-bg: #f0fdf4;
   --error: #ef4444;
@@ -23,44 +23,45 @@
   --staged-border: #fde68a;
   --staged-hover: #fef9c3;
 
-  /* Button */
-  --btn-primary: #2563eb;
-  --btn-primary-hover: #1d4ed8;
-  --btn-primary-active: #1e40af;
+  /* Button — 方案A: primary is neutral near-black (was blue #2563eb) */
+  --btn-primary: oklch(0.205 0 0);
+  --btn-primary-hover: oklch(0.30 0 0);
+  --btn-primary-active: oklch(0.145 0 0);
   --btn-success: #22c55e;
   --btn-success-hover: #16a34a;
   --btn-success-active: #15803d;
   --btn-outline-bg: white;
-  --btn-outline-hover: #f9fafb;
-  --btn-outline-active: #f3f4f6;
-  --btn-disabled: #e5e7eb;
-  --btn-disabled-text: #9ca3af;
+  --btn-outline-hover: oklch(0.985 0 0);
+  --btn-outline-active: oklch(0.97 0 0);
+  --btn-disabled: oklch(0.922 0 0);
+  --btn-disabled-text: oklch(0.708 0 0);
   --btn-danger-hover: #fef2f2;
   --btn-danger-active: #fee2e2;
 
   /* Input/Select */
   --input-bg: white;
-  --input-border: #d1d5db;
+  --input-border: oklch(0.87 0 0);
 
-  --scrollbar-thumb: #d1d5db;
-  --scrollbar-hover: #9ca3af;
+  --scrollbar-thumb: oklch(0.87 0 0);
+  --scrollbar-hover: oklch(0.708 0 0);
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
   --shadow-md: 0 1px 3px rgba(0,0,0,0.15);
-  --focus-ring: 0 0 0 2px rgba(37,99,235,0.15);
+  --focus-ring: 0 0 0 2px rgba(0,0,0,0.12); /* 方案A: neutral (was blue) */
 }
 
 /* ── Dark theme ───────────────────────────────────────────────────── */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1a1a2e;
-    --bg-secondary: #16213e;
-    --bg-tertiary: #1e293b;
-    --text: #e2e8f0;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
-    --border: #334155;
-    --border-hover: #475569;
-    --border-focus: #3b82f6;
+    /* 方案A: neutral near-black dark (was navy/slate) */
+    --bg: oklch(0.145 0 0);
+    --bg-secondary: oklch(0.205 0 0);
+    --bg-tertiary: oklch(0.269 0 0);
+    --text: oklch(0.985 0 0);
+    --text-secondary: oklch(0.708 0 0);
+    --text-muted: oklch(0.556 0 0);
+    --border: oklch(1 0 0 / 10%);
+    --border-hover: oklch(1 0 0 / 18%);
+    --border-focus: oklch(0.556 0 0);
 
     --success-bg: #052e16;
     --error-bg: #450a0a;
@@ -70,22 +71,26 @@
     --staged-border: #854d0e;
     --staged-hover: #4a2506;
 
-    --btn-outline-bg: #1e293b;
-    --btn-outline-hover: #334155;
-    --btn-outline-active: #475569;
-    --btn-disabled: #334155;
-    --btn-disabled-text: #64748b;
+    /* primary stays a visible neutral (btn text is set inline as white; don't invert to near-white) */
+    --btn-primary: oklch(0.32 0 0);
+    --btn-primary-hover: oklch(0.40 0 0);
+    --btn-primary-active: oklch(0.26 0 0);
+    --btn-outline-bg: oklch(0.205 0 0);
+    --btn-outline-hover: oklch(0.269 0 0);
+    --btn-outline-active: oklch(0.32 0 0);
+    --btn-disabled: oklch(0.269 0 0);
+    --btn-disabled-text: oklch(0.556 0 0);
     --btn-danger-hover: #450a0a;
     --btn-danger-active: #7f1d1d;
 
-    --input-bg: #1e293b;
-    --input-border: #475569;
+    --input-bg: oklch(0.205 0 0);
+    --input-border: oklch(1 0 0 / 15%);
 
-    --scrollbar-thumb: #475569;
-    --scrollbar-hover: #64748b;
+    --scrollbar-thumb: oklch(1 0 0 / 20%);
+    --scrollbar-hover: oklch(1 0 0 / 30%);
     --shadow-sm: 0 1px 3px rgba(0,0,0,0.3);
     --shadow-md: 0 1px 3px rgba(0,0,0,0.4);
-    --focus-ring: 0 0 0 2px rgba(59,130,246,0.25);
+    --focus-ring: 0 0 0 2px rgba(255,255,255,0.18);
   }
 }
 
@@ -95,7 +100,8 @@
   html, body { height: 100%; overflow: hidden; }
 }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  /* 方案A: Inter first (needs bundling — see @font-face TODO); system stack is the fallback until then */
+  font-family: 'Inter', 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
   color: var(--text);
   background: var(--bg);

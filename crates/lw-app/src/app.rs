@@ -11,6 +11,10 @@ use std::sync::Arc;
 const TAILWIND_CSS: &str = include_str!("../tailwind.generated.css");
 const DX_COMPONENTS_THEME_CSS: &str = include_str!("../assets/dx-components-theme.css");
 
+/// Inter Variable bundled as a data-URI `@font-face` (see `assets/fonts.css`).
+/// Injected first so the face is defined before `body`/utilities reference 'Inter'.
+const FONTS_CSS: &str = include_str!("../assets/fonts.css");
+
 // Per-component stylesheets are inlined here (same mechanism as TAILWIND_CSS
 // above) because Dioxus's `asset!()` / `#[css_module]` asset resolver doesn't
 // reliably deliver files to WebView2 on Windows when built with plain `cargo`.
@@ -199,6 +203,7 @@ pub fn App() -> Element {
     );
 
     rsx! {
+        style { "{FONTS_CSS}" }
         style { "{GLOBAL_CSS}" }
         style { "{TAILWIND_CSS}" }
         style { "{DX_COMPONENTS_THEME_CSS}" }

@@ -15,29 +15,33 @@
   --radius-lg: 0.625rem;
   --radius-xl: calc(0.625rem + 4px);
 
-  --color-background: oklch(1 0 0);
-  --color-foreground: #333333;
+  /* 方案A: Inter as the default sans (matches wave; face defined in assets/fonts.css) */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
 
-  --color-primary: #6713db;
-  --color-primary-hovered: #5108b6;
+  --color-background: oklch(1 0 0);
+  --color-foreground: oklch(0.145 0 0);
+
+  /* 方案A: neutral near-black primary (was brand purple #6713db) */
+  --color-primary: oklch(0.205 0 0);
+  --color-primary-hovered: oklch(0.30 0 0);
   --color-primary-foreground: oklch(0.985 0 0);
 
-  --color-secondary: #f4f4f5;
-  --color-secondary-hovered: #e4e4e7;
-  --color-secondary-foreground: oklch(0.21 0.006 285.885);
+  --color-secondary: oklch(0.97 0 0);
+  --color-secondary-hovered: oklch(0.94 0 0);
+  --color-secondary-foreground: oklch(0.205 0 0);
 
-  --color-muted: oklch(0.967 0.001 286.375);
-  --color-muted-foreground: oklch(0.552 0.016 285.938);
+  --color-muted: oklch(0.97 0 0);
+  --color-muted-foreground: oklch(0.556 0 0);
 
-  --color-accent: #f4f4f5;
-  --color-accent-foreground: oklch(0.21 0.006 285.885);
+  --color-accent: oklch(0.97 0 0);
+  --color-accent-foreground: oklch(0.205 0 0);
 
-  --color-destructive: #ef4444;
+  --color-destructive: oklch(0.577 0.245 27.325);
   --color-destructive-light: #ffeeee;
 
-  --color-border: #eeeeee;
-  --color-input: oklch(0.92 0.004 286.32);
-  --color-ring: var(--color-primary-hovered);
+  --color-border: oklch(0.922 0 0);
+  --color-input: oklch(0.922 0 0);
+  --color-ring: oklch(0.708 0 0);
 }
 
 /* Dark-mode token overrides mirror the --bg/--text/--border palette in
@@ -45,23 +49,30 @@
  * in lockstep with inline `var(--bg)` styles. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-background: #1a1a2e;
-    --color-foreground: #e2e8f0;
+    /* 方案A: neutral near-black dark (was navy/slate). Tailwind bg-primary is
+     * always paired with text-primary-foreground, so primary safely inverts here. */
+    --color-background: oklch(0.145 0 0);
+    --color-foreground: oklch(0.985 0 0);
 
-    --color-secondary: #16213e;
-    --color-secondary-hovered: #1e293b;
-    --color-secondary-foreground: #e2e8f0;
+    --color-primary: oklch(0.922 0 0);
+    --color-primary-hovered: oklch(0.85 0 0);
+    --color-primary-foreground: oklch(0.205 0 0);
 
-    --color-muted: #1e293b;
-    --color-muted-foreground: #94a3b8;
+    --color-secondary: oklch(0.269 0 0);
+    --color-secondary-hovered: oklch(0.32 0 0);
+    --color-secondary-foreground: oklch(0.985 0 0);
 
-    --color-accent: #334155;
-    --color-accent-foreground: #e2e8f0;
+    --color-muted: oklch(0.269 0 0);
+    --color-muted-foreground: oklch(0.708 0 0);
+
+    --color-accent: oklch(0.269 0 0);
+    --color-accent-foreground: oklch(0.985 0 0);
 
     --color-destructive-light: #450a0a;
 
-    --color-border: #334155;
-    --color-input: #475569;
+    --color-border: oklch(1 0 0 / 10%);
+    --color-input: oklch(1 0 0 / 15%);
+    --color-ring: oklch(0.556 0 0);
   }
 }
 
