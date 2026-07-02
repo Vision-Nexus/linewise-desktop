@@ -35,9 +35,15 @@ cargo fmt -- --check           # Format check
 ```
 crates/
 ├── lw-core/    # Business logic library (auth, upload engine, API client, DB, video validation)
-├── lw-app/     # Dioxus desktop application (UI components, state, tray)
-└── lw-cli/     # (future) Headless CLI for scripted uploads
+├── lw-app/     # Dioxus desktop application (UI components, state, tray) — bin `linewise-desktop`
+└── xtask/      # Release + packaging tooling (cut release/tag, bundle ffmpeg+exiftool, generate icons)
+
+# crates/lw-chat/ is a dormant Dioxus chat component, EXCLUDED from the workspace
+# (`exclude = ["crates/lw-chat"]` in Cargo.toml) and NOT a dependency of lw-app —
+# present in-tree but not compiled or mounted into the app.
 ```
+
+Workspace members are `lw-core`, `lw-app`, and `xtask`; `default-members` builds `lw-core` + `lw-app`. Cut a release with `cargo xtask release vX.Y.Z` (rewrites `[workspace.package].version`, refreshes `Cargo.lock`, commits, tags).
 
 ### Key Modules (lw-core)
 
@@ -46,7 +52,7 @@ crates/
 | `auth.rs` | Firebase Auth REST API (email/password, OAuth, token refresh) |
 | `api_client.rs` | Linewise API client (documents, upload URLs, verification) |
 | `upload.rs` | Upload engine (queue, dedup, validation, upload, verify, auto-clean) |
-| `db.rs` | SQLite via rusqlite (upload queue persistence, file hash dedup) |
+| `db.rs` | SQLite via sqlx (`query!` macros, async pool) — upload queue persistence, file hash dedup |
 | `video.rs` | ffprobe-based video parameter validation (30fps/1080p/30Mbps targets) |
 | `dedup.rs` | BLAKE3 file hashing for duplicate detection |
 | `config.rs` | TOML configuration (server env, upload prefs, desensitization, watch folders) |
