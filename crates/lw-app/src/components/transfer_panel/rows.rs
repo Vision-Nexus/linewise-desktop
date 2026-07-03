@@ -135,69 +135,74 @@ pub fn build_video_details(
     })
 }
 
-/// Renders the dashed-underline summary + the three-group hover
-/// popover (source metadata, device, raw tags). Identical in
-/// `HashingRow` and `StagedRow`; pulled out so adding a new row that
-/// shows probe data doesn't need to copy 60 lines of rsx.
+/// Click-to-expand detail for a task row (E5): a dashed-underline summary line
+/// that toggles a `<dl>` with Org/Project, Local path, Size and — once the probe
+/// has landed — the source-metadata / device / raw-tag groups. Replaces the old
+/// hover popover so every in-progress row uses the same click-expand affordance.
+/// Expand state is per-row.
 #[component]
-pub fn VideoInfoPopover(details: VideoDetails) -> Element {
-    let VideoDetails {
-        summary,
-        structural,
-        device,
-        raw,
-    } = details;
+fn RowDetails(
+    task: UploadTask,
+    device_encoder_signatures: &'static [DeviceEncoderSignature],
+) -> Element {
+    let mut open = use_signal(|| false);
+    let app_state = use_context::<AppState>();
+    let details = build_video_details(&task, device_encoder_signatures);
+    let tenant_name = app_state.tenant_display_name(&task.tenant_id);
+    let project_name = app_state.project_display_name(&task.tenant_id, &task.project_id);
+    let summary = details.as_ref().map(|d| d.summary.clone()).unwrap_or_else(|| {
+        "\u{2014} \u{00B7} \u{2014} \u{00B7} \u{2014} \u{00B7} \u{2014}".to_string()
+    });
+    let expanded = *open.read();
+    let chevron = if expanded { "\u{25BE}" } else { "\u{25B8}" };
+
+    let group_label = "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 10px; margin-bottom: 6px;";
+    let group_grid = "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;";
+
     rsx! {
-        div {
-            class: "popover-host",
-            style: "margin-top: 4px;",
-            tabindex: "0",
+        div { style: "margin-top: 4px;",
             div {
-                style: "font-size: 11px; color: var(--text-secondary); border-bottom: 1px dashed var(--border); display: inline-block;",
-                "{summary}"
-            }
-            div {
-                class: "popover-panel",
-                style: if raw.is_empty() {
-                    "max-height: 360px; overflow-y: auto;".to_string()
-                } else {
-                    "max-height: 360px; overflow-y: auto; display: grid; grid-template-columns: minmax(200px, 1fr) minmax(220px, 1fr); gap: 12px;".to_string()
+                style: "display: inline-flex; align-items: center; gap: 6px; cursor: pointer;",
+                "aria-expanded": "{expanded}",
+                onclick: move |_| {
+                    let next = !*open.read();
+                    open.set(next);
                 },
-                div {
-                    style: "min-width: 0;",
-                    div {
-                        style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
-                        "Source metadata"
-                    }
-                    div {
-                        style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
-                        for (key, value) in structural.iter() {
-                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
-                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
-                        }
-                    }
-                    div {
-                        style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 10px; margin-bottom: 6px;",
-                        "Device"
-                    }
-                    div {
-                        style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
-                        for (key, value) in device.iter() {
-                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
-                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
-                        }
-                    }
+                span { style: "font-size: 11px; color: var(--text-muted);", "{chevron}" }
+                span {
+                    style: "font-size: 11px; color: var(--text-secondary); border-bottom: 1px dashed var(--border);",
+                    "{summary}"
                 }
-                if !raw.is_empty() {
-                    div {
-                        style: "min-width: 0;",
-                        div {
-                            style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
-                            "Raw tags"
+            }
+            if expanded {
+                div {
+                    style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 12px; row-gap: 4px; font-size: 12px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);",
+                    div { style: "color: var(--text-muted);", "Org / Project" }
+                    div { style: "color: var(--text); word-break: break-all;", "{tenant_name} / {project_name}" }
+                    div { style: "color: var(--text-muted);", "Local path" }
+                    div { style: "color: var(--text); word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{task.local_path}" }
+                    div { style: "color: var(--text-muted);", "Size" }
+                    div { style: "color: var(--text);", "{format_size(task.size)}" }
+                }
+                if let Some(d) = details {
+                    div { style: "{group_label}", "Source metadata" }
+                    div { style: "{group_grid}",
+                        for (key , value) in d.structural.iter() {
+                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
                         }
-                        div {
-                            style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
-                            for (key, value) in raw.iter() {
+                    }
+                    div { style: "{group_label}", "Device" }
+                    div { style: "{group_grid}",
+                        for (key , value) in d.device.iter() {
+                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                        }
+                    }
+                    if !d.raw.is_empty() {
+                        div { style: "{group_label}", "Raw tags" }
+                        div { style: "{group_grid}",
+                            for (key , value) in d.raw.iter() {
                                 div { style: "color: var(--text-muted); white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{key}" }
                                 div { style: "color: var(--text); word-break: break-all;", "{value}" }
                             }
@@ -252,6 +257,7 @@ pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> 
                 style: "font-size: 11px; margin-top: 2px; color: var(--text-muted);",
                 "Checking files 8% — Checking your file"
             }
+            RowDetails { task: task.clone(), device_encoder_signatures: video::device_encoder_signatures() }
             div {
                 style: "display: flex; justify-content: flex-end; margin-top: 6px;",
                 button {
@@ -298,7 +304,6 @@ pub fn HashingRow(
     // the byte counts (prototype presentation) — the bar carries the progress.
     let pct = (12.0 + (100.0 - 12.0) * t).round().min(100.0);
     let label = format!("Checking files {pct:.0}% — Reading your file");
-    let video_details = build_video_details(&task, device_encoder_signatures);
     let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 4px;";
     let (card_border, card_bg) = card_tone(&task.state, false);
 
@@ -317,9 +322,7 @@ pub fn HashingRow(
                     "{format_size(task.size)}"
                 }
             }
-            if let Some(details) = video_details {
-                VideoInfoPopover { details }
-            }
+            RowDetails { task: task.clone(), device_encoder_signatures }
             for warning in task.validation_warnings.iter() {
                 div {
                     style: "{warning_style}",
@@ -405,12 +408,8 @@ pub fn StagedRow(
     let show_transcode_toggle = feature_enabled && is_video && transcode_useful && !rejected;
     let show_already_ok_badge = feature_enabled && is_video && !transcode_useful && !rejected;
 
-    // Probe data is built into the same shape — summary line + three
-    // popover groups — used by `HashingRow`. Lifting it out makes the
-    // hashing row light up with codec/resolution/fps the moment the
-    // quality check returns, instead of waiting for the row to land
-    // in `Staged`.
-    let video_details = build_video_details(&task, device_encoder_signatures);
+    // Row detail (Source metadata / device / raw tags + Org / path / size) is
+    // built by the shared `RowDetails` click-expand below, keyed off the task.
 
     // Required-metadata gate: a `Staged` clip whose capture metadata is neither
     // filled NOR skipped holds here until the user resolves it (fill or Skip).
@@ -484,9 +483,7 @@ pub fn StagedRow(
                 span { style: "font-size: 12px; color: var(--text-muted); flex-shrink: 0; margin-left: 8px;", "{format_size(task.size)}" }
             }
 
-            if let Some(details) = video_details.clone() {
-                VideoInfoPopover { details }
-            }
+            RowDetails { task: task.clone(), device_encoder_signatures }
 
             // Capture metadata, when set AND not mid-write: a green confirmation
             // line showing the recorded values, so the user can see at a glance
@@ -825,6 +822,8 @@ pub fn UploadTaskRow(
                 style: "font-size: 12px; color: var(--text-muted); margin-top: 4px;",
                 "{size_line}"
             }
+
+            RowDetails { task: task.clone(), device_encoder_signatures: video::device_encoder_signatures() }
 
             {
                 let show_progress = task.state.is_active() || task.state == UploadState::Paused;
