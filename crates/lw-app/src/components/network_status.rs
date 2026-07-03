@@ -133,10 +133,10 @@ pub fn NetworkStatusPill() -> Element {
 
     rsx! {
         div {
-            style: "position: relative; padding: 8px; border-top: 1px solid var(--border);",
+            style: "position: relative;",
             button {
-                style: "display: inline-flex; align-items: center; gap: 6px; height: 28px; width: 100%; \
-                        padding: 0 8px; border-radius: 6px; cursor: pointer; font-size: 11px; \
+                style: "display: inline-flex; align-items: center; gap: 6px; height: 28px; \
+                        max-width: 100%; padding: 0 8px; border-radius: 6px; cursor: pointer; font-size: 11px; \
                         font-weight: 500; color: {status.color()}; background: {status.pill_bg()}; \
                         border: 1px solid {status.pill_border()};",
                 "aria-label": "Network status: {status.label()}",
@@ -173,8 +173,9 @@ pub fn NetworkStatusPill() -> Element {
                     onclick: move |_| open.set(false),
                 }
                 div {
-                    style: "position: absolute; bottom: 100%; left: 8px; right: 8px; margin-bottom: 6px; \
-                            z-index: 50; background: var(--bg); border: 1px solid var(--border); \
+                    style: "position: absolute; top: 100%; right: 0; margin-top: 6px; \
+                            z-index: 50; width: 264px; max-width: calc(100vw - 24px); \
+                            background: var(--bg); border: 1px solid var(--border); \
                             border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.18); padding: 8px; \
                             max-height: 60vh; overflow-y: auto;",
                     div {
