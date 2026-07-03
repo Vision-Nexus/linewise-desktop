@@ -219,10 +219,11 @@ pub fn VideoInfoPopover(details: VideoDetails) -> Element {
 #[component]
 pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> Element {
     let task_id = task.id.clone();
+    let (card_border, card_bg) = card_tone(&task.state, false);
     rsx! {
         div {
-            class: "staged-row fade-in",
-            style: "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg);",
+            class: "card-row fade-in",
+            style: "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg};",
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
                 span {
@@ -299,11 +300,12 @@ pub fn HashingRow(
     let label = format!("Checking files {pct:.0}% — Reading your file");
     let video_details = build_video_details(&task, device_encoder_signatures);
     let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 4px;";
+    let (card_border, card_bg) = card_tone(&task.state, false);
 
     rsx! {
         div {
-            class: "staged-row fade-in",
-            style: "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg);",
+            class: "card-row fade-in",
+            style: "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg};",
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
                 span {
@@ -442,11 +444,11 @@ pub fn StagedRow(
     };
 
     let is_rejected = task.state == UploadState::Rejected;
-    let row_style = if is_rejected {
-        "padding: 10px 12px; border: 1px solid var(--error); border-radius: 6px; background: var(--error-bg); transition: background 0.15s, border-color 0.15s;"
-    } else {
-        "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg); transition: background 0.15s, border-color 0.15s;"
-    };
+    // Card tint by state: staged → sky, rejected → destructive (see `card_tone`).
+    let (card_border, card_bg) = card_tone(&task.state, false);
+    let row_style = format!(
+        "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg}; transition: background 0.15s, border-color 0.15s;"
+    );
     // Two severities, two palettes:
     //   * `warning_style` — recommend-band advisories, telemetry hints,
     //     missing-fingerprint nudges. Warn palette regardless of the
@@ -460,7 +462,7 @@ pub fn StagedRow(
 
     rsx! {
         div {
-            class: "staged-row fade-in",
+            class: "card-row fade-in",
             style: "{row_style}",
 
             // Filename + size, plus an inline REJECTED chip when applicable
@@ -674,18 +676,20 @@ pub fn UploadTaskRow(
         _ => (0, 0),
     };
 
-    let (status_color, status_bg) = match task.state {
-        UploadState::Completed => ("var(--success)", "var(--success-bg)"),
-        UploadState::Failed | UploadState::GaveUp => ("var(--error)", "var(--error-bg)"),
-        UploadState::Uploading => ("var(--info)", "var(--info-bg)"),
-        UploadState::Paused => ("var(--warning)", "var(--warning-bg)"),
-        _ => ("var(--text-muted)", "var(--bg-secondary)"),
-    };
+    // Already-exists rows (Completed + the reconcile marker) render as an amber
+    // "Already exists" chip instead of a plain "Completed".
+    let already_exists = task.error_message.as_deref() == Some(super::ALREADY_EXISTS_MARKER);
+    let (card_border, card_bg) = card_tone(&task.state, already_exists);
+    let (badge_bg, badge_fg) = badge_tone(&task.state, already_exists);
 
     // Collapse the engine's fine-grained state to the user-facing stage badge
     // (mirrors the prototype `displayStatusLabel`), so the chip reads
     // "Uploading" instead of internal jargon like "TRANSCODING"/"CREATING".
-    let badge_label = stage_badge_label(&task.state);
+    let badge_label = if already_exists {
+        "Already exists"
+    } else {
+        stage_badge_label(&task.state)
+    };
 
     let tenant_name = app_state.tenant_display_name(&task.tenant_id);
     let project_name = app_state.project_display_name(&task.tenant_id, &task.project_id);
@@ -721,7 +725,7 @@ pub fn UploadTaskRow(
     rsx! {
         div {
             class: "card-row",
-            style: "padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: {status_bg}; transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;",
+            style: "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg}; transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;",
 
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
@@ -739,7 +743,9 @@ pub fn UploadTaskRow(
                 div {
                     style: "display: flex; align-items: center; gap: 6px; margin-left: 8px; flex-shrink: 0;",
                     span {
-                        style: "font-size: 11px; color: {status_color}; font-weight: 600;",
+                        style: "display: inline-flex; align-items: center; height: 16px; padding: 0 6px; \
+                                font-size: 10px; font-weight: 500; border-radius: 4px; \
+                                background: {badge_bg}; color: {badge_fg}; white-space: nowrap;",
                         "{badge_label}"
                     }
                     // Action buttons based on state
@@ -999,6 +1005,63 @@ fn stage_badge_label(state: &UploadState) -> &'static str {
         UploadState::Rejected => "Rejected",
         UploadState::Completed => "Completed",
         UploadState::Failed | UploadState::GaveUp => "Failed",
+    }
+}
+
+/// Prototype `cardTone`: the row's `(border, background)` tint by stage. Uses
+/// low-alpha accent tints (mirroring the wave `bg-sky-500/[0.03]` approach) so
+/// the same values read correctly over both the light and dark app background.
+/// `already_exists` — a completed row whose marker says the content was already
+/// on the server — takes the amber tone. Checking and the upload stage stay
+/// neutral (Plan A's primary is neutral, so a "primary tint" would be invisible);
+/// the accent tints are reserved for the states the prototype colours.
+fn card_tone(state: &UploadState, already_exists: bool) -> (&'static str, &'static str) {
+    if already_exists {
+        return ("rgba(245,158,11,0.28)", "rgba(245,158,11,0.06)");
+    }
+    match state {
+        UploadState::QualityChecking
+        | UploadState::Hashing
+        | UploadState::Pending
+        | UploadState::Validating
+        | UploadState::Transcoding
+        | UploadState::Creating
+        | UploadState::Uploading
+        | UploadState::Verifying => ("var(--border)", "var(--bg-secondary)"),
+        UploadState::Staged => ("rgba(59,130,246,0.25)", "rgba(59,130,246,0.05)"),
+        UploadState::Paused => ("rgba(245,158,11,0.28)", "rgba(245,158,11,0.06)"),
+        UploadState::Completed => ("rgba(34,197,94,0.25)", "rgba(34,197,94,0.05)"),
+        UploadState::Failed | UploadState::GaveUp | UploadState::Rejected => {
+            ("rgba(239,68,68,0.28)", "rgba(239,68,68,0.05)")
+        }
+    }
+}
+
+/// Prototype `statusBadgeClass`: the badge pill's `(background, foreground)`.
+/// Same accent family as [`card_tone`], a touch stronger so the chip reads as a
+/// pill. Checking/upload-stage use a neutral chip; the coloured accents match
+/// the prototype for staged (sky), paused/already-exists (amber), completed
+/// (emerald) and failed/rejected (destructive).
+fn badge_tone(state: &UploadState, already_exists: bool) -> (&'static str, &'static str) {
+    if already_exists {
+        return ("rgba(245,158,11,0.15)", "var(--warning)");
+    }
+    match state {
+        UploadState::QualityChecking | UploadState::Hashing => {
+            ("var(--bg-tertiary)", "var(--text-secondary)")
+        }
+        UploadState::Staged => ("rgba(59,130,246,0.15)", "var(--info)"),
+        UploadState::Pending
+        | UploadState::Validating
+        | UploadState::Transcoding
+        | UploadState::Creating
+        | UploadState::Uploading
+        | UploadState::Verifying => ("var(--bg-tertiary)", "var(--text)"),
+        UploadState::Paused => ("rgba(245,158,11,0.15)", "var(--warning)"),
+        UploadState::Completed => ("rgba(34,197,94,0.15)", "var(--success)"),
+        UploadState::Failed | UploadState::GaveUp | UploadState::Rejected => {
+            ("rgba(239,68,68,0.12)", "var(--error)")
+        }
     }
 }
 
