@@ -149,6 +149,11 @@ input:focus { border-color: var(--border-focus) !important; box-shadow: var(--fo
 @keyframes lw-spin { to { transform: rotate(360deg); } }
 .lw-spin { animation: lw-spin 0.8s linear infinite; transform-origin: center; }
 
+/* Ping (network pill degraded dot + sidebar in-progress batch dot): a fading
+   expanding ring behind the solid dot. */
+@keyframes lw-ping { 75%, 100% { transform: scale(2); opacity: 0; } }
+.lw-ping { animation: lw-ping 1s cubic-bezier(0, 0, 0.2, 1) infinite; }
+
 /* ── Scrollbar ───────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

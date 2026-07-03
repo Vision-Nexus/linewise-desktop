@@ -31,7 +31,6 @@
 mod completed;
 mod failed;
 mod in_progress;
-mod network_chip;
 mod overview;
 mod rows;
 mod tabs;
@@ -57,7 +56,6 @@ use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload;
 use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
-use network_chip::NetworkChip;
 use overview::BatchOverview;
 use std::path::{Path, PathBuf};
 use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
@@ -750,8 +748,7 @@ pub fn TransferPanel() -> Element {
                 div {
                     style: "display: flex; align-items: center; gap: 10px;",
                     h2 { style: "margin: 0; font-size: 16px; font-weight: 600;", "Transfers" }
-                    // Signal-strength chip — renders nothing until the first probe.
-                    NetworkChip {}
+                    // Network status now lives in the sidebar footer pill.
                     // Debug-only sample seeder; compiles out of release builds.
                     DevSeedButton {}
                 }

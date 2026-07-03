@@ -1,5 +1,62 @@
+use crate::components::network_status::NetworkStatusPill;
 use crate::state::{AppState, CoreServices};
 use dioxus::prelude::*;
+use lw_core::models::{UploadState, UploadTask};
+
+/// Per-batch nav dot for a project row (mirrors the prototype `getBatchNavStatus`).
+/// `None` = idle (no tasks) → no dot. Otherwise a coloured dot + tooltip; the
+/// in-progress dot pulses.
+struct NavDot {
+    color: &'static str,
+    pulse: bool,
+    tooltip: String,
+}
+
+fn compute_nav_dot(tasks: &[UploadTask], tenant_id: &str, project_id: &str) -> Option<NavDot> {
+    let (mut total, mut completed, mut failed, mut in_progress) = (0usize, 0usize, 0usize, 0usize);
+    for t in tasks
+        .iter()
+        .filter(|t| t.tenant_id == tenant_id && t.project_id == project_id)
+    {
+        total += 1;
+        match t.state {
+            UploadState::Completed => completed += 1,
+            UploadState::Failed | UploadState::GaveUp | UploadState::Rejected => failed += 1,
+            UploadState::QualityChecking
+            | UploadState::Hashing
+            | UploadState::Staged
+            | UploadState::Pending
+            | UploadState::Validating
+            | UploadState::Transcoding
+            | UploadState::Creating
+            | UploadState::Uploading
+            | UploadState::Verifying
+            | UploadState::Paused => in_progress += 1,
+        }
+    }
+    if total == 0 {
+        return None;
+    }
+    if in_progress > 0 {
+        return Some(NavDot {
+            color: "var(--info)",
+            pulse: true,
+            tooltip: format!("{completed} of {total} videos \u{00B7} {in_progress} in progress"),
+        });
+    }
+    if failed > 0 {
+        return Some(NavDot {
+            color: "var(--error)",
+            pulse: false,
+            tooltip: format!("Batch complete \u{00B7} {completed} succeeded \u{00B7} {failed} failed"),
+        });
+    }
+    Some(NavDot {
+        color: "var(--success)",
+        pulse: false,
+        tooltip: format!("Batch complete \u{00B7} {completed} of {total} videos"),
+    })
+}
 
 /// Group id used by the backend for vision-lab tenants. Matches
 /// `parentGroupId` values returned in `TenantInfo`. Hardcoded here on
@@ -132,6 +189,10 @@ pub fn Sidebar() -> Element {
         .and_then(|t| app_state.tenant_projects.read().get(&t.id).cloned())
         .unwrap_or_default();
 
+    // Live per-batch nav dots read the global task list — this subscribes the
+    // sidebar so the dots update as uploads progress/complete/fail.
+    let upload_tasks = app_state.upload_tasks.read();
+
     // Real-time filter: case-insensitive substring match on the org's display
     // name. Empty query → all orgs. Recomputed every keystroke (re-render).
     let org_query_lc = org_query.read().trim().to_lowercase();
@@ -238,6 +299,10 @@ pub fn Sidebar() -> Element {
                         }
                     }
                 }
+
+                // Network status pill — sits at the bottom of the Orgs column
+                // (always present), mapping the real 4-tier probe to Good/Slow/Offline.
+                NetworkStatusPill {}
             }
 
             if selected_tenant.is_some() {
@@ -282,16 +347,32 @@ pub fn Sidebar() -> Element {
                                 };
                                 let tenant = selected_tenant.clone().expect("checked is_some above");
                                 let project = project.clone();
+                                let nav = compute_nav_dot(&upload_tasks, &tenant.id, &project.id);
                                 rsx! {
                                     div {
                                         key: "{project.id}",
-                                        class: "px-4 py-2 mx-2 rounded cursor-pointer text-sm transition-colors {active_class}",
+                                        class: "px-4 py-2 mx-2 rounded cursor-pointer text-sm transition-colors flex items-center justify-between gap-1.5 {active_class}",
                                         onclick: move |_| {
                                             app_state.selected_project.set(Some(project.clone()));
                                             let projects = app_state.tenant_projects.read().get(&tenant.id).cloned().unwrap_or_default();
                                             app_state.projects.set(projects);
                                         },
-                                        "{project.name}"
+                                        span { class: "truncate min-w-0", "{project.name}" }
+                                        if let Some(dot) = nav {
+                                            span {
+                                                style: "position: relative; display: inline-flex; width: 8px; height: 8px; flex-shrink: 0;",
+                                                title: "{dot.tooltip}",
+                                                if dot.pulse {
+                                                    span {
+                                                        class: "lw-ping",
+                                                        style: "position: absolute; inset: 0; border-radius: 999px; background: {dot.color};",
+                                                    }
+                                                }
+                                                span {
+                                                    style: "position: relative; width: 8px; height: 8px; border-radius: 999px; background: {dot.color};",
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -475,9 +475,9 @@ fn MainView() -> Element {
             div {
                 style: "flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; position: relative;",
 
-                // Weak-network prompt: appears when connectivity has been weak
-                // for longer than the grace period. Non-modal, above the panel.
-                crate::components::weak_network_banner::WeakNetworkBanner {}
+                // Weak/offline guidance now lives in the sidebar network status
+                // pill's popover (see `network_status::NetworkStatusPill`), so
+                // there is no separate banner row here.
 
                 main {
                     style: "flex: 1; overflow-y: auto; padding: 16px;",
