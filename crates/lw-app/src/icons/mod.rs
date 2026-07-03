@@ -206,3 +206,111 @@ pub fn MicrosoftIcon() -> Element {
         }
     }
 }
+
+// ── Action icons (lucide, 14px, currentColor) — for button/label parity with the
+//    wave design system. Sized 14px to sit in the dense row/toolbar buttons. ──
+
+#[component]
+pub fn UploadIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }
+            polyline { points: "17 8 12 3 7 8" }
+            line { x1: "12", y1: "3", x2: "12", y2: "15" }
+        }
+    }
+}
+
+#[component]
+pub fn AlertTriangleIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" }
+            path { d: "M12 9v4" }
+            path { d: "M12 17h.01" }
+        }
+    }
+}
+
+#[component]
+pub fn PauseIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            rect { x: "14", y: "4", width: "4", height: "16", rx: "1" }
+            rect { x: "6", y: "4", width: "4", height: "16", rx: "1" }
+        }
+    }
+}
+
+#[component]
+pub fn PlayIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            polygon { points: "6 3 20 12 6 21 6 3" }
+        }
+    }
+}
+
+#[component]
+pub fn RetryIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" }
+            path { d: "M3 3v5h5" }
+        }
+    }
+}
+
+#[component]
+pub fn TrashIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M3 6h18" }
+            path { d: "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }
+            line { x1: "10", y1: "11", x2: "10", y2: "17" }
+            line { x1: "14", y1: "11", x2: "14", y2: "17" }
+        }
+    }
+}
+
+#[component]
+pub fn ChevronRightIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "m9 18 6-6-6-6" }
+        }
+    }
+}
+
+#[component]
+pub fn ChevronDownIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "m6 9 6 6 6-6" }
+        }
+    }
+}

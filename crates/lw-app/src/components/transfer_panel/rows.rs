@@ -288,7 +288,7 @@ pub fn HashingRow(
         pct,
     );
     let video_details = build_video_details(&task, device_encoder_signatures);
-    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 3px;";
+    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 4px;";
 
     rsx! {
         div {
@@ -417,7 +417,7 @@ pub fn StagedRow(
     let needs_metadata =
         task.state == UploadState::Staged && capture.is_none() && !skipped && embedding.is_none();
 
-    let btn_style = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
+    let btn_style = "height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
     let transcode_btn_style = if transcode_on {
         format!(
             "{btn_style} background: var(--btn-primary); color: white; border-color: var(--btn-primary);"
@@ -445,8 +445,8 @@ pub fn StagedRow(
     //     "you might want to" lines from the "this won't upload" lines.
     //   * `reason_style` — acceptance-band reject reasons. Always
     //     error-coloured; only present on rejected rows.
-    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 3px;";
-    let reason_style = "font-size: 11px; color: var(--error); margin-top: 4px; padding: 3px 6px; background: var(--bg); border: 1px solid var(--error); border-radius: 3px;";
+    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 4px;";
+    let reason_style = "font-size: 11px; color: var(--error); margin-top: 4px; padding: 3px 6px; background: var(--bg); border: 1px solid var(--error); border-radius: 4px;";
 
     rsx! {
         div {
@@ -462,7 +462,7 @@ pub fn StagedRow(
                         style: "font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
                         if is_rejected {
                             span {
-                                style: "display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; padding: 1px 5px; margin-right: 6px; border-radius: 3px; background: var(--error); color: white; vertical-align: 1px;",
+                                style: "display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: 0.05em; padding: 1px 5px; margin-right: 6px; border-radius: 4px; background: var(--error); color: white; vertical-align: 1px;",
                                 "REJECTED"
                             }
                         }
@@ -483,7 +483,7 @@ pub fn StagedRow(
             // "Needs metadata" warning shows instead).
             if let Some(m) = capture.as_ref().filter(|_| embedding.is_none()) {
                 div {
-                    style: "font-size: 11px; color: var(--success, #16a34a); margin-top: 4px; padding: 3px 6px; background: var(--success-bg, rgba(22,163,74,0.1)); border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                    style: "font-size: 11px; color: var(--success); margin-top: 4px; padding: 3px 6px; background: var(--success-bg); border-radius: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
                     title: "Capture metadata written into this clip's file.",
                     "\u{2713} {capture_summary(m)}"
                 }
@@ -494,7 +494,7 @@ pub fn StagedRow(
             // distinct from the green "filled" line. "Add metadata" stays available.
             if skipped && capture.is_none() && embedding.is_none() {
                 div {
-                    style: "font-size: 11px; color: var(--text-muted); margin-top: 4px; padding: 3px 6px; background: var(--bg-secondary, rgba(0,0,0,0.04)); border-radius: 3px;",
+                    style: "font-size: 11px; color: var(--text-muted); margin-top: 4px; padding: 3px 6px; background: var(--bg-secondary, rgba(0,0,0,0.04)); border-radius: 4px;",
                     title: "Capture metadata was skipped for this clip — it uploads without io.visionlab tags.",
                     "Capture metadata skipped"
                 }
@@ -552,7 +552,7 @@ pub fn StagedRow(
                 style: "display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 8px;",
                 if needs_metadata {
                     span {
-                        style: "margin-right: auto; font-size: 11px; color: var(--warning); padding: 2px 6px; border-radius: 3px; background: var(--warning-bg); border: 1px solid var(--warning);",
+                        style: "margin-right: auto; font-size: 11px; color: var(--warning); padding: 2px 6px; border-radius: 4px; background: var(--warning-bg); border: 1px solid var(--warning);",
                         title: "Capture metadata is required before this clip uploads.",
                         "\u{26A0} Needs metadata"
                     }
@@ -580,7 +580,7 @@ pub fn StagedRow(
                 }
                 if show_already_ok_badge {
                     span {
-                        style: "font-size: 11px; color: var(--text-secondary); padding: 2px 6px; border-radius: 3px; background: var(--bg-secondary); border: 1px solid var(--border);",
+                        style: "font-size: 11px; color: var(--text-secondary); padding: 2px 6px; border-radius: 4px; background: var(--bg-secondary); border: 1px solid var(--border);",
                         title: "Source already at or below transcode targets — no benefit to re-encoding.",
                         "Already matches targets"
                     }
@@ -724,7 +724,7 @@ pub fn UploadTaskRow(
                     {
                         let id1 = task.id.clone();
                         let id2 = task.id.clone();
-                        let small_btn = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; transition: background 0.15s, transform 0.08s;";
+                        let small_btn = "display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; cursor: pointer; transition: background 0.15s, transform 0.08s;";
                         match task.state {
                             UploadState::Uploading
                             | UploadState::Validating
@@ -736,6 +736,7 @@ pub fn UploadTaskRow(
                                     class: "btn-outline",
                                     style: "{small_btn} background: transparent; color: var(--warning); border: 1px solid var(--warning);",
                                     onclick: move |_| on_pause.call(id1.clone()),
+                                    crate::icons::PauseIcon {}
                                     "Pause"
                                 }
                             },
@@ -744,12 +745,14 @@ pub fn UploadTaskRow(
                                     class: "btn-primary",
                                     style: "{small_btn} background: var(--btn-primary); color: white; border: none;",
                                     onclick: move |_| on_resume.call(id1.clone()),
+                                    crate::icons::PlayIcon {}
                                     "Resume"
                                 }
                                 button {
                                     class: "btn-danger-sm",
                                     style: "{small_btn} background: transparent; color: var(--error); border: 1px solid var(--error);",
                                     onclick: move |_| on_remove.call(id2.clone()),
+                                    crate::icons::TrashIcon {}
                                     "Remove"
                                 }
                             },
@@ -761,20 +764,23 @@ pub fn UploadTaskRow(
                                     class: "btn-primary",
                                     style: "{small_btn} background: var(--btn-primary); color: white; border: none;",
                                     onclick: move |_| on_retry.call(id1.clone()),
+                                    crate::icons::RetryIcon {}
                                     "Retry"
                                 }
                                 button {
                                     class: "btn-danger-sm",
                                     style: "{small_btn} background: transparent; color: var(--error); border: 1px solid var(--error);",
                                     onclick: move |_| on_remove.call(id2.clone()),
+                                    crate::icons::TrashIcon {}
                                     "Remove"
                                 }
                             },
                             UploadState::Completed => rsx! {
                                 button {
                                     class: "btn-outline",
-                                    style: "{small_btn} background: transparent; color: var(--text-muted); border: 1px solid var(--border);",
+                                    style: "{small_btn} background: transparent; color: var(--text); border: 1px solid var(--border);",
                                     onclick: move |_| on_remove.call(id1.clone()),
+                                    crate::icons::TrashIcon {}
                                     "Clear"
                                 }
                             },
@@ -866,21 +872,24 @@ pub fn UploadTaskRow(
 
             if let Some(ref err) = task.error_message {
                 div {
-                    style: "font-size: 12px; color: var(--error); margin-top: 4px; padding: 6px 8px; background: var(--error-bg); border-radius: 4px;",
-                    "{err}"
+                    style: "display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--error); margin-top: 4px; padding: 6px 8px; background: var(--error-bg); border-radius: 4px;",
+                    crate::icons::AlertTriangleIcon {}
+                    span { "{err}" }
                 }
             }
 
             for reason in task.rejection_reasons.iter() {
                 div {
-                    style: "font-size: 12px; color: var(--error); margin-top: 2px; padding: 4px 8px; background: var(--error-bg); border-radius: 4px;",
-                    "{reason}"
+                    style: "display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--error); margin-top: 2px; padding: 4px 8px; background: var(--error-bg); border-radius: 4px;",
+                    crate::icons::AlertTriangleIcon {}
+                    span { "{reason}" }
                 }
             }
             for warning in task.validation_warnings.iter() {
                 div {
-                    style: "font-size: 12px; color: var(--warning); margin-top: 2px; padding: 4px 8px; background: var(--warning-bg); border-radius: 4px;",
-                    "{warning}"
+                    style: "display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--warning); margin-top: 2px; padding: 4px 8px; background: var(--warning-bg); border-radius: 4px;",
+                    crate::icons::AlertTriangleIcon {}
+                    span { "{warning}" }
                 }
             }
         }

@@ -709,7 +709,7 @@ pub fn TransferPanel() -> Element {
                 style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;",
                 div {
                     style: "display: flex; align-items: center; gap: 10px;",
-                    h2 { style: "margin: 0; font-size: 16px;", "Transfers" }
+                    h2 { style: "margin: 0; font-size: 16px; font-weight: 600;", "Transfers" }
                     // Signal-strength chip — renders nothing until the first probe.
                     NetworkChip {}
                 }
@@ -730,7 +730,9 @@ pub fn TransferPanel() -> Element {
                                     let next = !*upload_menu_open.read();
                                     upload_menu_open.set(next);
                                 },
+                                crate::icons::UploadIcon {}
                                 "Upload"
+                                crate::icons::ChevronDownIcon {}
                             }
                             if *upload_menu_open.read() {
                                 div {
@@ -773,7 +775,9 @@ pub fn TransferPanel() -> Element {
                             style: "{styles::BTN_DISABLED}",
                             disabled: true,
                             title: "Select a project in the sidebar to enable uploading",
+                            crate::icons::UploadIcon {}
                             "Upload"
+                            crate::icons::ChevronDownIcon {}
                         }
                     }
                 }
@@ -819,18 +823,20 @@ pub fn TransferPanel() -> Element {
                     if active_tab == PrimaryTab::Failed {
                         button {
                             class: "btn-outline",
-                            style: "height: 26px; padding: 0 10px; font-size: 12px; border-radius: 4px; cursor: pointer; background: transparent; color: var(--text); border: 1px solid var(--border);",
+                            style: "display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; cursor: pointer; background: transparent; color: var(--text); border: 1px solid var(--border);",
                             title: "Retry all network failures",
                             onclick: on_retry_all,
+                            crate::icons::RetryIcon {}
                             "Retry all"
                         }
                     }
                     if active_tab == PrimaryTab::Completed {
                         button {
                             class: "btn-outline",
-                            style: "height: 26px; padding: 0 10px; font-size: 12px; border-radius: 4px; cursor: pointer; background: transparent; color: var(--text-muted); border: 1px solid var(--border);",
+                            style: "display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; cursor: pointer; background: transparent; color: var(--text); border: 1px solid var(--border);",
                             title: "Remove all completed rows from history",
                             onclick: on_clear_completed,
+                            crate::icons::TrashIcon {}
                             "Clear completed"
                         }
                     }

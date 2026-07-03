@@ -368,7 +368,7 @@ fn AccountPane() -> Element {
                 div {
                     style: "width: 48px; height: 48px; border-radius: 9999px; flex-shrink: 0; \
                             display: flex; align-items: center; justify-content: center; \
-                            background: rgba(37,99,235,0.1); color: var(--btn-primary); \
+                            background: var(--bg-secondary); color: var(--text); \
                             font-size: 18px; font-weight: 600;",
                     "{avatar_initial}"
                 }

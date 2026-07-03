@@ -10,6 +10,7 @@ pub const SIDEBAR_WIDTH: u32 = 240;
 // ── Button styles (using CSS vars for theme) ───────────────────────────
 
 pub const BTN_PRIMARY: &str = "\
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px; \
     height: 32px; padding: 0 16px; \
     background: var(--btn-primary); color: white; \
     border: none; border-radius: 6px; \
@@ -18,6 +19,7 @@ pub const BTN_PRIMARY: &str = "\
     user-select: none;";
 
 pub const BTN_SUCCESS: &str = "\
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px; \
     height: 32px; padding: 0 16px; \
     background: var(--btn-success); color: white; \
     border: none; border-radius: 6px; \
@@ -26,6 +28,7 @@ pub const BTN_SUCCESS: &str = "\
     user-select: none;";
 
 pub const BTN_OUTLINE: &str = "\
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px; \
     height: 32px; padding: 0 14px; \
     background: var(--btn-outline-bg); color: var(--text); \
     border: 1px solid var(--border); border-radius: 6px; \
@@ -34,6 +37,7 @@ pub const BTN_OUTLINE: &str = "\
     user-select: none;";
 
 pub const BTN_DANGER_SM: &str = "\
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px; \
     height: 28px; padding: 0 10px; \
     background: transparent; color: var(--error); \
     border: 1px solid var(--error); border-radius: 4px; \
@@ -42,6 +46,7 @@ pub const BTN_DANGER_SM: &str = "\
     user-select: none;";
 
 pub const BTN_DISABLED: &str = "\
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px; \
     height: 32px; padding: 0 16px; \
     background: var(--btn-disabled); color: var(--btn-disabled-text); \
     border: none; border-radius: 6px; \

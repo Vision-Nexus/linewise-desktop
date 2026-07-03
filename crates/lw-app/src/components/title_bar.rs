@@ -245,7 +245,7 @@ fn WindowControls() -> Element {
             }
         }
         button {
-            class: "w-12 h-9 flex items-center justify-center hover:bg-red-500 hover:text-white text-muted-foreground appearance-none border-none bg-transparent cursor-pointer",
+            class: "w-12 h-9 flex items-center justify-center hover:bg-destructive hover:text-white text-muted-foreground appearance-none border-none bg-transparent cursor-pointer",
             title: "Close",
             aria_label: "Close",
             onmousedown: move |e| e.stop_propagation(),

@@ -37,7 +37,7 @@
   background: var(--bg);
   box-shadow: 0 4px 20px rgb(0 0 0 / 20%);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  /* Inherit Inter from body (Plan A) — no system-font override. */
   will-change: transform;
 }
 
@@ -92,7 +92,7 @@
 .sheet-title {
   margin: 0;
   color: var(--text);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
 }
 

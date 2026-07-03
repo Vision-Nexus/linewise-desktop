@@ -433,9 +433,9 @@ fn OutcomeList(outcome: Vec<OutcomeRow>) -> Element {
                     style: "display: flex; gap: 8px; align-items: flex-start; font-size: 12px;",
                     span {
                         style: if row.ok {
-                            "color: var(--success); font-weight: 700; min-width: 14px;"
+                            "color: var(--success); font-weight: 600; min-width: 14px;"
                         } else {
-                            "color: var(--error); font-weight: 700; min-width: 14px;"
+                            "color: var(--error); font-weight: 600; min-width: 14px;"
                         },
                         if row.ok { "✓" } else { "✗" }
                     }

@@ -46,7 +46,7 @@ pub fn VersionUpdateBanner() -> Element {
                 style: "width: 18px; height: 18px; border-radius: 9999px; \
                         background: var(--info); color: white; \
                         display: flex; align-items: center; justify-content: center; \
-                        font-size: 12px; font-weight: 700; flex-shrink: 0;",
+                        font-size: 12px; font-weight: 600; flex-shrink: 0;",
                 "i"
             }
             span {

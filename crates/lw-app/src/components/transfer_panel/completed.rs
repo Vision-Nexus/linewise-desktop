@@ -174,7 +174,7 @@ fn CompletedDetail(
             style: "display: flex; justify-content: flex-end; margin-top: 8px;",
             button {
                 class: "btn-outline",
-                style: "height: 24px; padding: 0 10px; font-size: 11px; border-radius: 4px; cursor: pointer; background: transparent; color: var(--text); border: 1px solid var(--border);",
+                style: "height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; cursor: pointer; background: transparent; color: var(--text); border: 1px solid var(--border);",
                 onclick: on_locate,
                 "Locate in sidebar"
             }

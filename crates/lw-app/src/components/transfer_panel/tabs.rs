@@ -93,7 +93,7 @@ pub const TRANSFER_TAB_CSS: &str = r#"
     font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
-    border-radius: 14px;
+    border-radius: 999px;
     transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 .lw-subtab.is-active {
