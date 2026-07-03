@@ -179,6 +179,34 @@ fn stage_error_toast(path: &Path, err: &UploadError) -> String {
     }
 }
 
+/// Dev-only affordance: seeds the transfer panel with one sample task per
+/// state so the three In-progress stages, Completed and Failed can be reviewed
+/// without logging in or moving real files. Both the seeder
+/// (`AppState::seed_sample_tasks`) and this button's active body are
+/// `#[cfg(debug_assertions)]`; in a release build the component renders nothing
+/// and references none of that code, so no dev affordance ever ships.
+#[component]
+fn DevSeedButton() -> Element {
+    #[cfg(not(debug_assertions))]
+    return rsx! {};
+
+    #[cfg(debug_assertions)]
+    {
+        let mut app_state = use_context::<AppState>();
+        rsx! {
+            button {
+                style: "display: inline-flex; align-items: center; gap: 5px; height: 24px; \
+                        padding: 0 8px; font-size: 11px; border-radius: 6px; cursor: pointer; \
+                        background: transparent; color: var(--text-muted); \
+                        border: 1px dashed var(--border);",
+                title: "Debug only: fill the panel with one sample task per state",
+                onclick: move |_| app_state.seed_sample_tasks(),
+                "Seed samples"
+            }
+        }
+    }
+}
+
 #[component]
 pub fn TransferPanel() -> Element {
     let app_state = use_context::<AppState>();
@@ -712,6 +740,8 @@ pub fn TransferPanel() -> Element {
                     h2 { style: "margin: 0; font-size: 16px; font-weight: 600;", "Transfers" }
                     // Signal-strength chip — renders nothing until the first probe.
                     NetworkChip {}
+                    // Debug-only sample seeder; compiles out of release builds.
+                    DevSeedButton {}
                 }
                 div {
                     style: "display: flex; gap: 8px; align-items: center;",
