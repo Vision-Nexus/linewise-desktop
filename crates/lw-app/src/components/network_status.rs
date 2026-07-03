@@ -173,7 +173,10 @@ pub fn NetworkStatusPill() -> Element {
                     onclick: move |_| open.set(false),
                 }
                 div {
-                    style: "position: absolute; top: 100%; right: 0; margin-top: 6px; \
+                    // Open downward-and-right (into the main content), not left:
+                    // the pill sits at the right of the ~240px sidebar, so a
+                    // right-anchored popover overflows the window's left edge.
+                    style: "position: absolute; top: 100%; left: 0; margin-top: 6px; \
                             z-index: 50; width: 264px; max-width: calc(100vw - 24px); \
                             background: var(--bg); border: 1px solid var(--border); \
                             border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.18); padding: 8px; \
