@@ -32,6 +32,7 @@ mod completed;
 mod failed;
 mod in_progress;
 mod network_chip;
+mod overview;
 mod rows;
 mod tabs;
 
@@ -57,6 +58,7 @@ use lw_core::upload;
 use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
 use network_chip::NetworkChip;
+use overview::BatchOverview;
 use std::path::{Path, PathBuf};
 use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
 
@@ -294,6 +296,16 @@ pub fn TransferPanel() -> Element {
         .iter()
         .filter(|t| PrimaryTab::Failed.contains(&t.state))
         .count();
+
+    // Batch overview summary — pure-derived from the (possibly narrowed) task
+    // list plus the live progress/speed maps. Cheap plain-number struct; the
+    // `BatchOverview` card renders nothing when the panel has no tasks.
+    let overview_summary = {
+        let up = upload_progress.read();
+        let hp = hash_progress.read();
+        let sp = upload_speed.read();
+        overview::compute_summary(&tasks, &up, &hp, &sp)
+    };
 
     // "Ready" = staged AND its required capture metadata is RESOLVED (filled or
     // skipped). The manual Upload only dispatches these (`confirm_staged` skips the
@@ -812,6 +824,10 @@ pub fn TransferPanel() -> Element {
                     }
                 }
             }
+
+            // Batch overview — overall %, X of N videos, bytes, ETA, aggregate
+            // speed + a segmented progress bar. Pure-derived; hidden when empty.
+            BatchOverview { summary: overview_summary }
 
             // Primary tab strip + per-project chip + toolbar.
             div {

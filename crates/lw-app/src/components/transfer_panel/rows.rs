@@ -222,7 +222,7 @@ pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> 
     let (card_border, card_bg) = card_tone(&task.state, false);
     rsx! {
         div {
-            class: "card-row fade-in",
+            class: "staged-row fade-in",
             style: "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg};",
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
@@ -304,7 +304,7 @@ pub fn HashingRow(
 
     rsx! {
         div {
-            class: "card-row fade-in",
+            class: "staged-row fade-in",
             style: "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg};",
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
@@ -462,7 +462,7 @@ pub fn StagedRow(
 
     rsx! {
         div {
-            class: "card-row fade-in",
+            class: "staged-row fade-in",
             style: "{row_style}",
 
             // Filename + size, plus an inline REJECTED chip when applicable
@@ -957,11 +957,41 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
     }
 }
 
+/// 0–100% progress within the "Checking files" stage — quality-check is a fixed
+/// 8% (network round-trip, no live signal), hashing is `lerp(12→100)` over the
+/// hashed bytes. Mirrors the prototype `checkingProgressPct`. Shared with the
+/// batch overview so its byte weighting matches the per-row bars.
+pub(super) fn checking_stage_pct(state: &UploadState, hashed: u64, total: u64) -> u32 {
+    match state {
+        UploadState::QualityChecking => 8,
+        UploadState::Hashing => {
+            let t = if total > 0 {
+                hashed as f64 / total as f64
+            } else {
+                0.0
+            };
+            (12.0 + (100.0 - 12.0) * t).round().min(100.0) as u32
+        }
+        UploadState::Staged
+        | UploadState::Pending
+        | UploadState::Validating
+        | UploadState::Transcoding
+        | UploadState::Creating
+        | UploadState::Uploading
+        | UploadState::Verifying
+        | UploadState::Paused
+        | UploadState::Rejected
+        | UploadState::Completed
+        | UploadState::Failed
+        | UploadState::GaveUp => 0,
+    }
+}
+
 /// 0–100% progress within the "Uploading" stage — fixed markers for the
 /// server-prep sub-states, `lerp(22→96)` for the actual transfer. Mirrors the
 /// prototype `uploadStageProgressPct`. Transcoding is handled by the caller
 /// (it borrows the live transcode %), so it returns 0 here.
-fn upload_stage_pct(state: &UploadState, uploaded: u64, total: u64) -> u32 {
+pub(super) fn upload_stage_pct(state: &UploadState, uploaded: u64, total: u64) -> u32 {
     match state {
         UploadState::Pending => 2,
         UploadState::Validating => 10,

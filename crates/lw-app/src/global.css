@@ -138,7 +138,16 @@ input:focus { border-color: var(--border-focus) !important; box-shadow: var(--fo
    overflowing the row) that the implied paint containment would clip. */
 .card-row { content-visibility: auto; contain-intrinsic-size: auto 76px; }
 .card-row:hover { border-color: var(--border-hover) !important; box-shadow: var(--shadow-sm); }
-.staged-row:hover { background: var(--staged-hover) !important; }
+/* `.staged-row` keeps its own class (not `.card-row`) because it hosts a
+   640px hover popover that `.card-row`'s content-visibility would clip. Its
+   hover is the same neutral treatment as `.card-row`; the per-state tint is set
+   inline via `card_tone`, so hover must not repaint the background. */
+.staged-row:hover { border-color: var(--border-hover) !important; box-shadow: var(--shadow-sm); }
+
+/* Spinner (batch overview "active work" indicator). Self-contained keyframe so
+   we don't depend on a utility framework. */
+@keyframes lw-spin { to { transform: rotate(360deg); } }
+.lw-spin { animation: lw-spin 0.8s linear infinite; transform-origin: center; }
 
 /* ── Scrollbar ───────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; }
