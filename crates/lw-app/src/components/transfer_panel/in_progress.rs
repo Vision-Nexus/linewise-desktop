@@ -1,12 +1,15 @@
-//! In Progress tab: every row the engine is still working on, plus the
-//! pre-upload staging rows (Checking / Hashing / Ready to Upload) and
-//! Paused rows.
+//! In Progress tab: every row the engine is still working on, partitioned
+//! into the prototype's three user-facing stages.
 //!
-//! The list keeps the section breakdown the old queue had — Checking,
-//! Hashing, Ready to Upload, Preparing (transcode), Uploading — minus the
-//! terminal buckets (Rejected went to Failed/Quality; Completed/Failed went
-//! to their own tabs). Rows are rendered through the shared components in
-//! `rows.rs`; this module only does the per-section partition.
+//! 1. **Checking files** — quality check + hashing (reading/verifying the file).
+//! 2. **In queue** — staged rows that passed checks, waiting for the next stage.
+//! 3. **Uploading** — server-prep + transfer + verify + Paused. Transcoding
+//!    folds in here (no user-facing transcode stage — transcode is a server
+//!    concern, see D1 in `docs/UI-1TO1-PORT-PLAN.md`).
+//!
+//! Terminal buckets live in their own tabs (Rejected → Failed/Quality;
+//! Completed/Failed → their own tabs). Rows are rendered through the shared
+//! components in `rows.rs`; this module only does the per-stage partition.
 
 use super::rows::{HashingRow, QualityCheckingRow, SectionHeader, StagedRow, UploadTaskRow};
 use dioxus::prelude::*;
@@ -38,6 +41,9 @@ pub fn InProgressList(
     on_pause: EventHandler<String>,
     on_resume: EventHandler<String>,
 ) -> Element {
+    // The prototype collapses the pipeline into three user-facing stages.
+    // Stage 1 — "Checking files": quality check + hashing merged (both are
+    // "reading and verifying the file" from the user's point of view).
     let quality_checking: Vec<_> = tasks
         .iter()
         .filter(|t| t.state == UploadState::QualityChecking)
@@ -48,35 +54,29 @@ pub fn InProgressList(
         .filter(|t| t.state == UploadState::Hashing)
         .cloned()
         .collect();
+    // Stage 2 — "In queue": passed checks, waiting for the next stage.
     let staged: Vec<_> = tasks
         .iter()
         .filter(|t| t.state == UploadState::Staged)
         .cloned()
         .collect();
-    let transcoding: Vec<_> = tasks
+    // Stage 3 — "Uploading": everything the engine is actively moving through
+    // the upload pipeline (server-prep + transfer + verify), plus `Paused`
+    // rows (shown in place with a Resume button — `is_active()` is false for
+    // them, but the user expects the row to stay where they left it).
+    //
+    // Transcoding folds in here: there is NO user-facing transcode stage on
+    // the desktop (transcode is a server concern — see D1). The engine may
+    // still transcode, but a transcoding row simply reads as "Uploading"
+    // rather than getting its own "Preparing" section.
+    let uploading: Vec<_> = tasks
         .iter()
-        .filter(|t| t.state == UploadState::Transcoding)
-        .cloned()
-        .collect();
-    // `Paused` rows belong in the active section even though
-    // `is_active()` returns false for them — `is_active` means "engine
-    // is processing this row," and a paused row isn't. But the user
-    // expects to see the row right where they left it, with a Resume
-    // button, instead of having it vanish out of every section.
-    let active: Vec<_> = tasks
-        .iter()
-        .filter(|t| {
-            (t.state.is_active() || t.state == UploadState::Paused)
-                && t.state != UploadState::Transcoding
-        })
+        .filter(|t| t.state.is_active() || t.state == UploadState::Paused)
         .cloned()
         .collect();
 
-    let everything_empty = quality_checking.is_empty()
-        && hashing.is_empty()
-        && staged.is_empty()
-        && transcoding.is_empty()
-        && active.is_empty();
+    let checking_count = quality_checking.len() + hashing.len();
+    let everything_empty = checking_count == 0 && staged.is_empty() && uploading.is_empty();
 
     rsx! {
         if everything_empty {
@@ -85,52 +85,42 @@ pub fn InProgressList(
                 "Nothing in progress"
             }
         } else {
-            // Section order is "closest-to-done first": actively-uploading rows
-            // are pinned to the TOP (with their live "Uploading N" count), then
-            // Preparing / Ready to Upload, then the back-of-queue Hashing /
-            // Checking. Before this, "Uploading" rendered LAST — so when a big
-            // batch was still hashing/checking, the in-flight uploads were pushed
-            // below the fold and the user had to scroll to see any upload at all.
-            if !active.is_empty() {
-                SectionHeader { title: "Uploading", count: active.len() }
+            // Prototype stage order (step 1 → 3): Checking files → In queue →
+            // Uploading. The overview header and (later) the stage-filter pills
+            // give quick access to active uploads without pinning them to the
+            // top; within each section, rows keep their natural pipeline order.
+            if checking_count > 0 {
+                SectionHeader {
+                    title: "Checking files",
+                    count: checking_count,
+                    subtitle: Some("Reading and verifying format, quality, and metadata.".to_string()),
+                }
                 div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in active.iter() {
-                        UploadTaskRow {
+                    for task in quality_checking.iter() {
+                        QualityCheckingRow {
                             key: "{task.id}",
                             task: task.clone(),
-                            transcode_progress,
-                            upload_progress,
-                            upload_speed,
-                            on_retry,
-                            on_remove: on_clear,
-                            on_pause,
-                            on_resume,
+                            on_remove,
                         }
                     }
-                }
-            }
-
-            if !transcoding.is_empty() {
-                SectionHeader { title: "Preparing", count: transcoding.len() }
-                div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in transcoding.iter() {
-                        UploadTaskRow {
+                    for task in hashing.iter() {
+                        HashingRow {
                             key: "{task.id}",
                             task: task.clone(),
-                            transcode_progress,
-                            upload_progress,
-                            upload_speed,
-                            on_retry,
-                            on_remove: on_clear,
-                            on_pause,
-                            on_resume,
+                            device_encoder_signatures,
+                            hash_progress,
+                            on_remove,
                         }
                     }
                 }
             }
 
             if !staged.is_empty() {
-                SectionHeader { title: "Ready to Upload", count: staged.len() }
+                SectionHeader {
+                    title: "In queue",
+                    count: staged.len(),
+                    subtitle: Some("Passed checks — waiting to start the next stage.".to_string()),
+                }
                 div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
                     for task in staged.iter() {
                         StagedRow {
@@ -149,29 +139,24 @@ pub fn InProgressList(
                 }
             }
 
-            if !hashing.is_empty() {
-                SectionHeader { title: "Hashing", count: hashing.len() }
-                div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in hashing.iter() {
-                        HashingRow {
-                            key: "{task.id}",
-                            task: task.clone(),
-                            device_encoder_signatures,
-                            hash_progress,
-                            on_remove,
-                        }
-                    }
+            if !uploading.is_empty() {
+                SectionHeader {
+                    title: "Uploading",
+                    count: uploading.len(),
+                    subtitle: Some("Validating and transferring original files to the cloud.".to_string()),
                 }
-            }
-
-            if !quality_checking.is_empty() {
-                SectionHeader { title: "Checking", count: quality_checking.len() }
                 div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in quality_checking.iter() {
-                        QualityCheckingRow {
+                    for task in uploading.iter() {
+                        UploadTaskRow {
                             key: "{task.id}",
                             task: task.clone(),
-                            on_remove,
+                            transcode_progress,
+                            upload_progress,
+                            upload_speed,
+                            on_retry,
+                            on_remove: on_clear,
+                            on_pause,
+                            on_resume,
                         }
                     }
                 }

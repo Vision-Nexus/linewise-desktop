@@ -48,14 +48,24 @@ fn capture_summary(m: &lw_core::capture::CaptureMetadata) -> String {
 }
 
 #[component]
-pub fn SectionHeader(title: String, count: usize) -> Element {
+pub fn SectionHeader(
+    title: String,
+    count: usize,
+    #[props(default)] subtitle: Option<String>,
+) -> Element {
     rsx! {
         div {
-            style: "display: flex; align-items: center; gap: 8px; margin-bottom: 8px;",
-            span { style: "font-size: 13px; font-weight: 600; color: var(--text);", "{title}" }
-            span {
-                style: "font-size: 11px; color: var(--text-secondary); background: var(--bg-tertiary); padding: 2px 8px; border-radius: 10px;",
-                "{count}"
+            style: "margin-bottom: 8px;",
+            div {
+                style: "display: flex; align-items: center; gap: 8px;",
+                span { style: "font-size: 13px; font-weight: 600; color: var(--text);", "{title}" }
+                span {
+                    style: "font-size: 11px; color: var(--text-secondary); background: var(--bg-tertiary); padding: 2px 8px; border-radius: 999px;",
+                    "{count}"
+                }
+            }
+            if let Some(sub) = subtitle {
+                div { style: "font-size: 11px; color: var(--text-muted); margin-top: 3px;", "{sub}" }
             }
         }
     }
@@ -199,8 +209,8 @@ pub fn VideoInfoPopover(details: VideoDetails) -> Element {
     }
 }
 
-/// One row in the "Checking" section: a freshly-added video whose
-/// local atom walk + server `/quality-check` round-trip is in flight.
+/// One row in the "Checking files" stage (quality-check half): a freshly-added
+/// video whose local atom walk + server `/quality-check` round-trip is in flight.
 /// Renders an indeterminate progress bar — the network round-trip
 /// has no progress signal we could surface — plus a Remove
 /// affordance. Removing mid-check is safe for the same reason as
@@ -226,11 +236,12 @@ pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> 
             }
             div {
                 style: "margin-top: 6px;",
-                // Passing a `None` value flips dioxus-primitives'
-                // Progress into `data-state='indeterminate'`, which
-                // the global CSS animates as a left-to-right shimmer.
+                // Prototype shows a fixed 8% sliver for quality-checking — the
+                // network round-trip has no live progress signal, so a small
+                // determinate bar + friendly sub-label matches the prototype's
+                // `checkingProgressLabel` ("Checking files 8% — Checking your file").
                 Progress {
-                    value: Option::<f64>::None,
+                    value: 8.0,
                     max: 100.0,
                     "aria-label": "Quality check in progress",
                     ProgressIndicator {}
@@ -238,7 +249,7 @@ pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> 
             }
             div {
                 style: "font-size: 11px; margin-top: 2px; color: var(--text-muted);",
-                "Checking video quality…"
+                "Checking files 8% — Checking your file"
             }
             div {
                 style: "display: flex; justify-content: flex-end; margin-top: 6px;",
@@ -253,8 +264,8 @@ pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> 
     }
 }
 
-/// One row in the "Hashing" section: a freshly-added file whose
-/// BLAKE3+MD5 stream is in flight. The quality check has already
+/// One row in the "Checking files" stage (hashing half): a freshly-added file
+/// whose BLAKE3+MD5 stream is in flight. The quality check has already
 /// landed, so the row carries the same probe-data popover and
 /// advisory warnings the `Staged` row will eventually show — the
 /// user gets to see the verdict during the hash window instead of
@@ -276,17 +287,16 @@ pub fn HashingRow(
         .get(&task.id)
         .copied()
         .unwrap_or((0, task.size.max(1)));
-    let pct = if total_bytes > 0 {
-        ((bytes_hashed as f64 / total_bytes as f64) * 100.0).min(100.0)
+    let t = if total_bytes > 0 {
+        bytes_hashed as f64 / total_bytes as f64
     } else {
         0.0
     };
-    let label = format!(
-        "Hashing — {} / {} ({:.0}%)",
-        format_size(bytes_hashed),
-        format_size(total_bytes),
-        pct,
-    );
+    // Prototype `checkingProgressPct(hashing)` = lerp(12→100): the "Checking
+    // files" bar picks up where quality-check (8%) left off. Sub-label drops
+    // the byte counts (prototype presentation) — the bar carries the progress.
+    let pct = (12.0 + (100.0 - 12.0) * t).round().min(100.0);
+    let label = format!("Checking files {pct:.0}% — Reading your file");
     let video_details = build_video_details(&task, device_encoder_signatures);
     let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 4px;";
 
@@ -635,6 +645,11 @@ pub fn UploadTaskRow(
     // Phase-aware progress reader. Read from the live signals only — never
     // from the cloned task's `bytes_uploaded`, which lags behind and snaps
     // back to 0 on render races.
+    // Prototype-aligned stage percents (wave `uploadStageProgressPct`): the
+    // upload stage shows fixed markers for the server-prep sub-states and a
+    // lerp(22→96) for the actual transfer, so the bar never sits at 0% while
+    // the engine is clearly working. Transcoding folds into "Uploading" and
+    // borrows the transcode %, shown without any transcode wording (D1).
     let (progress_pct, uploaded_bytes) = match task.state {
         UploadState::Completed => (100u32, upload_total),
         UploadState::Transcoding => {
@@ -646,13 +661,15 @@ pub fn UploadTaskRow(
             (pct.min(100), 0u64)
         }
         UploadState::Uploading | UploadState::Verifying | UploadState::Paused => {
-            match upload_progress.read().get(&task.id) {
-                Some(&(uploaded, total)) if total > 0 => {
-                    let pct = (uploaded as f64 / total as f64 * 100.0) as u32;
-                    (pct.min(100), uploaded)
-                }
-                _ => (0, 0),
-            }
+            let uploaded = upload_progress
+                .read()
+                .get(&task.id)
+                .map(|&(u, _)| u)
+                .unwrap_or(0);
+            (upload_stage_pct(&task.state, uploaded, upload_total), uploaded)
+        }
+        UploadState::Pending | UploadState::Validating | UploadState::Creating => {
+            (upload_stage_pct(&task.state, 0, upload_total), 0)
         }
         _ => (0, 0),
     };
@@ -664,6 +681,11 @@ pub fn UploadTaskRow(
         UploadState::Paused => ("var(--warning)", "var(--warning-bg)"),
         _ => ("var(--text-muted)", "var(--bg-secondary)"),
     };
+
+    // Collapse the engine's fine-grained state to the user-facing stage badge
+    // (mirrors the prototype `displayStatusLabel`), so the chip reads
+    // "Uploading" instead of internal jargon like "TRANSCODING"/"CREATING".
+    let badge_label = stage_badge_label(&task.state);
 
     let tenant_name = app_state.tenant_display_name(&task.tenant_id);
     let project_name = app_state.project_display_name(&task.tenant_id, &task.project_id);
@@ -717,8 +739,8 @@ pub fn UploadTaskRow(
                 div {
                     style: "display: flex; align-items: center; gap: 6px; margin-left: 8px; flex-shrink: 0;",
                     span {
-                        style: "font-size: 11px; color: {status_color}; font-weight: 600; text-transform: uppercase;",
-                        "{task.state.as_str()}"
+                        style: "font-size: 11px; color: {status_color}; font-weight: 600;",
+                        "{badge_label}"
                     }
                     // Action buttons based on state
                     {
@@ -896,22 +918,29 @@ pub fn UploadTaskRow(
     }
 }
 
-/// Phase label rendered under the progress bar. Single bar, single label —
-/// the state determines whether we're showing transcode %, upload bytes,
-/// or a static stage name.
+/// Phase label rendered under the progress bar, mirroring the prototype's
+/// `uploadStageProgressLabel` + `uploadStageActivityLabel`: every upload-stage
+/// row reads "Uploading N% — <friendly activity>", so the user sees one stage
+/// with a plain-language sub-line instead of raw engine states. Transcoding
+/// folds in here with a neutral "Preparing your file" — no transcode wording,
+/// per D1. The rate/ETA suffix is appended separately by the caller.
 fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> String {
     match state {
-        UploadState::Transcoding => format!("Transcoding {pct}%"),
+        UploadState::Transcoding => format!("Uploading {pct}% — Preparing your file"),
+        UploadState::Pending => format!("Uploading {pct}% — Waiting to start"),
+        UploadState::Validating => format!("Uploading {pct}% — Confirming file details"),
+        UploadState::Creating => format!("Uploading {pct}% — Setting up your upload"),
         UploadState::Uploading => format!(
-            "Uploading {pct}% — {} / {}",
+            "Uploading {pct}% — Transferring to the cloud — {} / {}",
             format_size(uploaded),
             format_size(total)
         ),
-        UploadState::Validating => "Validating...".to_string(),
-        UploadState::Creating => "Creating...".to_string(),
-        UploadState::Verifying => "Verifying...".to_string(),
-        UploadState::Paused => "Paused".to_string(),
-        UploadState::Pending => "Pending...".to_string(),
+        UploadState::Verifying => format!("Uploading {pct}% — Finishing up"),
+        UploadState::Paused => format!(
+            "Uploading {pct}% — Paused · {} / {}",
+            format_size(uploaded),
+            format_size(total)
+        ),
         UploadState::QualityChecking
         | UploadState::Hashing
         | UploadState::Staged
@@ -919,6 +948,57 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
         | UploadState::Completed
         | UploadState::Failed
         | UploadState::GaveUp => String::new(),
+    }
+}
+
+/// 0–100% progress within the "Uploading" stage — fixed markers for the
+/// server-prep sub-states, `lerp(22→96)` for the actual transfer. Mirrors the
+/// prototype `uploadStageProgressPct`. Transcoding is handled by the caller
+/// (it borrows the live transcode %), so it returns 0 here.
+fn upload_stage_pct(state: &UploadState, uploaded: u64, total: u64) -> u32 {
+    match state {
+        UploadState::Pending => 2,
+        UploadState::Validating => 10,
+        UploadState::Creating => 18,
+        UploadState::Uploading | UploadState::Paused => {
+            let t = if total > 0 {
+                uploaded as f64 / total as f64
+            } else {
+                0.0
+            };
+            (22.0 + (96.0 - 22.0) * t).round() as u32
+        }
+        UploadState::Verifying => 99,
+        UploadState::Transcoding
+        | UploadState::QualityChecking
+        | UploadState::Hashing
+        | UploadState::Staged
+        | UploadState::Rejected
+        | UploadState::Completed
+        | UploadState::Failed
+        | UploadState::GaveUp => 0,
+    }
+}
+
+/// User-facing stage badge — mirrors the prototype `displayStatusLabel` /
+/// `userFacingStatusLabel`. The engine's fine-grained pipeline states collapse
+/// to the three user-facing stages, so the chip never shows internal jargon
+/// like "TRANSCODING" or "CREATING". (`already exists` refinement for Completed
+/// lives in the Completed tab; here Completed simply reads "Completed".)
+fn stage_badge_label(state: &UploadState) -> &'static str {
+    match state {
+        UploadState::QualityChecking | UploadState::Hashing => "Checking files",
+        UploadState::Staged => "In queue",
+        UploadState::Pending
+        | UploadState::Validating
+        | UploadState::Transcoding
+        | UploadState::Creating
+        | UploadState::Uploading
+        | UploadState::Verifying
+        | UploadState::Paused => "Uploading",
+        UploadState::Rejected => "Rejected",
+        UploadState::Completed => "Completed",
+        UploadState::Failed | UploadState::GaveUp => "Failed",
     }
 }
 
