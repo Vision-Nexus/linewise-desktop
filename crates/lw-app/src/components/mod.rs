@@ -22,3 +22,4 @@ pub mod transfer_panel;
 pub mod upload_runtime;
 pub mod upload_settings;
 pub mod version_banner;
+pub mod workspace;

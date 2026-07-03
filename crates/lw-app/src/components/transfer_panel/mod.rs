@@ -232,18 +232,14 @@ pub fn TransferPanel() -> Element {
     // Primary tab — process-local view state, defaults to In Progress.
     let mut tab = use_signal(|| PrimaryTab::InProgress);
 
-    // Per-project filter chip. Default OFF → the panel is global (every org's
-    // tasks). When ON and a project is selected, the rendered list narrows to
-    // that (tenant, project). This is the only place selection touches the
-    // view; the default stays global.
-    let mut only_selected = use_signal(|| false);
-
-    // Scope still drives the upload TARGET decision (and the chip label), even
-    // though it no longer filters the view by default.
+    // The panel is rendered inside the batch view (see `workspace::Workspace`),
+    // so it scopes to the selected batch — the `tasks` filter below narrows the
+    // global list to the selected (tenant, project). `scope` still drives the
+    // upload TARGET decision and the Upload button gating.
     let scope = app_state.scope();
     let can_upload = scope.is_uploadable();
 
-    // Selected (tenant, project) ids for the opt-in narrowing + chip label.
+    // Selected (tenant, project) ids — the panel scopes its task list to this.
     let selected_tenant_id = app_state
         .selected_tenant
         .read()
@@ -254,24 +250,13 @@ pub fn TransferPanel() -> Element {
         .read()
         .as_ref()
         .map(|p| p.id.clone());
-    let chip_label = match (
-        app_state.selected_tenant.read().as_ref(),
-        app_state.selected_project.read().as_ref(),
-    ) {
-        (Some(tenant), Some(project)) => {
-            format!("Only {} / {}", tenant.display_name, project.name)
-        }
-        _ => "Only selected project".to_string(),
-    };
-    // The chip only makes sense when a project is selected; otherwise there is
-    // nothing to narrow to and we keep the panel global.
-    let chip_applicable = can_upload;
-    let narrowing = *only_selected.read() && chip_applicable;
-
-    // The full task list (global). Optionally narrowed to the selected project.
+    // Scope to the selected batch: this panel only renders when a project is
+    // selected (Workspace), so filter the global task list to that (tenant,
+    // project). Falls back to the full list defensively if the selection is
+    // somehow absent.
     let all_tasks = app_state.upload_tasks.read();
-    let tasks: Vec<UploadTask> = match (narrowing, &selected_tenant_id, &selected_project_id) {
-        (true, Some(tid), Some(pid)) => all_tasks
+    let tasks: Vec<UploadTask> = match (&selected_tenant_id, &selected_project_id) {
+        (Some(tid), Some(pid)) => all_tasks
             .iter()
             .filter(|t| &t.tenant_id == tid && &t.project_id == pid)
             .cloned()
@@ -854,17 +839,6 @@ pub fn TransferPanel() -> Element {
                 }
                 div {
                     style: "display: flex; align-items: center; gap: 8px; padding-bottom: 6px;",
-                    if chip_applicable {
-                        button {
-                            class: if narrowing { "lw-subtab is-active" } else { "lw-subtab" },
-                            title: "Show only this project's transfers. Off shows every org.",
-                            onclick: move |_| {
-                                let on = *only_selected.read();
-                                only_selected.set(!on);
-                            },
-                            "{chip_label}"
-                        }
-                    }
                     if active_tab == PrimaryTab::Failed {
                         button {
                             class: "btn-outline",

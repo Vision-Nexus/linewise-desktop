@@ -1,6 +1,6 @@
 use crate::components::login::LoginPage;
-use crate::components::transfer_panel::TransferPanel;
 use crate::components::version_banner::{VersionBlockedScreen, VersionUpdateBanner};
+use crate::components::workspace::Workspace;
 use crate::state::{AppState, CoreServices};
 use dioxus::desktop::WindowCloseBehaviour;
 use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
@@ -479,9 +479,11 @@ fn MainView() -> Element {
                 // pill's popover (see `network_status::NetworkStatusPill`), so
                 // there is no separate banner row here.
 
+                // Routed main area — swaps by sidebar selection (Select an
+                // organization → Select a batch → the batch's transfer panel).
                 main {
-                    style: "flex: 1; overflow-y: auto; padding: 16px;",
-                    TransferPanel {}
+                    style: "flex: 1; overflow-y: auto; display: flex; flex-direction: column; min-height: 0;",
+                    Workspace {}
                 }
             }
 

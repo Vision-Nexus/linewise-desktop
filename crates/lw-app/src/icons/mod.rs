@@ -344,6 +344,38 @@ pub fn CheckCircleIcon() -> Element {
     }
 }
 
+// Building2 (lucide) — "Select an organization" empty-state media.
+#[component]
+pub fn BuildingIcon(#[props(default = "16")] size: &'static str) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z" }
+            path { d: "M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" }
+            path { d: "M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2" }
+            path { d: "M10 6h4" }
+            path { d: "M10 10h4" }
+            path { d: "M10 14h4" }
+            path { d: "M10 18h4" }
+        }
+    }
+}
+
+// Folder (lucide) — batch folder card + "No batches yet" media.
+#[component]
+pub fn FolderIcon(#[props(default = "16")] size: &'static str) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "1.5", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }
+        }
+    }
+}
+
 // FolderOpen (lucide) — leading icon on sidebar batch rows.
 #[component]
 pub fn FolderOpenIcon() -> Element {
