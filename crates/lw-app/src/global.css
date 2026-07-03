@@ -144,6 +144,10 @@ input:focus { border-color: var(--border-focus) !important; box-shadow: var(--fo
    inline via `card_tone`, so hover must not repaint the background. */
 .staged-row:hover { border-color: var(--border-hover) !important; box-shadow: var(--shadow-sm); }
 
+/* Batch folder card (org landing "Select a batch" grid) — subtle depth + hover lift. */
+.batch-card { box-shadow: var(--shadow-sm); transition: box-shadow 0.15s, background 0.15s, border-color 0.15s; }
+.batch-card:hover { box-shadow: var(--shadow-md); border-color: var(--border-hover); }
+
 /* Spinner (batch overview "active work" indicator). Self-contained keyframe so
    we don't depend on a utility framework. */
 @keyframes lw-spin { to { transform: rotate(360deg); } }

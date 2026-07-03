@@ -111,7 +111,7 @@ fn OrgLanding(tenant: Tenant) -> Element {
                         div { class: "text-sm text-muted-foreground", "Pick a batch from the sidebar to open it, or choose one below." }
                     }
                     div {
-                        class: "flex flex-row flex-wrap justify-center gap-5",
+                        class: "flex w-full flex-row flex-wrap justify-start gap-5",
                         for project in projects.iter() {
                             BatchCard {
                                 key: "{project.id}",
@@ -142,9 +142,9 @@ fn BatchCard(tenant_id: String, project: Project) -> Element {
 
     rsx! {
         button {
-            class: "group shrink-0 flex h-[132px] w-[148px] flex-col justify-between p-3.5 \
+            class: "batch-card group shrink-0 flex h-[132px] w-[148px] flex-col justify-between p-3.5 \
                     rounded-xl border border-border bg-background text-left cursor-pointer \
-                    transition-colors hover:bg-accent",
+                    hover:bg-accent",
             aria_label: "Open {project.name}",
             onclick: move |_| {
                 selected_project.set(Some(p.clone()));
