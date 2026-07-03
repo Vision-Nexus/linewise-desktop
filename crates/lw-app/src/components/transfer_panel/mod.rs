@@ -56,7 +56,7 @@ use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload;
 use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
-use overview::BatchOverview;
+pub use overview::{compute_summary, BatchOverview};
 use std::path::{Path, PathBuf};
 use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
 
@@ -279,16 +279,6 @@ pub fn TransferPanel() -> Element {
         .iter()
         .filter(|t| PrimaryTab::Failed.contains(&t.state))
         .count();
-
-    // Batch overview summary — pure-derived from the (possibly narrowed) task
-    // list plus the live progress/speed maps. Cheap plain-number struct; the
-    // `BatchOverview` card renders nothing when the panel has no tasks.
-    let overview_summary = {
-        let up = upload_progress.read();
-        let hp = hash_progress.read();
-        let sp = upload_speed.read();
-        overview::compute_summary(&tasks, &up, &hp, &sp)
-    };
 
     // "Ready" = staged AND its required capture metadata is RESOLVED (filled or
     // skipped). The manual Upload only dispatches these (`confirm_staged` skips the
@@ -726,100 +716,86 @@ pub fn TransferPanel() -> Element {
             ondragleave: move |_| is_dragging.set(false),
             ondrop: on_drop,
 
-            // Header: title + the single multi-function Upload button (its menu
-            // offers files-or-folder) + the held-transcode "Upload N" button.
+            // Toolbar — Upload (files/folder menu) + Capture metadata + the
+            // held-transcode "Upload N" button + the debug-only seeder. No panel
+            // title and no overview here: the batch page header (org / batch name
+            // + the overview) sits above this panel (see `workspace::BatchView`).
             div {
-                style: "display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;",
-                div {
-                    style: "display: flex; align-items: center; gap: 10px;",
-                    h2 { style: "margin: 0; font-size: 16px; font-weight: 600;", "Transfers" }
-                    // Network status now lives in the sidebar footer pill.
-                    // Debug-only sample seeder; compiles out of release builds.
-                    DevSeedButton {}
-                }
-                div {
-                    style: "display: flex; gap: 8px; align-items: center;",
-                    if can_upload {
-                        // The one ingest entry: a button that opens a small menu
-                        // with "Select files…" and "Select folder…". A
-                        // full-screen backdrop closes the menu on outside click,
-                        // mirroring the `UserMenu` popover in `title_bar.rs`.
-                        div {
-                            style: "position: relative;",
-                            button {
-                                class: "btn-primary",
-                                style: "{styles::BTN_PRIMARY}",
-                                title: "Upload videos to this project",
-                                onclick: move |_| {
-                                    let next = !*upload_menu_open.read();
-                                    upload_menu_open.set(next);
-                                },
-                                crate::icons::UploadIcon {}
-                                "Upload"
-                                crate::icons::ChevronDownIcon {}
-                            }
-                            if *upload_menu_open.read() {
-                                div {
-                                    style: "position: fixed; inset: 0; z-index: 40;",
-                                    onclick: move |_| upload_menu_open.set(false),
-                                }
-                                div {
-                                    style: "position: absolute; top: 100%; right: 0; margin-top: 4px; \
-                                            min-width: 180px; z-index: 50; \
-                                            background: var(--bg); border: 1px solid var(--border); \
-                                            border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); \
-                                            padding: 4px;",
-                                    button {
-                                        class: "lw-upload-menu-item",
-                                        onclick: on_pick_files,
-                                        crate::icons::FileUpIcon {}
-                                        "Select files…"
-                                    }
-                                    button {
-                                        class: "lw-upload-menu-item",
-                                        onclick: on_pick_folder,
-                                        crate::icons::FolderUpIcon {}
-                                        "Select folder…"
-                                    }
-                                }
-                            }
-                        }
+                style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;",
+                if can_upload {
+                    div {
+                        style: "position: relative;",
                         button {
-                            style: "padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-size: 13px;",
-                            title: "Set capture metadata for all queued files and any you add next",
+                            class: "btn-primary",
+                            style: "{styles::BTN_PRIMARY}",
+                            title: "Upload videos to this project",
                             onclick: move |_| {
-                                capture_task.set(None);
-                                capture_open.set(true);
+                                let next = !*upload_menu_open.read();
+                                upload_menu_open.set(next);
                             },
-                            "Capture metadata"
-                        }
-                        if staged_count > 0 {
-                            UploadButton { staged_count, confirm_cb }
-                        }
-                    } else {
-                        button {
-                            style: "{styles::BTN_DISABLED}",
-                            disabled: true,
-                            title: "Select a project in the sidebar to enable uploading",
                             crate::icons::UploadIcon {}
                             "Upload"
                             crate::icons::ChevronDownIcon {}
                         }
+                        if *upload_menu_open.read() {
+                            div {
+                                style: "position: fixed; inset: 0; z-index: 40;",
+                                onclick: move |_| upload_menu_open.set(false),
+                            }
+                            div {
+                                style: "position: absolute; top: 100%; left: 0; margin-top: 4px; \
+                                        min-width: 180px; z-index: 50; \
+                                        background: var(--bg); border: 1px solid var(--border); \
+                                        border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); \
+                                        padding: 4px;",
+                                button {
+                                    class: "lw-upload-menu-item",
+                                    onclick: on_pick_files,
+                                    crate::icons::FileUpIcon {}
+                                    "Select files…"
+                                }
+                                button {
+                                    class: "lw-upload-menu-item",
+                                    onclick: on_pick_folder,
+                                    crate::icons::FolderUpIcon {}
+                                    "Select folder…"
+                                }
+                            }
+                        }
+                    }
+                    button {
+                        style: "padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-size: 13px;",
+                        title: "Set capture metadata for all queued files and any you add next",
+                        onclick: move |_| {
+                            capture_task.set(None);
+                            capture_open.set(true);
+                        },
+                        "Capture metadata"
+                    }
+                    if staged_count > 0 {
+                        UploadButton { staged_count, confirm_cb }
+                    }
+                } else {
+                    button {
+                        style: "{styles::BTN_DISABLED}",
+                        disabled: true,
+                        title: "Select a project in the sidebar to enable uploading",
+                        crate::icons::UploadIcon {}
+                        "Upload"
+                        crate::icons::ChevronDownIcon {}
                     }
                 }
+                // Debug-only sample seeder; compiles out of release builds.
+                DevSeedButton {}
             }
 
-            // Batch overview — overall %, X of N videos, bytes, ETA, aggregate
-            // speed + a segmented progress bar. Pure-derived; hidden when empty.
-            BatchOverview { summary: overview_summary }
-
-            // Primary tab strip + per-project chip + toolbar.
+            // Primary tab strip + toolbar.
             div {
                 style: "display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); margin-bottom: 16px; flex-wrap: wrap; gap: 8px;",
                 div {
                     style: "display: flex; align-items: center;",
                     PrimaryTabButton {
-                        label: "In Progress".to_string(),
+                        label: "In progress".to_string(),
                         count: in_progress_count,
                         active: active_tab == PrimaryTab::InProgress,
                         onclick: move |_| tab.set(PrimaryTab::InProgress),

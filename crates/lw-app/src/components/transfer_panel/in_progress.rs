@@ -110,9 +110,102 @@ fn StageFilterPills(
     }
 }
 
-/// The In Progress tab body. `tasks` is the already-filtered slice (this
-/// tab's bucket, after any per-project narrowing). All the action handlers
-/// are threaded down from the panel so the rows stay dumb.
+/// Pipeline order for the flat "All" list (mirrors the prototype's
+/// PIPELINE_STATE_ORDER): checks → queue → server-prep → transfer → verify.
+fn pipeline_order(state: &UploadState) -> u8 {
+    match state {
+        UploadState::QualityChecking => 0,
+        UploadState::Hashing => 1,
+        UploadState::Staged => 2,
+        UploadState::Pending => 3,
+        UploadState::Validating => 4,
+        UploadState::Transcoding => 5,
+        UploadState::Creating => 6,
+        UploadState::Uploading => 7,
+        UploadState::Paused => 8,
+        UploadState::Verifying => 9,
+        UploadState::Completed
+        | UploadState::Rejected
+        | UploadState::Failed
+        | UploadState::GaveUp => 99,
+    }
+}
+
+/// Renders the correct row component for a task's state. Used for both the flat
+/// "All" list and the per-stage lists so the dispatch lives in one place.
+#[allow(clippy::too_many_arguments)]
+#[component]
+fn InProgressRow(
+    task: UploadTask,
+    transcode_config: TranscodeConfig,
+    device_encoder_signatures: &'static [DeviceEncoderSignature],
+    transcode_progress: Signal<HashMap<String, f32>>,
+    upload_progress: Signal<HashMap<String, (u64, u64)>>,
+    hash_progress: Signal<HashMap<String, (u64, u64)>>,
+    embed_progress: Signal<HashMap<String, (u64, u64)>>,
+    upload_speed: Signal<HashMap<String, f64>>,
+    on_remove: EventHandler<String>,
+    on_clear: EventHandler<String>,
+    on_transcode_click: EventHandler<String>,
+    on_fill_metadata: EventHandler<String>,
+    on_skip_metadata: EventHandler<String>,
+    on_retry: EventHandler<String>,
+    on_pause: EventHandler<String>,
+    on_resume: EventHandler<String>,
+) -> Element {
+    match task.state {
+        UploadState::QualityChecking => rsx! {
+            QualityCheckingRow { task: task.clone(), on_remove }
+        },
+        UploadState::Hashing => rsx! {
+            HashingRow {
+                task: task.clone(),
+                device_encoder_signatures,
+                hash_progress,
+                on_remove,
+            }
+        },
+        UploadState::Staged => rsx! {
+            StagedRow {
+                task: task.clone(),
+                transcode_config: transcode_config.clone(),
+                device_encoder_signatures,
+                on_remove,
+                on_transcode_click,
+                on_force_upload: None,
+                on_fill_metadata,
+                on_skip_metadata,
+                embed_progress,
+            }
+        },
+        UploadState::Pending
+        | UploadState::Validating
+        | UploadState::Transcoding
+        | UploadState::Creating
+        | UploadState::Uploading
+        | UploadState::Verifying
+        | UploadState::Paused => rsx! {
+            UploadTaskRow {
+                task: task.clone(),
+                transcode_progress,
+                upload_progress,
+                upload_speed,
+                on_retry,
+                on_remove: on_clear,
+                on_pause,
+                on_resume,
+            }
+        },
+        UploadState::Completed
+        | UploadState::Rejected
+        | UploadState::Failed
+        | UploadState::GaveUp => rsx! {},
+    }
+}
+
+/// The In Progress tab body. `tasks` is the already-filtered slice (this tab's
+/// bucket, scoped to the selected batch). All the action handlers are threaded
+/// down from the panel so the rows stay dumb.
 #[allow(clippy::too_many_arguments)]
 #[component]
 pub fn InProgressList(
@@ -172,20 +265,58 @@ pub fn InProgressList(
     let uploading_count = uploading.len();
     let total_count = checking_count + staged_count + uploading_count;
 
-    // Stage-filter pills (E2): `All` stacks every stage; the others narrow to one.
     let mut stage_filter = use_signal(|| StageFilter::All);
     let filter = *stage_filter.read();
-    let show_checking =
-        matches!(filter, StageFilter::All | StageFilter::Checking) && checking_count > 0;
-    let show_queued = matches!(filter, StageFilter::All | StageFilter::Queued) && staged_count > 0;
-    let show_uploading =
-        matches!(filter, StageFilter::All | StageFilter::Uploading) && uploading_count > 0;
-    // Message when a specific stage is selected but empty (the batch is not).
-    let filtered_empty_msg: Option<&str> = match filter {
-        StageFilter::All => None,
-        StageFilter::Checking => (checking_count == 0).then_some("Nothing in checking"),
-        StageFilter::Queued => (staged_count == 0).then_some("Nothing in queue"),
-        StageFilter::Uploading => (uploading_count == 0).then_some("Nothing uploading"),
+
+    // Active list + section header by filter. `All` is ONE flat list in pipeline
+    // order (matching the prototype — not stacked per-stage sections); a specific
+    // stage shows just that stage's rows.
+    let (section_title, section_subtitle, active_list): (&str, &str, Vec<UploadTask>) = match filter
+    {
+        StageFilter::All => {
+            let mut all: Vec<UploadTask> = tasks
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.state,
+                        UploadState::QualityChecking | UploadState::Hashing | UploadState::Staged
+                    ) || t.state.is_active()
+                        || t.state == UploadState::Paused
+                })
+                .cloned()
+                .collect();
+            all.sort_by_key(|t| pipeline_order(&t.state));
+            (
+                "In progress",
+                "Automatic stages from checks through upload, in pipeline order.",
+                all,
+            )
+        }
+        StageFilter::Checking => {
+            let mut v = quality_checking.clone();
+            v.extend(hashing.iter().cloned());
+            (
+                "Checking files",
+                "Reading and verifying format, quality, and metadata.",
+                v,
+            )
+        }
+        StageFilter::Queued => (
+            "In queue",
+            "Passed checks — waiting to start the next stage.",
+            staged.clone(),
+        ),
+        StageFilter::Uploading => (
+            "Uploading",
+            "Validating and transferring original files to the cloud.",
+            uploading.clone(),
+        ),
+    };
+    let empty_msg = match filter {
+        StageFilter::All => "Nothing in progress",
+        StageFilter::Checking => "Nothing in checking",
+        StageFilter::Queued => "Nothing in queue",
+        StageFilter::Uploading => "Nothing uploading",
     };
 
     rsx! {
@@ -195,9 +326,8 @@ pub fn InProgressList(
                 "Nothing in progress"
             }
         } else {
-            // Stage-filter pills (All ▸ [1] Checking files ▸ [2] In queue ▸ [3]
-            // Uploading). Selecting a stage narrows to it; "All" stacks all three
-            // in pipeline order (Checking → In queue → Uploading).
+            // Stage-filter pills — All ▸ [1] Checking files ▸ [2] In queue ▸ [3]
+            // Uploading. "All" is a single flat pipeline-ordered list.
             StageFilterPills {
                 filter,
                 total: total_count,
@@ -206,78 +336,35 @@ pub fn InProgressList(
                 uploading: uploading_count,
                 on_select: move |f| stage_filter.set(f),
             }
-            if let Some(msg) = filtered_empty_msg {
+            if active_list.is_empty() {
                 div {
                     style: "text-align: center; padding: 32px 16px; color: var(--text-muted); font-size: 13px;",
-                    "{msg}"
+                    "{empty_msg}"
                 }
-            }
-            if show_checking {
+            } else {
                 SectionHeader {
-                    title: "Checking files",
-                    count: checking_count,
-                    subtitle: Some("Reading and verifying format, quality, and metadata.".to_string()),
+                    title: section_title.to_string(),
+                    count: active_list.len(),
+                    subtitle: Some(section_subtitle.to_string()),
                 }
-                div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in quality_checking.iter() {
-                        QualityCheckingRow {
-                            key: "{task.id}",
-                            task: task.clone(),
-                            on_remove,
-                        }
-                    }
-                    for task in hashing.iter() {
-                        HashingRow {
-                            key: "{task.id}",
-                            task: task.clone(),
-                            device_encoder_signatures,
-                            hash_progress,
-                            on_remove,
-                        }
-                    }
-                }
-            }
-
-            if show_queued {
-                SectionHeader {
-                    title: "In queue",
-                    count: staged_count,
-                    subtitle: Some("Passed checks — waiting to start the next stage.".to_string()),
-                }
-                div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in staged.iter() {
-                        StagedRow {
+                div { style: "display: flex; flex-direction: column; gap: 6px;",
+                    for task in active_list.iter() {
+                        InProgressRow {
                             key: "{task.id}",
                             task: task.clone(),
                             transcode_config: transcode_config.clone(),
                             device_encoder_signatures,
-                            on_remove,
-                            on_transcode_click,
-                            on_force_upload: None,
-                            on_fill_metadata,
-                            on_skip_metadata,
-                            embed_progress,
-                        }
-                    }
-                }
-            }
-
-            if show_uploading {
-                SectionHeader {
-                    title: "Uploading",
-                    count: uploading_count,
-                    subtitle: Some("Validating and transferring original files to the cloud.".to_string()),
-                }
-                div { style: "display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;",
-                    for task in uploading.iter() {
-                        UploadTaskRow {
-                            key: "{task.id}",
-                            task: task.clone(),
                             transcode_progress,
                             upload_progress,
+                            hash_progress,
+                            embed_progress,
                             upload_speed,
+                            on_remove,
+                            on_clear,
+                            on_transcode_click,
+                            on_fill_metadata,
+                            on_skip_metadata,
                             on_retry,
-                            on_remove: on_clear,
                             on_pause,
                             on_resume,
                         }

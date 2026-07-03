@@ -171,20 +171,42 @@ fn BatchCard(tenant_id: String, project: Project) -> Element {
 
 #[component]
 fn BatchView(tenant: Tenant, project: Project) -> Element {
+    let app_state = use_context::<AppState>();
     let description = project
         .description
         .clone()
         .filter(|d| !d.trim().is_empty());
+
+    // Batch overview lives in the page header (right of the title), matching the
+    // prototype — scoped to this batch, same weighting the panel uses.
+    let summary = {
+        let tasks: Vec<_> = app_state
+            .upload_tasks
+            .read()
+            .iter()
+            .filter(|t| t.tenant_id == tenant.id && t.project_id == project.id)
+            .cloned()
+            .collect();
+        let up = app_state.upload_progress.read();
+        let hp = app_state.hash_progress.read();
+        let sp = app_state.upload_speed.read();
+        crate::components::transfer_panel::compute_summary(&tasks, &up, &hp, &sp)
+    };
+
     rsx! {
         div {
             class: "flex min-h-0 flex-1 flex-col gap-4 p-4",
             header {
-                class: "shrink-0",
-                p { class: "text-sm text-muted-foreground truncate", "{tenant.display_name}" }
-                h1 { class: "text-2xl font-semibold tracking-tight text-foreground truncate", "{project.name}" }
-                if let Some(desc) = description {
-                    p { class: "mt-1 text-sm text-muted-foreground truncate", "{desc}" }
+                class: "shrink-0 flex items-start justify-between gap-6",
+                div {
+                    class: "min-w-0 flex-1",
+                    p { class: "text-sm text-muted-foreground truncate", "{tenant.display_name}" }
+                    h1 { class: "text-2xl font-semibold tracking-tight text-foreground truncate", "{project.name}" }
+                    if let Some(desc) = description {
+                        p { class: "mt-1 text-sm text-muted-foreground truncate", "{desc}" }
+                    }
                 }
+                crate::components::transfer_panel::BatchOverview { summary }
             }
             // The panel scopes itself to the selected batch (see TransferPanel).
             TransferPanel {}
