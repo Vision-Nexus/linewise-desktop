@@ -787,11 +787,13 @@ pub fn TransferPanel() -> Element {
                                     button {
                                         class: "lw-upload-menu-item",
                                         onclick: on_pick_files,
+                                        crate::icons::FileUpIcon {}
                                         "Select files…"
                                     }
                                     button {
                                         class: "lw-upload-menu-item",
                                         onclick: on_pick_folder,
+                                        crate::icons::FolderUpIcon {}
                                         "Select folder…"
                                     }
                                 }

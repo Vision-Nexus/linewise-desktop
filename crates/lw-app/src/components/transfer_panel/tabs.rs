@@ -28,6 +28,16 @@ pub enum FailedTab {
     Network,
 }
 
+/// Secondary tab under Completed: everything, freshly uploaded, or
+/// already-existing (server-dedup) rows. `Uploaded` = completed without the
+/// already-exists marker; `AlreadyExists` = completed with it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CompletedTab {
+    All,
+    Uploaded,
+    AlreadyExists,
+}
+
 impl PrimaryTab {
     /// True when a row in `state` belongs under this primary tab.
     ///
@@ -102,7 +112,9 @@ pub const TRANSFER_TAB_CSS: &str = r#"
     border-color: var(--btn-primary);
 }
 .lw-upload-menu-item {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 8px;
     width: 100%;
     text-align: left;
     padding: 8px 10px;
@@ -114,6 +126,7 @@ pub const TRANSFER_TAB_CSS: &str = r#"
     cursor: pointer;
     transition: background 0.15s;
 }
+.lw-upload-menu-item svg { color: var(--text-secondary); }
 .lw-upload-menu-item:hover { background: var(--bg-tertiary); }
 "#;
 
