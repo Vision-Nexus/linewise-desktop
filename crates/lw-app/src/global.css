@@ -144,26 +144,12 @@ input:focus { border-color: var(--border-focus) !important; box-shadow: var(--fo
    inline via `card_tone`, so hover must not repaint the background. */
 .staged-row:hover { border-color: var(--border-hover) !important; box-shadow: var(--shadow-sm); }
 
-/* Batch folder card (org landing "Select a batch" grid) — visible elevation +
-   hover lift. The global --shadow-sm token (6% black) is too faint for a card
-   on a near-white surface, so this uses its own stronger shadow. */
-.batch-card {
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 4px 12px -2px rgba(0, 0, 0, 0.10);
-    transition: box-shadow 0.15s, background 0.15s, border-color 0.15s, transform 0.1s;
-}
-.batch-card:hover {
-    box-shadow: 0 4px 8px -2px rgba(0, 0, 0, 0.12), 0 12px 26px -6px rgba(0, 0, 0, 0.20);
-    border-color: var(--border-hover);
-    transform: translateY(-1px);
-}
-@media (prefers-color-scheme: dark) {
-    .batch-card {
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px -2px rgba(0, 0, 0, 0.5);
-    }
-    .batch-card:hover {
-        box-shadow: 0 4px 8px -2px rgba(0, 0, 0, 0.5), 0 12px 26px -6px rgba(0, 0, 0, 0.65);
-    }
-}
+/* Batch folder card (org landing "Select a batch" grid). The card is flat —
+   border only, no drop shadow — matching the prototype (its Card box-shadow is
+   `none`). The "solid folder" look comes from the FILLED folder icon, not a
+   card shadow. Hover just darkens the border + tints the folder. */
+.batch-card { transition: background 0.15s, border-color 0.15s; }
+.batch-card:hover { border-color: var(--border-hover); }
 
 /* Spinner (batch overview "active work" indicator). Self-contained keyframe so
    we don't depend on a utility framework. */

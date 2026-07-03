@@ -154,7 +154,9 @@ fn BatchCard(tenant_id: String, project: Project) -> Element {
             span {
                 class: "text-muted-foreground group-hover:text-primary transition-colors",
                 style: "display: inline-flex;",
-                crate::icons::FolderIcon { size: "34" }
+                // Filled folder (matches the prototype's fill-muted/60) — the
+                // "solid folder" look the card relies on, not a card drop shadow.
+                crate::icons::FolderIcon { size: "36", fill: "oklch(0.97 0 0 / 0.6)" }
             }
             div {
                 class: "w-full min-w-0",
