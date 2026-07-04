@@ -446,14 +446,12 @@ pub fn TransferPanel() -> Element {
                 task.state = UploadState::Pending;
                 task.error_message = None;
                 task.retry_count = 0;
-                let mut task = task.clone();
+                let task = task.clone();
                 drop(tasks);
-                let eng = engine.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = eng.process_task(&mut task).await {
-                        e.log(format_args!("Retry of {}", task.filename));
-                    }
-                });
+                // Dispatch through the bounded, single-flight path (never a bare
+                // process_task spawn): a manual retry must not exceed
+                // max_concurrent or double-drive a row already in flight.
+                engine.dispatch_one(task);
             }
         });
     };
@@ -525,14 +523,12 @@ pub fn TransferPanel() -> Element {
             if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
                 task.state = UploadState::Pending;
                 task.error_message = None;
-                let mut task = task.clone();
+                let task = task.clone();
                 drop(tasks);
-                let eng = engine.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = eng.process_task(&mut task).await {
-                        e.log(format_args!("Resume of {}", task.filename));
-                    }
-                });
+                // Same bounded, single-flight dispatch as on_retry — spawning
+                // process_task directly here would bypass the upload_semaphore
+                // and single-flight guard.
+                engine.dispatch_one(task);
             }
         });
     };
