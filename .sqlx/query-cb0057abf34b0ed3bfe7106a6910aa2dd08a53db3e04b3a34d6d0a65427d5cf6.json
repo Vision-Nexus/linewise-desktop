@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE upload_queue\n                SET state = 'COMPLETED', error_message = NULL, retry_count = 0,\n                    updated_at = datetime('now')\n             WHERE id = ? AND state NOT IN ('COMPLETED', 'GAVE_UP', 'REJECTED', 'PAUSED')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "cb0057abf34b0ed3bfe7106a6910aa2dd08a53db3e04b3a34d6d0a65427d5cf6"
+}
