@@ -420,6 +420,17 @@ pub struct UploadEngine {
     /// (`db::settle_completed`/`settle_failure`) make even a degraded double-run
     /// non-corrupting. Entries are removed on drop of the [`InFlightGuard`].
     in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Per-task cooperative cancel flags, keyed by task id. [`Self::pause_task`]
+    /// trips a flag; the upload stage (`storage::upload_file_chunked` /
+    /// `upload_file_mpu`) polls it at each chunk/part boundary and returns
+    /// [`UploadError::Cancelled`], which the dispatch layer settles to `Paused`.
+    /// Populated alongside the single-flight entry in [`Self::try_enter_flight`]
+    /// and removed on [`InFlightGuard`] drop, so a flag exists exactly while a
+    /// worker owns the id. Only the `Uploading` stage polls it — pausing any other
+    /// stage is meaningless (see `state_machine`: only `Uploading -> Paused`).
+    cancels: Arc<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    >,
 }
 
 /// RAII membership in [`UploadEngine::in_flight`]. Holding one means "this worker
@@ -428,6 +439,9 @@ pub struct UploadEngine {
 /// is already in flight.
 struct InFlightGuard {
     set: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    cancels: Arc<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    >,
     id: String,
 }
 
@@ -436,6 +450,12 @@ impl Drop for InFlightGuard {
         self.set
             .lock()
             .expect("in_flight lock poisoned")
+            .remove(&self.id);
+        // Drop the cancel flag too, so a paused-then-resumed dispatch mints a
+        // fresh (untripped) flag rather than inheriting a stale `true`.
+        self.cancels
+            .lock()
+            .expect("cancels lock poisoned")
             .remove(&self.id);
     }
 }
@@ -491,6 +511,7 @@ impl UploadEngine {
             capture_embedded: std::sync::Mutex::new(std::collections::HashSet::new()),
             capture_skipped: std::sync::Mutex::new(std::collections::HashSet::new()),
             in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -505,10 +526,34 @@ impl UploadEngine {
             .lock()
             .expect("in_flight lock poisoned")
             .insert(task_id.to_string());
-        newly_inserted.then(|| InFlightGuard {
+        if !newly_inserted {
+            return None;
+        }
+        // Mint this worker's cooperative cancel flag alongside its single-flight
+        // entry so `pause_task` can trip it while the worker runs; the guard drops
+        // both on worker exit.
+        self.cancels.lock().expect("cancels lock poisoned").insert(
+            task_id.to_string(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        Some(InFlightGuard {
             set: Arc::clone(&self.in_flight),
+            cancels: Arc::clone(&self.cancels),
             id: task_id.to_string(),
         })
+    }
+
+    /// The cooperative cancel flag for a running task, or a fresh never-tripped
+    /// flag if none is registered (the worker isn't in flight). The upload stage
+    /// polls the returned flag at each chunk/part boundary; an unregistered id
+    /// yields a flag that is always `false`, i.e. no cancellation.
+    fn cancel_flag_for(&self, task_id: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        self.cancels
+            .lock()
+            .expect("cancels lock poisoned")
+            .get(task_id)
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
     }
 
     /// Whether the document's blob is already durable on the server (has a
@@ -1406,6 +1451,10 @@ impl UploadEngine {
             };
             match engine.process_task(&mut task).await {
                 Ok(()) => tracing::info!("Upload completed: {}", task.filename),
+                // User pause: settle to Paused, not Failed — a hold, not a failure.
+                Err(UploadError::Cancelled) => {
+                    engine.settle_cancelled_as_paused(&task.id).await;
+                }
                 Err(e) => {
                     e.log(format_args!("Upload of {}", task.filename));
                     // Guarded: never clobber a COMPLETED a sibling just recorded.
@@ -2466,6 +2515,7 @@ impl UploadEngine {
             "upload: selected dynamic chunk size",
         );
 
+        let cancel = self.cancel_flag_for(&task.id);
         let confirmed = storage::upload_file_chunked(
             self.storage.as_ref(),
             session,
@@ -2474,6 +2524,7 @@ impl UploadEngine {
             chunk_size,
             max_retries,
             &on_progress,
+            &cancel,
         )
         .await?;
 
@@ -2617,6 +2668,7 @@ impl UploadEngine {
         // Drive the parallel part PUTs, then complete. A failure here is NOT
         // aborted — the persisted `mpu_upload_id` lets a retry/restart resume
         // the already-uploaded parts (see this fn's doc comment).
+        let cancel = self.cancel_flag_for(&task.id);
         self.run_mpu_parts_and_complete(
             &task.tenant_id,
             &task.project_id,
@@ -2630,6 +2682,7 @@ impl UploadEngine {
             max_retries,
             &on_progress,
             Some(&on_retry),
+            &cancel,
         )
         .await?;
 
@@ -2730,6 +2783,7 @@ impl UploadEngine {
             "upload: resuming parallel multipart",
         );
 
+        let cancel = self.cancel_flag_for(&task.id);
         self.run_mpu_parts_and_complete(
             &task.tenant_id,
             &task.project_id,
@@ -2743,6 +2797,7 @@ impl UploadEngine {
             max_retries,
             &on_progress,
             Some(&on_retry),
+            &cancel,
         )
         .await?;
 
@@ -2794,6 +2849,7 @@ impl UploadEngine {
         max_retries: u32,
         on_progress: &storage::ProgressFn,
         on_retry: Option<&Arc<storage::RetryFn>>,
+        cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<(), UploadError> {
         let StorageBackend::Gcs(gcs) = self.storage.as_ref() else {
             // MPU is GCS-only; the S3 path never reaches here (it has no
@@ -2813,6 +2869,7 @@ impl UploadEngine {
                 max_retries,
                 on_progress,
                 on_retry,
+                cancel,
             )
             .await?;
 
@@ -2825,6 +2882,45 @@ impl UploadEngine {
         self.api
             .complete_multipart_upload(tenant_id, project_id, doc_id, upload_id, &all_parts)
             .await
+    }
+
+    /// Cooperatively pause an in-flight upload. Meaningful ONLY for a row in
+    /// `Uploading` (the UI surfaces Pause only there; this re-checks to guard
+    /// misuse). Trips the task's cancel flag; the upload worker observes it at the
+    /// next chunk/part boundary, returns [`UploadError::Cancelled`], and the
+    /// dispatch layer settles the row to `Paused` (guarded) + emits `StateChanged`.
+    /// Already-uploaded bytes/parts stay durable server-side, so a later resume
+    /// re-sends only the remainder. Returns `Ok(false)` (no-op) if the row is not
+    /// `Uploading` or no worker is currently driving it. Resume is the existing
+    /// `Paused -> Pending` path via the UI's `on_resume -> dispatch_one`.
+    pub async fn pause_task(&self, task_id: &str) -> Result<bool, DbError> {
+        let Some(task) = self.db.get_upload_by_id(task_id).await? else {
+            return Ok(false);
+        };
+        if task.state != UploadState::Uploading {
+            return Ok(false);
+        }
+        let tripped = self
+            .cancels
+            .lock()
+            .expect("cancels lock poisoned")
+            .get(task_id)
+            .map(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed))
+            .is_some();
+        Ok(tripped)
+    }
+
+    /// Settle a worker that returned `Cancelled` (a user pause) to `Paused` — a
+    /// guarded write (only from `Uploading`) plus the `StateChanged` event so the
+    /// UI reflects engine truth. Distinct from the failure path: a pause is not a
+    /// failure and must never enter the auto-retry sweep.
+    async fn settle_cancelled_as_paused(&self, task_id: &str) {
+        if let Ok(true) = self.db.settle_paused(task_id).await {
+            let _ = self.event_tx.send(UploadEvent::StateChanged {
+                task_id: task_id.to_string(),
+                state: UploadState::Paused,
+            });
+        }
     }
 
     /// Resume pending uploads from database
@@ -2859,6 +2955,10 @@ impl UploadEngine {
 
                 match engine.process_task(&mut task).await {
                     Ok(()) => tracing::info!("Upload completed: {}", task.filename),
+                    // User pause: settle to Paused, not Failed.
+                    Err(UploadError::Cancelled) => {
+                        engine.settle_cancelled_as_paused(&task.id).await;
+                    }
                     Err(e) => {
                         e.log(format_args!("Upload of {}", task.filename));
                         let _ = engine
@@ -3021,6 +3121,8 @@ impl UploadEngine {
         task.state = UploadState::Pending;
         match eng.process_task(&mut task).await {
             Ok(()) => tracing::info!("Auto-retry succeeded: {}", task.filename),
+            // User pause during an auto-retry attempt: hold, don't count as failure.
+            Err(UploadError::Cancelled) => eng.settle_cancelled_as_paused(&task.id).await,
             Err(e) => eng.settle_retry_failure(&task, attempt, &e, reading).await,
         }
     }

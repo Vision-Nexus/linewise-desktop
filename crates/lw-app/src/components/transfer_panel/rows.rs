@@ -726,12 +726,10 @@ pub fn UploadTaskRow(
                         let id2 = task.id.clone();
                         let small_btn = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; transition: background 0.15s, transform 0.08s;";
                         match task.state {
-                            UploadState::Uploading
-                            | UploadState::Validating
-                            | UploadState::Transcoding
-                            | UploadState::Creating
-                            | UploadState::Verifying
-                            | UploadState::Pending => rsx! {
+                            // Pause is offered ONLY while actually uploading — the
+                            // one state where a hold is meaningful (state_machine
+                            // allows only Uploading -> Paused).
+                            UploadState::Uploading => rsx! {
                                 button {
                                     class: "btn-outline",
                                     style: "{small_btn} background: transparent; color: var(--warning); border: 1px solid var(--warning);",
@@ -739,6 +737,14 @@ pub fn UploadTaskRow(
                                     "Pause"
                                 }
                             },
+                            // Other active/queued stages: no action button. Pausing
+                            // QC/validate/transcode/create/verify/pending is meaningless,
+                            // so we don't offer it (matches the tightened state machine).
+                            UploadState::Validating
+                            | UploadState::Transcoding
+                            | UploadState::Creating
+                            | UploadState::Verifying
+                            | UploadState::Pending => rsx! {},
                             UploadState::Paused => rsx! {
                                 button {
                                     class: "btn-primary",

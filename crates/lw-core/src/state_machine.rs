@@ -70,23 +70,24 @@ pub fn allowed(from: &UploadState, to: &UploadState) -> bool {
         // Staging.
         QualityChecking => matches!(to, Staged | Rejected),
         Hashing => matches!(to, Staged | Rejected | Failed),
-        Staged => matches!(to, Pending | Paused),
-        // Claimable idle / failed → active pipeline (+ retry re-arm, give-up, pause).
-        Pending => matches!(
-            to,
-            Validating | Transcoding | Creating | Uploading | Failed | Paused
-        ),
+        Staged => matches!(to, Pending),
+        // Claimable idle / failed → active pipeline (+ retry re-arm, give-up).
+        Pending => matches!(to, Validating | Transcoding | Creating | Uploading | Failed),
         Failed => matches!(
             to,
             Validating | Transcoding | Creating | Uploading | Pending | GaveUp
         ),
-        // Intra-pipeline progress (+ failure, + manual pause).
-        Validating => matches!(to, Transcoding | Creating | Uploading | Failed | Paused),
-        Transcoding => matches!(to, Creating | Uploading | Failed | Paused),
-        Creating => matches!(to, Uploading | Rejected | Failed | Paused),
+        // Intra-pipeline progress (+ failure). Pause is deliberately NOT reachable
+        // from these: a hold only makes sense once bytes are actually going out
+        // (the `Uploading` arm). QC/validate/transcode/create/verify are short or
+        // in-process stages where pausing has no meaning.
+        Validating => matches!(to, Transcoding | Creating | Uploading | Failed),
+        Transcoding => matches!(to, Creating | Uploading | Failed),
+        Creating => matches!(to, Uploading | Rejected | Failed),
+        // The ONLY state a manual pause is allowed from — an in-flight upload.
         Uploading => matches!(to, Verifying | Failed | Paused),
-        Verifying => matches!(to, Completed | Failed | Paused),
-        // Manual hold.
+        Verifying => matches!(to, Completed | Failed),
+        // Manual hold — resumes only by re-entering the pipeline as Pending.
         Paused => matches!(to, Pending),
     }
 }
@@ -135,6 +136,19 @@ mod tests {
     }
 
     #[test]
+    fn pause_only_from_uploading() {
+        // Pause is meaningful only for an in-flight upload.
+        assert!(allowed(&Uploading, &Paused));
+        assert!(allowed(&Paused, &Pending));
+        for from in UploadState::ALL.into_iter().filter(|s| *s != Uploading) {
+            assert!(!allowed(&from, &Paused), "{from:?} must not pause");
+        }
+        for to in UploadState::ALL.into_iter().filter(|s| *s != Pending) {
+            assert!(!allowed(&Paused, &to), "Paused must not go to {to:?}");
+        }
+    }
+
+    #[test]
     fn happy_path_and_retry_edges_are_legal() {
         assert!(allowed(&Staged, &Pending));
         assert!(allowed(&Pending, &Uploading));
@@ -155,6 +169,7 @@ mod tests {
         assert!(preds.contains(&Pending));
         assert!(preds.contains(&Creating));
         assert_eq!(predecessors(&Completed), vec![Verifying]);
+        assert_eq!(predecessors(&Paused), vec![Uploading]);
     }
 
     #[test]

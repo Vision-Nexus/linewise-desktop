@@ -292,7 +292,7 @@ impl Database {
             "UPDATE upload_queue
                 SET state = 'COMPLETED', error_message = NULL, retry_count = 0,
                     updated_at = datetime('now')
-             WHERE id = ? AND state NOT IN ('COMPLETED', 'GAVE_UP', 'REJECTED')",
+             WHERE id = ? AND state NOT IN ('COMPLETED', 'GAVE_UP', 'REJECTED', 'PAUSED')",
             id,
         )
         .execute(&self.pool)
@@ -316,9 +316,26 @@ impl Database {
         let result = sqlx::query!(
             "UPDATE upload_queue
                 SET state = ?, error_message = ?, updated_at = datetime('now')
-             WHERE id = ? AND state NOT IN ('COMPLETED', 'GAVE_UP', 'REJECTED')",
+             WHERE id = ? AND state NOT IN ('COMPLETED', 'GAVE_UP', 'REJECTED', 'PAUSED')",
             state_str,
             error_message,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Guarded PAUSE — moves an in-flight upload to `Paused`, but ONLY from
+    /// `Uploading` (the sole legal predecessor; see `state_machine::allowed`).
+    /// A user pause that races a worker finishing is a clean no-op: once the row
+    /// has left `Uploading` (Verifying / Completed / Failed) this applies nothing,
+    /// so the terminal outcome wins. Returns `true` iff it applied.
+    pub async fn settle_paused(&self, id: &str) -> Result<bool, DbError> {
+        let result = sqlx::query!(
+            "UPDATE upload_queue
+                SET state = 'PAUSED', updated_at = datetime('now')
+             WHERE id = ? AND state = 'UPLOADING'",
             id,
         )
         .execute(&self.pool)
@@ -819,6 +836,35 @@ mod cas_tests {
         // Already terminal → the guard refuses the second write.
         assert!(!db.settle_completed("a").await.expect("second"));
         assert_eq!(state_of(&db, "a").await, UploadState::Completed);
+    }
+
+    #[tokio::test]
+    async fn settle_paused_only_from_uploading() {
+        let db = test_db().await;
+        // Uploading -> Paused applies (the sole legal predecessor).
+        seed(&db, "up", UploadState::Uploading, 0).await;
+        assert!(db.settle_paused("up").await.expect("pause uploading"));
+        assert_eq!(state_of(&db, "up").await, UploadState::Paused);
+        // Any non-Uploading state is a no-op — pause is meaningful only in flight.
+        seed(&db, "vf", UploadState::Verifying, 0).await;
+        assert!(!db.settle_paused("vf").await.expect("pause verifying"));
+        assert_eq!(state_of(&db, "vf").await, UploadState::Verifying);
+    }
+
+    #[tokio::test]
+    async fn paused_row_is_not_clobbered_by_late_settle() {
+        // A lagging worker that finishes/fails just after the user paused must not
+        // overwrite the Paused row — the settle guards exclude PAUSED.
+        let db = test_db().await;
+        seed(&db, "a", UploadState::Uploading, 0).await;
+        assert!(db.settle_paused("a").await.expect("pause"));
+        assert!(!db.settle_completed("a").await.expect("late complete"));
+        assert!(
+            !db.settle_failure("a", UploadState::Failed, "net")
+                .await
+                .expect("late fail")
+        );
+        assert_eq!(state_of(&db, "a").await, UploadState::Paused);
     }
 
     #[tokio::test]

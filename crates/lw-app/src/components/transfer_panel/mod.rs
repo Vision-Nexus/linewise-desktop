@@ -494,17 +494,18 @@ pub fn TransferPanel() -> Element {
         });
     };
 
-    let db_for_pause = services.db.clone();
-    let mut app_state_pause = app_state.clone();
+    let engine_for_pause = services.upload_engine.clone();
     let on_pause = move |task_id: String| {
-        let db = db_for_pause.clone();
+        let engine = engine_for_pause.clone();
         spawn(async move {
-            let _ = db
-                .update_upload_state(&task_id, UploadState::Paused, None)
-                .await;
-            let mut tasks = app_state_pause.upload_tasks.write();
-            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-                task.state = UploadState::Paused;
+            // Cooperative pause via the engine (single source of truth): trips the
+            // worker's cancel flag; the worker settles the row to Paused and emits
+            // StateChanged{Paused}, which upload_runtime applies to app_state. We do
+            // NOT write DB/app_state here — that was the old "UI-authored Paused the
+            // still-running worker overwrites" bug. Engine no-ops if the row already
+            // left Uploading (upload finished first), so completion wins the race.
+            if let Err(e) = engine.pause_task(&task_id).await {
+                tracing::warn!("pause_task({task_id}) failed: {e}");
             }
         });
     };
