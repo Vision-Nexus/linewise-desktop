@@ -1387,7 +1387,13 @@ impl UploadEngine {
     /// settles the row to `Failed` with the typed error. Driven by
     /// `confirm_staged` (the manual "Upload") and `force_upload`. Per-task (not
     /// per-batch) so a slow QC file never gates a fast one.
-    fn dispatch_one(self: &Arc<Self>, mut task: UploadTask) {
+    ///
+    /// `pub` so the UI's manual Retry / Resume enter through this bounded,
+    /// single-flight path too, instead of spawning `process_task` directly —
+    /// a bare spawn bypasses `upload_semaphore` and `try_enter_flight`, letting
+    /// more than `max_concurrent` files upload at once (and re-driving a row
+    /// already in flight). This is the ONLY sanctioned way to start a worker.
+    pub fn dispatch_one(self: &Arc<Self>, mut task: UploadTask) {
         let engine = Arc::clone(self);
         let sem = Arc::clone(&self.upload_semaphore);
         tokio::spawn(async move {
@@ -1913,7 +1919,7 @@ impl UploadEngine {
     /// Process a single upload task through all stages.
     /// Resumes from where it left off — skips stages already completed
     /// (has document_id → skip create, has session_id → skip initiate).
-    pub async fn process_task(&self, task: &mut UploadTask) -> Result<(), UploadError> {
+    pub(crate) async fn process_task(&self, task: &mut UploadTask) -> Result<(), UploadError> {
         let original_buf = std::path::PathBuf::from(&task.local_path);
 
         // Temp copies (capture-tagged / transcoded / desensitized) are cleaned up
