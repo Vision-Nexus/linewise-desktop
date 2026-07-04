@@ -12,6 +12,7 @@ pub mod models;
 pub mod net;
 pub mod pdq;
 pub mod repair;
+pub mod state_machine;
 pub mod storage;
 pub mod transcode;
 pub mod upload;

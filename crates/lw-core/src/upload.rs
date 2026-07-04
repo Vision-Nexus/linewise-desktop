@@ -410,6 +410,34 @@ pub struct UploadEngine {
     /// on restart it falls back to "Needs metadata" and the user is re-offered the
     /// choice (acceptable for v1, mirroring the in-memory `capture_metadata`).
     capture_skipped: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Process-local single-flight set: the ids of tasks a worker is currently
+    /// driving. A dispatch/resume/retry whose id is already present is dropped,
+    /// so one task id can never be processed by two concurrent workers in this
+    /// process (closes the `auto_advance`-vs-`auto_advance`, force-on-in-flight,
+    /// and resume-vs-retry double-run classes). This is the authoritative
+    /// in-process guard; the single-instance guard (`lw-app/single_instance.rs`)
+    /// covers the cross-process case, and the guarded terminal settles
+    /// (`db::settle_completed`/`settle_failure`) make even a degraded double-run
+    /// non-corrupting. Entries are removed on drop of the [`InFlightGuard`].
+    in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+/// RAII membership in [`UploadEngine::in_flight`]. Holding one means "this worker
+/// owns processing of `id` in this process"; dropping it releases the id. Created
+/// only via [`UploadEngine::try_enter_flight`], which returns `None` when the id
+/// is already in flight.
+struct InFlightGuard {
+    set: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .expect("in_flight lock poisoned")
+            .remove(&self.id);
+    }
 }
 
 /// What the dedup gate needs from the logged-in user: their Linewise
@@ -462,6 +490,45 @@ impl UploadEngine {
             batch_capture: std::sync::Mutex::new(None),
             capture_embedded: std::sync::Mutex::new(std::collections::HashSet::new()),
             capture_skipped: std::sync::Mutex::new(std::collections::HashSet::new()),
+            in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        }
+    }
+
+    /// Try to claim in-process ownership of `task_id`. Returns a guard that
+    /// releases the id on drop, or `None` if another worker in this process is
+    /// already driving it (the caller should then drop the dispatch). This is the
+    /// single-flight primitive that funnels every dispatch path through one
+    /// worker per id — see the `in_flight` field.
+    fn try_enter_flight(&self, task_id: &str) -> Option<InFlightGuard> {
+        let newly_inserted = self
+            .in_flight
+            .lock()
+            .expect("in_flight lock poisoned")
+            .insert(task_id.to_string());
+        newly_inserted.then(|| InFlightGuard {
+            set: Arc::clone(&self.in_flight),
+            id: task_id.to_string(),
+        })
+    }
+
+    /// Whether the document's blob is already durable on the server (has a
+    /// `gcs_uri`). The resume paths call this before re-initiating an upload so a
+    /// file that actually finished — whose MPU / resumable-session handle was
+    /// merely reaped or expired — is finalized instead of re-uploaded from byte 0.
+    /// A lookup failure is treated as "not known complete", falling back to the
+    /// safe re-upload path.
+    async fn document_blob_complete(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+        doc_id: &str,
+    ) -> bool {
+        match self.api.get_document(tenant_id, project_id, doc_id).await {
+            Ok(doc) => doc.gcs_uri.is_some(),
+            Err(e) => {
+                tracing::warn!(doc_id, "resume: get_document failed, will re-upload: {e}");
+                false
+            }
         }
     }
 
@@ -521,6 +588,11 @@ impl UploadEngine {
     /// fill-then-advance, so both resolutions share the auto-advance path.
     pub async fn skip_capture_and_advance(self: &Arc<Self>, task_id: &str) {
         self.skip_capture_metadata(task_id);
+        // Persist the skip so it survives a restart (otherwise the clip falls back
+        // to "Needs metadata" and the user is re-prompted).
+        if let Err(e) = self.db.set_capture_row(task_id, "skipped", None).await {
+            tracing::warn!(task_id, "failed to persist capture skip: {e}");
+        }
         self.auto_advance_if_resolved(task_id).await;
     }
 
@@ -584,6 +656,9 @@ impl UploadEngine {
         meta: crate::capture::CaptureMetadata,
     ) -> Result<bool, UploadError> {
         self.set_capture_metadata(task_id, Some(meta.clone()));
+        // Serialize now, before `meta` is moved into the blocking embed closure,
+        // so the resolution can be persisted to the row regardless of embed outcome.
+        let meta_json = serde_json::to_string(&meta).ok();
         let Some(task) = self.db.get_upload_by_id(task_id).await? else {
             return Ok(false);
         };
@@ -655,6 +730,22 @@ impl UploadEngine {
                 false
             }
         };
+        // Persist the resolution so it survives a restart even when the file was
+        // NOT tagged (write-failed in-place embed → 'filled', a copy is tagged at
+        // upload; success → 'embedded'). This is the durable backing that
+        // `recover_capture_for_staged` rehydrates from. Best-effort.
+        let status = if tagged_in_place {
+            "embedded"
+        } else {
+            "filled"
+        };
+        if let Err(e) = self
+            .db
+            .set_capture_row(task_id, status, meta_json.as_deref())
+            .await
+        {
+            tracing::warn!(task_id, "failed to persist capture row: {e}");
+        }
         // Metadata is now RESOLVED (recorded in memory at the top of this fn, and
         // tagged into the file on the in-place path). Auto-advance the clip to
         // upload without a manual click — held only if it's transcode-eligible.
@@ -679,9 +770,22 @@ impl UploadEngine {
         };
         let mut recovered = false;
         for task in staged {
-            if self.has_capture_metadata(&task.id) {
+            if self.capture_resolved(&task.id) {
                 continue;
             }
+            // Durable state first: a clip whose in-place embed FAILED has no tags
+            // in the file, but its resolution was persisted to the row. Rehydrate
+            // from there so it uploads with its metadata (a copy is tagged at
+            // upload) instead of silently untagged.
+            if let Ok(Some((status, json))) = self.db.get_capture_row(&task.id).await
+                && self.hydrate_capture_from_row(&task.id, &status, json.as_deref())
+            {
+                recovered = true;
+                tracing::info!(task_id = %task.id, status = %status, "[capture] rehydrated resolution from row");
+                continue;
+            }
+            // Fallback: read tags embedded in the file (vendor-pre-tagged, or an
+            // in-place embed whose in-memory maps we lost with no row record).
             let path = PathBuf::from(&task.local_path);
             let parsed =
                 tokio::task::spawn_blocking(move || crate::capture::read_embedded_capture(&path))
@@ -699,6 +803,36 @@ impl UploadEngine {
             }
         }
         recovered
+    }
+
+    /// Rehydrate the in-memory capture maps for `task_id` from a persisted row
+    /// resolution (`status` + optional serialized `CaptureMetadata`). Returns
+    /// whether anything was hydrated. `status` is a plain column string, so the
+    /// unrecognized/`none` case falls through to `false`.
+    fn hydrate_capture_from_row(&self, task_id: &str, status: &str, json: Option<&str>) -> bool {
+        match status {
+            "skipped" => {
+                self.skip_capture_metadata(task_id);
+                true
+            }
+            "filled" | "embedded" => {
+                let Some(json) = json else {
+                    return false;
+                };
+                let Ok(meta) = serde_json::from_str::<crate::capture::CaptureMetadata>(json) else {
+                    return false;
+                };
+                self.set_capture_metadata(task_id, Some(meta));
+                if status == "embedded" {
+                    self.capture_embedded
+                        .lock()
+                        .expect("capture_embedded lock")
+                        .insert(task_id.to_string());
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Batch save: embed `meta` into every clip currently `Staged`, ONE AT A TIME
@@ -1074,11 +1208,21 @@ impl UploadEngine {
         if let Some(info) = video_info.as_ref()
             && let Some(parsed) = crate::capture::parse_capture_from_tags(&info.metadata)
         {
+            let json = serde_json::to_string(&parsed).ok();
             self.set_capture_metadata(task_id, Some(parsed));
             self.capture_embedded
                 .lock()
                 .expect("capture_embedded lock")
                 .insert(task_id.to_string());
+            // The tags are in the file → persist as 'embedded' so a restart
+            // rehydrates without a re-probe.
+            if let Err(e) = self
+                .db
+                .set_capture_row(task_id, "embedded", json.as_deref())
+                .await
+            {
+                tracing::warn!(task_id, "failed to persist capture row: {e}");
+            }
         }
         // Persist the response payload (video_info + warnings) and the
         // terminal staging state in one write so the popover-data fields land
@@ -1248,13 +1392,20 @@ impl UploadEngine {
         let sem = Arc::clone(&self.upload_semaphore);
         tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
+            // Single-flight: if another worker in this process is already driving
+            // this id, drop this dispatch (closes the auto_advance-vs-auto_advance,
+            // force-on-in-flight, and resume-vs-retry double-run classes).
+            let Some(_flight) = engine.try_enter_flight(&task.id) else {
+                return;
+            };
             match engine.process_task(&mut task).await {
                 Ok(()) => tracing::info!("Upload completed: {}", task.filename),
                 Err(e) => {
                     e.log(format_args!("Upload of {}", task.filename));
+                    // Guarded: never clobber a COMPLETED a sibling just recorded.
                     let _ = engine
                         .db
-                        .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                        .settle_failure(&task.id, UploadState::Failed, &e.to_string())
                         .await;
                     let _ = engine.event_tx.send(UploadEvent::Failed {
                         task_id: task.id,
@@ -2122,6 +2273,26 @@ impl UploadEngine {
                     )
                     .await;
             }
+            // The MPU is gone server-side. Before treating that as "re-upload the
+            // whole file from part 1", check whether the blob is already durable
+            // (the upload actually finished and the MPU was just reaped/expired).
+            // If so, finalize without re-uploading. Only meaningful when we held a
+            // persisted upload id — a fresh task has nothing that could be done.
+            if task.mpu_upload_id.is_some()
+                && self
+                    .document_blob_complete(&task.tenant_id, &task.project_id, &doc_id)
+                    .await
+            {
+                tracing::info!(
+                    doc_id = %doc_id,
+                    "resume: blob already durable on server; finalizing without re-upload"
+                );
+                task.bytes_uploaded = upload_size;
+                let _ = self.db.update_upload_progress(&task.id, upload_size).await;
+                return self
+                    .finalize_after_upload(task, &hash, &transcoded_path)
+                    .await;
+            }
             // Either no persisted upload, or the persisted one is gone (404 /
             // NoSuchUpload — expired or already completed). If we held a stale
             // id, best-effort abort it and clear it before initiating fresh.
@@ -2175,6 +2346,24 @@ impl UploadEngine {
                 }
                 Err(e) => {
                     tracing::warn!("Could not query progress, re-initiating session: {e}");
+                    // Re-initiating restarts the upload from byte 0. First check
+                    // whether the blob is already durable server-side (the upload
+                    // finished and only the resumable session handle expired) — if
+                    // so, finalize without re-sending the whole file.
+                    if self
+                        .document_blob_complete(&task.tenant_id, &task.project_id, &doc_id)
+                        .await
+                    {
+                        tracing::info!(
+                            doc_id = %doc_id,
+                            "resume: blob already durable on server; finalizing without re-upload"
+                        );
+                        task.bytes_uploaded = upload_size;
+                        let _ = self.db.update_upload_progress(&task.id, upload_size).await;
+                        return self
+                            .finalize_after_upload(task, &hash, &transcoded_path)
+                            .await;
+                    }
                     // Session expired — get new URL and re-initiate
                     let signed_url = self
                         .api
@@ -2308,18 +2497,18 @@ impl UploadEngine {
             .verify_upload(&task.tenant_id, &task.project_id, &doc_id, 10)
             .await?;
 
-        // Complete
-        self.update_state(task, UploadState::Completed).await;
-        // Zero the durable auto-retry count on success so a row that once flirted
-        // with the give-up cap starts fresh if it is somehow re-uploaded later
-        // (e.g. re-added after a manual clear). Best-effort: a failed reset only
-        // means the stale count lingers on an already-completed row.
-        if let Err(e) = self.db.reset_retry_count(&task.id).await {
-            tracing::warn!(
-                "Failed to reset retry_count on completion of {}: {e}",
-                task.id
-            );
-        }
+        // Complete — one guarded, idempotent write that also folds in the
+        // retry-count reset (see `db::settle_completed`). Because completion is a
+        // fact about the server (bytes durable + verified) it is not keyed on any
+        // owner, and because the reset rides the same guarded UPDATE, a lagging
+        // duplicate worker can neither revert this terminal state nor re-arm the
+        // give-up budget. Mirror the transition into the UI + the in-memory task.
+        let _ = self.db.settle_completed(&task.id).await;
+        let _ = self.event_tx.send(UploadEvent::StateChanged {
+            task_id: task.id.clone(),
+            state: UploadState::Completed,
+        });
+        task.state = UploadState::Completed;
         let _ = self.event_tx.send(UploadEvent::Completed {
             task_id: task.id.clone(),
         });
@@ -2645,6 +2834,11 @@ impl UploadEngine {
                 // Bound concurrency on resume too, so a backlog doesn't fan out
                 // to one connection per pending file.
                 let _permit = sem.acquire().await.expect("semaphore closed");
+                // Single-flight: never run a row the retry loop (or a duplicate
+                // resume dispatch) is already driving.
+                let Some(_flight) = engine.try_enter_flight(&task.id) else {
+                    return;
+                };
                 if let Some(ref sid) = task.session_id {
                     let session = storage::UploadSession {
                         session_id: sid.clone(),
@@ -2663,11 +2857,7 @@ impl UploadEngine {
                         e.log(format_args!("Upload of {}", task.filename));
                         let _ = engine
                             .db
-                            .update_upload_state(
-                                &task.id,
-                                UploadState::Failed,
-                                Some(&e.to_string()),
-                            )
+                            .settle_failure(&task.id, UploadState::Failed, &e.to_string())
                             .await;
                         let _ = engine.event_tx.send(UploadEvent::Failed {
                             task_id: task.id,
@@ -2803,6 +2993,11 @@ impl UploadEngine {
         reading: NetworkReading,
     ) {
         let _permit = sem.acquire().await.expect("semaphore closed");
+        // Single-flight: never start a retry for a row already being driven by a
+        // resume worker or a concurrent dispatch of the same id.
+        let Some(_flight) = eng.try_enter_flight(&task.id) else {
+            return;
+        };
         // Surface the retry so the row reads "retrying (attempt N)" instead of a
         // silent PENDING while it waits for / holds one of the upload slots.
         let _ = eng.event_tx.send(UploadEvent::Retrying {
@@ -2840,7 +3035,7 @@ impl UploadEngine {
             tracing::warn!("Giving up auto-retry for {}: {err}", task.filename);
             let _ = self
                 .db
-                .update_upload_state(&task.id, UploadState::GaveUp, Some(&message))
+                .settle_failure(&task.id, UploadState::GaveUp, &message)
                 .await;
             let _ = self.event_tx.send(UploadEvent::Failed {
                 task_id: task.id.clone(),
@@ -2855,7 +3050,7 @@ impl UploadEngine {
         tracing::warn!("Auto-retry failed for {}: {err}", task.filename);
         let _ = self
             .db
-            .update_upload_state(&task.id, UploadState::Failed, Some(&err.to_string()))
+            .settle_failure(&task.id, UploadState::Failed, &err.to_string())
             .await;
         let _ = self.event_tx.send(UploadEvent::Failed {
             task_id: task.id.clone(),
