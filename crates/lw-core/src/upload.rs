@@ -410,6 +410,34 @@ pub struct UploadEngine {
     /// on restart it falls back to "Needs metadata" and the user is re-offered the
     /// choice (acceptable for v1, mirroring the in-memory `capture_metadata`).
     capture_skipped: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Process-local single-flight set: the ids of tasks a worker is currently
+    /// driving. A dispatch/resume/retry whose id is already present is dropped,
+    /// so one task id can never be processed by two concurrent workers in this
+    /// process (closes the `auto_advance`-vs-`auto_advance`, force-on-in-flight,
+    /// and resume-vs-retry double-run classes). This is the authoritative
+    /// in-process guard; the single-instance guard (`lw-app/single_instance.rs`)
+    /// covers the cross-process case, and the guarded terminal settles
+    /// (`db::settle_completed`/`settle_failure`) make even a degraded double-run
+    /// non-corrupting. Entries are removed on drop of the [`InFlightGuard`].
+    in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+/// RAII membership in [`UploadEngine::in_flight`]. Holding one means "this worker
+/// owns processing of `id` in this process"; dropping it releases the id. Created
+/// only via [`UploadEngine::try_enter_flight`], which returns `None` when the id
+/// is already in flight.
+struct InFlightGuard {
+    set: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .expect("in_flight lock poisoned")
+            .remove(&self.id);
+    }
 }
 
 /// What the dedup gate needs from the logged-in user: their Linewise
@@ -462,7 +490,25 @@ impl UploadEngine {
             batch_capture: std::sync::Mutex::new(None),
             capture_embedded: std::sync::Mutex::new(std::collections::HashSet::new()),
             capture_skipped: std::sync::Mutex::new(std::collections::HashSet::new()),
+            in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    /// Try to claim in-process ownership of `task_id`. Returns a guard that
+    /// releases the id on drop, or `None` if another worker in this process is
+    /// already driving it (the caller should then drop the dispatch). This is the
+    /// single-flight primitive that funnels every dispatch path through one
+    /// worker per id — see the `in_flight` field.
+    fn try_enter_flight(&self, task_id: &str) -> Option<InFlightGuard> {
+        let newly_inserted = self
+            .in_flight
+            .lock()
+            .expect("in_flight lock poisoned")
+            .insert(task_id.to_string());
+        newly_inserted.then(|| InFlightGuard {
+            set: Arc::clone(&self.in_flight),
+            id: task_id.to_string(),
+        })
     }
 
     /// Set (or clear, with `None`) the capture metadata the UI collected for a
@@ -1248,13 +1294,20 @@ impl UploadEngine {
         let sem = Arc::clone(&self.upload_semaphore);
         tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
+            // Single-flight: if another worker in this process is already driving
+            // this id, drop this dispatch (closes the auto_advance-vs-auto_advance,
+            // force-on-in-flight, and resume-vs-retry double-run classes).
+            let Some(_flight) = engine.try_enter_flight(&task.id) else {
+                return;
+            };
             match engine.process_task(&mut task).await {
                 Ok(()) => tracing::info!("Upload completed: {}", task.filename),
                 Err(e) => {
                     e.log(format_args!("Upload of {}", task.filename));
+                    // Guarded: never clobber a COMPLETED a sibling just recorded.
                     let _ = engine
                         .db
-                        .update_upload_state(&task.id, UploadState::Failed, Some(&e.to_string()))
+                        .settle_failure(&task.id, UploadState::Failed, &e.to_string())
                         .await;
                     let _ = engine.event_tx.send(UploadEvent::Failed {
                         task_id: task.id,
@@ -2308,18 +2361,18 @@ impl UploadEngine {
             .verify_upload(&task.tenant_id, &task.project_id, &doc_id, 10)
             .await?;
 
-        // Complete
-        self.update_state(task, UploadState::Completed).await;
-        // Zero the durable auto-retry count on success so a row that once flirted
-        // with the give-up cap starts fresh if it is somehow re-uploaded later
-        // (e.g. re-added after a manual clear). Best-effort: a failed reset only
-        // means the stale count lingers on an already-completed row.
-        if let Err(e) = self.db.reset_retry_count(&task.id).await {
-            tracing::warn!(
-                "Failed to reset retry_count on completion of {}: {e}",
-                task.id
-            );
-        }
+        // Complete — one guarded, idempotent write that also folds in the
+        // retry-count reset (see `db::settle_completed`). Because completion is a
+        // fact about the server (bytes durable + verified) it is not keyed on any
+        // owner, and because the reset rides the same guarded UPDATE, a lagging
+        // duplicate worker can neither revert this terminal state nor re-arm the
+        // give-up budget. Mirror the transition into the UI + the in-memory task.
+        let _ = self.db.settle_completed(&task.id).await;
+        let _ = self.event_tx.send(UploadEvent::StateChanged {
+            task_id: task.id.clone(),
+            state: UploadState::Completed,
+        });
+        task.state = UploadState::Completed;
         let _ = self.event_tx.send(UploadEvent::Completed {
             task_id: task.id.clone(),
         });
@@ -2645,6 +2698,11 @@ impl UploadEngine {
                 // Bound concurrency on resume too, so a backlog doesn't fan out
                 // to one connection per pending file.
                 let _permit = sem.acquire().await.expect("semaphore closed");
+                // Single-flight: never run a row the retry loop (or a duplicate
+                // resume dispatch) is already driving.
+                let Some(_flight) = engine.try_enter_flight(&task.id) else {
+                    return;
+                };
                 if let Some(ref sid) = task.session_id {
                     let session = storage::UploadSession {
                         session_id: sid.clone(),
@@ -2663,11 +2721,7 @@ impl UploadEngine {
                         e.log(format_args!("Upload of {}", task.filename));
                         let _ = engine
                             .db
-                            .update_upload_state(
-                                &task.id,
-                                UploadState::Failed,
-                                Some(&e.to_string()),
-                            )
+                            .settle_failure(&task.id, UploadState::Failed, &e.to_string())
                             .await;
                         let _ = engine.event_tx.send(UploadEvent::Failed {
                             task_id: task.id,
@@ -2803,6 +2857,11 @@ impl UploadEngine {
         reading: NetworkReading,
     ) {
         let _permit = sem.acquire().await.expect("semaphore closed");
+        // Single-flight: never start a retry for a row already being driven by a
+        // resume worker or a concurrent dispatch of the same id.
+        let Some(_flight) = eng.try_enter_flight(&task.id) else {
+            return;
+        };
         // Surface the retry so the row reads "retrying (attempt N)" instead of a
         // silent PENDING while it waits for / holds one of the upload slots.
         let _ = eng.event_tx.send(UploadEvent::Retrying {
@@ -2840,7 +2899,7 @@ impl UploadEngine {
             tracing::warn!("Giving up auto-retry for {}: {err}", task.filename);
             let _ = self
                 .db
-                .update_upload_state(&task.id, UploadState::GaveUp, Some(&message))
+                .settle_failure(&task.id, UploadState::GaveUp, &message)
                 .await;
             let _ = self.event_tx.send(UploadEvent::Failed {
                 task_id: task.id.clone(),
@@ -2855,7 +2914,7 @@ impl UploadEngine {
         tracing::warn!("Auto-retry failed for {}: {err}", task.filename);
         let _ = self
             .db
-            .update_upload_state(&task.id, UploadState::Failed, Some(&err.to_string()))
+            .settle_failure(&task.id, UploadState::Failed, &err.to_string())
             .await;
         let _ = self.event_tx.send(UploadEvent::Failed {
             task_id: task.id.clone(),

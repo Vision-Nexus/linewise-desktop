@@ -72,8 +72,14 @@ pub fn allowed(from: &UploadState, to: &UploadState) -> bool {
         Hashing => matches!(to, Staged | Rejected | Failed),
         Staged => matches!(to, Pending | Paused),
         // Claimable idle / failed → active pipeline (+ retry re-arm, give-up, pause).
-        Pending => matches!(to, Validating | Transcoding | Creating | Uploading | Failed | Paused),
-        Failed => matches!(to, Validating | Transcoding | Creating | Uploading | Pending | GaveUp),
+        Pending => matches!(
+            to,
+            Validating | Transcoding | Creating | Uploading | Failed | Paused
+        ),
+        Failed => matches!(
+            to,
+            Validating | Transcoding | Creating | Uploading | Pending | GaveUp
+        ),
         // Intra-pipeline progress (+ failure, + manual pause).
         Validating => matches!(to, Transcoding | Creating | Uploading | Failed | Paused),
         Transcoding => matches!(to, Creating | Uploading | Failed | Paused),
@@ -158,6 +164,10 @@ mod tests {
         }
         let labels: std::collections::HashSet<&str> =
             UploadState::ALL.iter().map(|s| s.as_str()).collect();
-        assert_eq!(labels.len(), UploadState::ALL.len(), "duplicate label in ALL");
+        assert_eq!(
+            labels.len(),
+            UploadState::ALL.len(),
+            "duplicate label in ALL"
+        );
     }
 }
