@@ -266,6 +266,12 @@ fn handle_upload_event(
             if state != UploadState::Uploading {
                 app_state.part_retrying.write().remove(&task_id);
             }
+            // A pause request resolves the moment the engine reports ANY real state
+            // for this row: StateChanged{Paused} confirms it (row flips to Paused →
+            // Resume button), and any other transition means the pause didn't take
+            // (e.g. it finished first). Either way, drop the transient "Pausing…"
+            // marker so it can never linger claiming a pause the engine didn't do.
+            app_state.pausing.write().remove(&task_id);
             update_task(app_state, &task_id, |t| t.state = state);
         }
         UploadEvent::Progress {
@@ -377,6 +383,7 @@ fn handle_upload_event(
             transcode_progress.write().remove(&task_id);
             hash_progress.write().remove(&task_id);
             app_state.part_retrying.write().remove(&task_id);
+            app_state.pausing.write().remove(&task_id);
             update_task(app_state, &task_id, |t| t.state = UploadState::Completed);
         }
         UploadEvent::Failed { task_id, error } => {
@@ -384,6 +391,9 @@ fn handle_upload_event(
             transcode_progress.write().remove(&task_id);
             hash_progress.write().remove(&task_id);
             app_state.part_retrying.write().remove(&task_id);
+            // Failed is not a StateChanged event, so clear the pause marker here too
+            // (a pause request that raced a failure resolves to the failure).
+            app_state.pausing.write().remove(&task_id);
             // A give-up arrives as this `Failed` event (carrying the terminal
             // message) followed by a `StateChanged → GaveUp`; keep the message
             // and let the later StateChanged flip the state.

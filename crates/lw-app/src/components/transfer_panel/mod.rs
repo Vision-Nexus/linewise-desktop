@@ -495,17 +495,32 @@ pub fn TransferPanel() -> Element {
     };
 
     let engine_for_pause = services.upload_engine.clone();
+    let mut app_state_pause = app_state.clone();
     let on_pause = move |task_id: String| {
+        // Instant feedback: mark the row "Pausing…" right away (rows render a
+        // disabled "Pausing…" instead of the Pause button). We deliberately do NOT
+        // set Paused here — a real Paused only arrives from the engine's
+        // StateChanged{Paused}. Any engine state event, or a no-op pause_task,
+        // clears this transient marker, so the UI can never claim Paused the engine
+        // didn't actually do (no "shows Resume but engine never paused").
+        app_state_pause.pausing.write().insert(task_id.clone());
         let engine = engine_for_pause.clone();
+        let mut app_state_after = app_state_pause.clone();
         spawn(async move {
-            // Cooperative pause via the engine (single source of truth): trips the
-            // worker's cancel flag; the worker settles the row to Paused and emits
-            // StateChanged{Paused}, which upload_runtime applies to app_state. We do
-            // NOT write DB/app_state here — that was the old "UI-authored Paused the
-            // still-running worker overwrites" bug. Engine no-ops if the row already
-            // left Uploading (upload finished first), so completion wins the race.
-            if let Err(e) = engine.pause_task(&task_id).await {
-                tracing::warn!("pause_task({task_id}) failed: {e}");
+            match engine.pause_task(&task_id).await {
+                // Engine accepted: the worker will stop at the next chunk/part
+                // boundary and emit StateChanged{Paused}; upload_runtime clears the
+                // marker and flips the row to Paused (Resume button) then.
+                Ok(true) => {}
+                // No-op: the row already left Uploading (finished/failed just now).
+                // Drop the transient marker — the engine's own event drives the row.
+                Ok(false) => {
+                    app_state_after.pausing.write().remove(&task_id);
+                }
+                Err(e) => {
+                    tracing::warn!("pause_task({task_id}) failed: {e}");
+                    app_state_after.pausing.write().remove(&task_id);
+                }
             }
         });
     };
