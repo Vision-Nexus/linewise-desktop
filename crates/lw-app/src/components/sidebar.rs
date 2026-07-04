@@ -79,7 +79,9 @@ fn compute_nav_dot(tasks: &[UploadTask], tenant_id: &str, project_id: &str) -> O
         return Some(NavDot {
             color: "var(--error)",
             pulse: false,
-            tooltip: format!("Batch complete \u{00B7} {completed} succeeded \u{00B7} {failed} failed"),
+            tooltip: format!(
+                "Batch complete \u{00B7} {completed} succeeded \u{00B7} {failed} failed"
+            ),
         });
     }
     Some(NavDot {

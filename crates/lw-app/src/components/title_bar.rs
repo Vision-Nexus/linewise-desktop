@@ -134,4 +134,3 @@ fn WindowControls() -> Element {
         }
     }
 }
-

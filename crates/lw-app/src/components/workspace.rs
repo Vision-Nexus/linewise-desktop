@@ -133,10 +133,7 @@ fn BatchCard(tenant_id: String, project: Project) -> Element {
     let mut projects_sig = app_state.projects;
     let tenant_projects_sig = app_state.tenant_projects;
 
-    let description = project
-        .description
-        .clone()
-        .filter(|d| !d.trim().is_empty());
+    let description = project.description.clone().filter(|d| !d.trim().is_empty());
     let p = project.clone();
     let tid = tenant_id.clone();
 
@@ -172,10 +169,7 @@ fn BatchCard(tenant_id: String, project: Project) -> Element {
 #[component]
 fn BatchView(tenant: Tenant, project: Project) -> Element {
     let app_state = use_context::<AppState>();
-    let description = project
-        .description
-        .clone()
-        .filter(|d| !d.trim().is_empty());
+    let description = project.description.clone().filter(|d| !d.trim().is_empty());
 
     // Batch overview lives in the page header (right of the title), matching the
     // prototype — scoped to this batch, same weighting the panel uses.

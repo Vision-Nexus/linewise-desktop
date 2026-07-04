@@ -62,10 +62,9 @@ fn task_pipeline_pct(
         | UploadState::Creating
         | UploadState::Uploading
         | UploadState::Verifying
-        | UploadState::Paused => {
-            (10.0 + upload_stage_pct(&task.state, uploaded, upload_total) as f64 * 0.9).round()
-                as u32
-        }
+        | UploadState::Paused => (10.0
+            + upload_stage_pct(&task.state, uploaded, upload_total) as f64 * 0.9)
+            .round() as u32,
     }
 }
 

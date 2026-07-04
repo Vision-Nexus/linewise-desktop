@@ -56,7 +56,7 @@ use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload;
 use lw_core::video;
 use lw_core::video::DeviceEncoderSignature;
-pub use overview::{compute_summary, BatchOverview};
+pub use overview::{BatchOverview, compute_summary};
 use std::path::{Path, PathBuf};
 use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
 

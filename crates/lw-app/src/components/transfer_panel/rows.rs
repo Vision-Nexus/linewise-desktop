@@ -150,9 +150,12 @@ fn RowDetails(
     let details = build_video_details(&task, device_encoder_signatures);
     let tenant_name = app_state.tenant_display_name(&task.tenant_id);
     let project_name = app_state.project_display_name(&task.tenant_id, &task.project_id);
-    let summary = details.as_ref().map(|d| d.summary.clone()).unwrap_or_else(|| {
-        "\u{2014} \u{00B7} \u{2014} \u{00B7} \u{2014} \u{00B7} \u{2014}".to_string()
-    });
+    let summary = details
+        .as_ref()
+        .map(|d| d.summary.clone())
+        .unwrap_or_else(|| {
+            "\u{2014} \u{00B7} \u{2014} \u{00B7} \u{2014} \u{00B7} \u{2014}".to_string()
+        });
     let expanded = *open.read();
     let chevron = if expanded { "\u{25BE}" } else { "\u{25B8}" };
 
@@ -665,7 +668,10 @@ pub fn UploadTaskRow(
                 .get(&task.id)
                 .map(|&(u, _)| u)
                 .unwrap_or(0);
-            (upload_stage_pct(&task.state, uploaded, upload_total), uploaded)
+            (
+                upload_stage_pct(&task.state, uploaded, upload_total),
+                uploaded,
+            )
         }
         UploadState::Pending | UploadState::Validating | UploadState::Creating => {
             (upload_stage_pct(&task.state, 0, upload_total), 0)
