@@ -511,6 +511,27 @@ impl UploadEngine {
         })
     }
 
+    /// Whether the document's blob is already durable on the server (has a
+    /// `gcs_uri`). The resume paths call this before re-initiating an upload so a
+    /// file that actually finished — whose MPU / resumable-session handle was
+    /// merely reaped or expired — is finalized instead of re-uploaded from byte 0.
+    /// A lookup failure is treated as "not known complete", falling back to the
+    /// safe re-upload path.
+    async fn document_blob_complete(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+        doc_id: &str,
+    ) -> bool {
+        match self.api.get_document(tenant_id, project_id, doc_id).await {
+            Ok(doc) => doc.gcs_uri.is_some(),
+            Err(e) => {
+                tracing::warn!(doc_id, "resume: get_document failed, will re-upload: {e}");
+                false
+            }
+        }
+    }
+
     /// Set (or clear, with `None`) the capture metadata the UI collected for a
     /// specific task (per-file override). Read by `process_task` Stage 0. Setting
     /// metadata clears any prior "skipped" mark for the task — the two are mutually
@@ -567,6 +588,11 @@ impl UploadEngine {
     /// fill-then-advance, so both resolutions share the auto-advance path.
     pub async fn skip_capture_and_advance(self: &Arc<Self>, task_id: &str) {
         self.skip_capture_metadata(task_id);
+        // Persist the skip so it survives a restart (otherwise the clip falls back
+        // to "Needs metadata" and the user is re-prompted).
+        if let Err(e) = self.db.set_capture_row(task_id, "skipped", None).await {
+            tracing::warn!(task_id, "failed to persist capture skip: {e}");
+        }
         self.auto_advance_if_resolved(task_id).await;
     }
 
@@ -630,6 +656,9 @@ impl UploadEngine {
         meta: crate::capture::CaptureMetadata,
     ) -> Result<bool, UploadError> {
         self.set_capture_metadata(task_id, Some(meta.clone()));
+        // Serialize now, before `meta` is moved into the blocking embed closure,
+        // so the resolution can be persisted to the row regardless of embed outcome.
+        let meta_json = serde_json::to_string(&meta).ok();
         let Some(task) = self.db.get_upload_by_id(task_id).await? else {
             return Ok(false);
         };
@@ -701,6 +730,22 @@ impl UploadEngine {
                 false
             }
         };
+        // Persist the resolution so it survives a restart even when the file was
+        // NOT tagged (write-failed in-place embed → 'filled', a copy is tagged at
+        // upload; success → 'embedded'). This is the durable backing that
+        // `recover_capture_for_staged` rehydrates from. Best-effort.
+        let status = if tagged_in_place {
+            "embedded"
+        } else {
+            "filled"
+        };
+        if let Err(e) = self
+            .db
+            .set_capture_row(task_id, status, meta_json.as_deref())
+            .await
+        {
+            tracing::warn!(task_id, "failed to persist capture row: {e}");
+        }
         // Metadata is now RESOLVED (recorded in memory at the top of this fn, and
         // tagged into the file on the in-place path). Auto-advance the clip to
         // upload without a manual click — held only if it's transcode-eligible.
@@ -725,9 +770,22 @@ impl UploadEngine {
         };
         let mut recovered = false;
         for task in staged {
-            if self.has_capture_metadata(&task.id) {
+            if self.capture_resolved(&task.id) {
                 continue;
             }
+            // Durable state first: a clip whose in-place embed FAILED has no tags
+            // in the file, but its resolution was persisted to the row. Rehydrate
+            // from there so it uploads with its metadata (a copy is tagged at
+            // upload) instead of silently untagged.
+            if let Ok(Some((status, json))) = self.db.get_capture_row(&task.id).await
+                && self.hydrate_capture_from_row(&task.id, &status, json.as_deref())
+            {
+                recovered = true;
+                tracing::info!(task_id = %task.id, status = %status, "[capture] rehydrated resolution from row");
+                continue;
+            }
+            // Fallback: read tags embedded in the file (vendor-pre-tagged, or an
+            // in-place embed whose in-memory maps we lost with no row record).
             let path = PathBuf::from(&task.local_path);
             let parsed =
                 tokio::task::spawn_blocking(move || crate::capture::read_embedded_capture(&path))
@@ -745,6 +803,36 @@ impl UploadEngine {
             }
         }
         recovered
+    }
+
+    /// Rehydrate the in-memory capture maps for `task_id` from a persisted row
+    /// resolution (`status` + optional serialized `CaptureMetadata`). Returns
+    /// whether anything was hydrated. `status` is a plain column string, so the
+    /// unrecognized/`none` case falls through to `false`.
+    fn hydrate_capture_from_row(&self, task_id: &str, status: &str, json: Option<&str>) -> bool {
+        match status {
+            "skipped" => {
+                self.skip_capture_metadata(task_id);
+                true
+            }
+            "filled" | "embedded" => {
+                let Some(json) = json else {
+                    return false;
+                };
+                let Ok(meta) = serde_json::from_str::<crate::capture::CaptureMetadata>(json) else {
+                    return false;
+                };
+                self.set_capture_metadata(task_id, Some(meta));
+                if status == "embedded" {
+                    self.capture_embedded
+                        .lock()
+                        .expect("capture_embedded lock")
+                        .insert(task_id.to_string());
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Batch save: embed `meta` into every clip currently `Staged`, ONE AT A TIME
@@ -1120,11 +1208,21 @@ impl UploadEngine {
         if let Some(info) = video_info.as_ref()
             && let Some(parsed) = crate::capture::parse_capture_from_tags(&info.metadata)
         {
+            let json = serde_json::to_string(&parsed).ok();
             self.set_capture_metadata(task_id, Some(parsed));
             self.capture_embedded
                 .lock()
                 .expect("capture_embedded lock")
                 .insert(task_id.to_string());
+            // The tags are in the file → persist as 'embedded' so a restart
+            // rehydrates without a re-probe.
+            if let Err(e) = self
+                .db
+                .set_capture_row(task_id, "embedded", json.as_deref())
+                .await
+            {
+                tracing::warn!(task_id, "failed to persist capture row: {e}");
+            }
         }
         // Persist the response payload (video_info + warnings) and the
         // terminal staging state in one write so the popover-data fields land
@@ -2175,6 +2273,26 @@ impl UploadEngine {
                     )
                     .await;
             }
+            // The MPU is gone server-side. Before treating that as "re-upload the
+            // whole file from part 1", check whether the blob is already durable
+            // (the upload actually finished and the MPU was just reaped/expired).
+            // If so, finalize without re-uploading. Only meaningful when we held a
+            // persisted upload id — a fresh task has nothing that could be done.
+            if task.mpu_upload_id.is_some()
+                && self
+                    .document_blob_complete(&task.tenant_id, &task.project_id, &doc_id)
+                    .await
+            {
+                tracing::info!(
+                    doc_id = %doc_id,
+                    "resume: blob already durable on server; finalizing without re-upload"
+                );
+                task.bytes_uploaded = upload_size;
+                let _ = self.db.update_upload_progress(&task.id, upload_size).await;
+                return self
+                    .finalize_after_upload(task, &hash, &transcoded_path)
+                    .await;
+            }
             // Either no persisted upload, or the persisted one is gone (404 /
             // NoSuchUpload — expired or already completed). If we held a stale
             // id, best-effort abort it and clear it before initiating fresh.
@@ -2228,6 +2346,24 @@ impl UploadEngine {
                 }
                 Err(e) => {
                     tracing::warn!("Could not query progress, re-initiating session: {e}");
+                    // Re-initiating restarts the upload from byte 0. First check
+                    // whether the blob is already durable server-side (the upload
+                    // finished and only the resumable session handle expired) — if
+                    // so, finalize without re-sending the whole file.
+                    if self
+                        .document_blob_complete(&task.tenant_id, &task.project_id, &doc_id)
+                        .await
+                    {
+                        tracing::info!(
+                            doc_id = %doc_id,
+                            "resume: blob already durable on server; finalizing without re-upload"
+                        );
+                        task.bytes_uploaded = upload_size;
+                        let _ = self.db.update_upload_progress(&task.id, upload_size).await;
+                        return self
+                            .finalize_after_upload(task, &hash, &transcoded_path)
+                            .await;
+                    }
                     // Session expired — get new URL and re-initiate
                     let signed_url = self
                         .api

@@ -326,6 +326,44 @@ impl Database {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Persist a task's capture-metadata resolution so it survives a restart even
+    /// when the tags never made it into the file (a failed in-place embed). The
+    /// in-memory maps in `UploadEngine` remain the hot path; this is the durable
+    /// backing that `recover_capture_for_staged` hydrates from. `status` is
+    /// `none` / `filled` / `embedded` / `skipped`; `json` is the serialized
+    /// `CaptureMetadata` for `filled` / `embedded`, `None` otherwise.
+    pub async fn set_capture_row(
+        &self,
+        id: &str,
+        status: &str,
+        json: Option<&str>,
+    ) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE upload_queue SET capture_status = ?, capture_json = ?, updated_at = datetime('now') WHERE id = ?",
+            status,
+            json,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Read a task's persisted capture resolution as `(status, json)`. Used at
+    /// startup by `recover_capture_for_staged` to rehydrate the in-memory maps.
+    pub async fn get_capture_row(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, Option<String>)>, DbError> {
+        let row = sqlx::query!(
+            "SELECT capture_status, capture_json FROM upload_queue WHERE id = ?",
+            id,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.capture_status, r.capture_json)))
+    }
+
     pub async fn update_upload_progress(
         &self,
         id: &str,
@@ -819,6 +857,25 @@ mod cas_tests {
             !db.settle_failure("a", UploadState::Failed, "x")
                 .await
                 .expect("after terminal")
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_row_persists_and_reads_back() {
+        // V11: a clip's capture resolution survives on the row (default 'none',
+        // then a 'filled' write with JSON reads back intact).
+        let db = test_db().await;
+        seed(&db, "a", UploadState::Staged, 0).await;
+        assert_eq!(
+            db.get_capture_row("a").await.expect("get default"),
+            Some(("none".to_string(), None))
+        );
+        db.set_capture_row("a", "filled", Some(r#"{"lens":"x"}"#))
+            .await
+            .expect("set");
+        assert_eq!(
+            db.get_capture_row("a").await.expect("get filled"),
+            Some(("filled".to_string(), Some(r#"{"lens":"x"}"#.to_string())))
         );
     }
 }
