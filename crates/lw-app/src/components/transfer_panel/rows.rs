@@ -757,20 +757,41 @@ pub fn UploadTaskRow(
                         let id2 = task.id.clone();
                         let small_btn = "display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; cursor: pointer; transition: background 0.15s, transform 0.08s;";
                         match task.state {
-                            UploadState::Uploading
-                            | UploadState::Validating
+                            // Pause is offered ONLY while actually uploading — the
+                            // one state where a hold is meaningful (state_machine
+                            // allows only Uploading -> Paused). While a pause request
+                            // is in flight the row shows a disabled "Pausing…" for
+                            // instant feedback, until the engine confirms with
+                            // StateChanged{Paused} (which clears the `pausing` marker).
+                            UploadState::Uploading => {
+                                if app_state.pausing.read().contains(&task.id) {
+                                    rsx! {
+                                        button {
+                                            class: "btn-outline",
+                                            style: "{small_btn} background: transparent; color: var(--text-muted); border: 1px solid var(--border); cursor: default;",
+                                            disabled: true,
+                                            "Pausing…"
+                                        }
+                                    }
+                                } else {
+                                    rsx! {
+                                        button {
+                                            class: "btn-outline",
+                                            style: "{small_btn} background: transparent; color: var(--warning); border: 1px solid var(--warning);",
+                                            onclick: move |_| on_pause.call(id1.clone()),
+                                            "Pause"
+                                        }
+                                    }
+                                }
+                            }
+                            // Other active/queued stages: no action button. Pausing
+                            // QC/validate/transcode/create/verify/pending is meaningless,
+                            // so we don't offer it (matches the tightened state machine).
+                            UploadState::Validating
                             | UploadState::Transcoding
                             | UploadState::Creating
                             | UploadState::Verifying
-                            | UploadState::Pending => rsx! {
-                                button {
-                                    class: "btn-outline",
-                                    style: "{small_btn} background: transparent; color: var(--warning); border: 1px solid var(--warning);",
-                                    onclick: move |_| on_pause.call(id1.clone()),
-                                    crate::icons::PauseIcon {}
-                                    "Pause"
-                                }
-                            },
+                            | UploadState::Pending => rsx! {},
                             UploadState::Paused => rsx! {
                                 button {
                                     class: "btn-primary",

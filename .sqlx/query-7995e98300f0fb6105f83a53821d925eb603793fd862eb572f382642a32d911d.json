@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT capture_status, capture_json FROM upload_queue WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "capture_status",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "capture_json",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "7995e98300f0fb6105f83a53821d925eb603793fd862eb572f382642a32d911d"
+}

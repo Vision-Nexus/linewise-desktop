@@ -275,6 +275,112 @@ impl Database {
         Ok(())
     }
 
+    /// Guarded terminal COMPLETE — the fix for the terminal-revert and
+    /// give-up-reopen races. Marks a row `COMPLETED` and zeroes its durable
+    /// `retry_count` in ONE write, but only if the row is not ALREADY terminal
+    /// (`COMPLETED` / `GAVE_UP` / `REJECTED`). Returns `true` iff this call
+    /// applied it (`rows_affected == 1`).
+    ///
+    /// Completion is a fact about the server (the bytes are durable and
+    /// verified), so this write is intentionally NOT keyed on any per-worker
+    /// owner: whichever worker finished may record it. Folding the reset into the
+    /// same guarded UPDATE means a lagging duplicate worker can neither revert the
+    /// terminal state nor re-arm the 10-attempt give-up budget via a separate
+    /// `reset_retry_count`.
+    pub async fn settle_completed(&self, id: &str) -> Result<bool, DbError> {
+        let result = sqlx::query!(
+            "UPDATE upload_queue
+                SET state = 'COMPLETED', error_message = NULL, retry_count = 0,
+                    updated_at = datetime('now')
+             WHERE id = ? AND state NOT IN ('COMPLETED', 'GAVE_UP', 'REJECTED', 'PAUSED')",
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Guarded terminal FAILURE — moves a row to `Failed` or `GaveUp` with a
+    /// message, but refuses to overwrite a row that is ALREADY terminal, so a
+    /// lagging failure write can never clobber a `COMPLETED` a sibling just
+    /// recorded (a finished upload stays finished). `to` is bound, so the SQL
+    /// text is static and the `query!` macro stays compile-checked. Returns
+    /// `true` iff it applied.
+    pub async fn settle_failure(
+        &self,
+        id: &str,
+        to: UploadState,
+        error_message: &str,
+    ) -> Result<bool, DbError> {
+        let state_str = to.as_str();
+        let result = sqlx::query!(
+            "UPDATE upload_queue
+                SET state = ?, error_message = ?, updated_at = datetime('now')
+             WHERE id = ? AND state NOT IN ('COMPLETED', 'GAVE_UP', 'REJECTED', 'PAUSED')",
+            state_str,
+            error_message,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Guarded PAUSE — moves an in-flight upload to `Paused`, but ONLY from
+    /// `Uploading` (the sole legal predecessor; see `state_machine::allowed`).
+    /// A user pause that races a worker finishing is a clean no-op: once the row
+    /// has left `Uploading` (Verifying / Completed / Failed) this applies nothing,
+    /// so the terminal outcome wins. Returns `true` iff it applied.
+    pub async fn settle_paused(&self, id: &str) -> Result<bool, DbError> {
+        let result = sqlx::query!(
+            "UPDATE upload_queue
+                SET state = 'PAUSED', updated_at = datetime('now')
+             WHERE id = ? AND state = 'UPLOADING'",
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Persist a task's capture-metadata resolution so it survives a restart even
+    /// when the tags never made it into the file (a failed in-place embed). The
+    /// in-memory maps in `UploadEngine` remain the hot path; this is the durable
+    /// backing that `recover_capture_for_staged` hydrates from. `status` is
+    /// `none` / `filled` / `embedded` / `skipped`; `json` is the serialized
+    /// `CaptureMetadata` for `filled` / `embedded`, `None` otherwise.
+    pub async fn set_capture_row(
+        &self,
+        id: &str,
+        status: &str,
+        json: Option<&str>,
+    ) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE upload_queue SET capture_status = ?, capture_json = ?, updated_at = datetime('now') WHERE id = ?",
+            status,
+            json,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Read a task's persisted capture resolution as `(status, json)`. Used at
+    /// startup by `recover_capture_for_staged` to rehydrate the in-memory maps.
+    pub async fn get_capture_row(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, Option<String>)>, DbError> {
+        let row = sqlx::query!(
+            "SELECT capture_status, capture_json FROM upload_queue WHERE id = ?",
+            id,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.capture_status, r.capture_json)))
+    }
+
     pub async fn update_upload_progress(
         &self,
         id: &str,
@@ -657,5 +763,165 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| (r.id, r.document_id)))
+    }
+}
+
+#[cfg(test)]
+mod cas_tests {
+    //! Integration tests for the guarded terminal-settle primitives, run against
+    //! a real in-memory SQLite so they exercise the exact `WHERE` guards the
+    //! production code relies on (more faithful than a hand-mirrored fake).
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_db() -> Database {
+        // Single connection so the whole test shares one in-memory database.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        Database { pool }
+    }
+
+    async fn seed(db: &Database, id: &str, state: UploadState, retry_count: i64) {
+        let s = state.as_str();
+        sqlx::query!(
+            "INSERT INTO upload_queue
+                (id, local_path, filename, size, mime_type, tenant_id, project_id, state, retry_count)
+             VALUES (?, '/tmp/x.mp4', 'x.mp4', 1, 'video/mp4', 't', 'p', ?, ?)",
+            id,
+            s,
+            retry_count,
+        )
+        .execute(&db.pool)
+        .await
+        .expect("seed row");
+    }
+
+    async fn state_of(db: &Database, id: &str) -> UploadState {
+        db.get_upload_by_id(id)
+            .await
+            .expect("get")
+            .expect("row")
+            .state
+    }
+    async fn retry_of(db: &Database, id: &str) -> u32 {
+        db.get_upload_by_id(id)
+            .await
+            .expect("get")
+            .expect("row")
+            .retry_count
+    }
+
+    #[tokio::test]
+    async fn settle_completed_marks_and_folds_reset() {
+        // V4: the retry_count reset is folded into the guarded COMPLETED write.
+        let db = test_db().await;
+        seed(&db, "a", UploadState::Uploading, 7).await;
+        assert!(db.settle_completed("a").await.expect("settle"));
+        assert_eq!(state_of(&db, "a").await, UploadState::Completed);
+        assert_eq!(retry_of(&db, "a").await, 0);
+    }
+
+    #[tokio::test]
+    async fn settle_completed_is_idempotent_and_never_reverts() {
+        let db = test_db().await;
+        seed(&db, "a", UploadState::Verifying, 0).await;
+        assert!(db.settle_completed("a").await.expect("first"));
+        // Already terminal → the guard refuses the second write.
+        assert!(!db.settle_completed("a").await.expect("second"));
+        assert_eq!(state_of(&db, "a").await, UploadState::Completed);
+    }
+
+    #[tokio::test]
+    async fn settle_paused_only_from_uploading() {
+        let db = test_db().await;
+        // Uploading -> Paused applies (the sole legal predecessor).
+        seed(&db, "up", UploadState::Uploading, 0).await;
+        assert!(db.settle_paused("up").await.expect("pause uploading"));
+        assert_eq!(state_of(&db, "up").await, UploadState::Paused);
+        // Any non-Uploading state is a no-op — pause is meaningful only in flight.
+        seed(&db, "vf", UploadState::Verifying, 0).await;
+        assert!(!db.settle_paused("vf").await.expect("pause verifying"));
+        assert_eq!(state_of(&db, "vf").await, UploadState::Verifying);
+    }
+
+    #[tokio::test]
+    async fn paused_row_is_not_clobbered_by_late_settle() {
+        // A lagging worker that finishes/fails just after the user paused must not
+        // overwrite the Paused row — the settle guards exclude PAUSED.
+        let db = test_db().await;
+        seed(&db, "a", UploadState::Uploading, 0).await;
+        assert!(db.settle_paused("a").await.expect("pause"));
+        assert!(!db.settle_completed("a").await.expect("late complete"));
+        assert!(
+            !db.settle_failure("a", UploadState::Failed, "net")
+                .await
+                .expect("late fail")
+        );
+        assert_eq!(state_of(&db, "a").await, UploadState::Paused);
+    }
+
+    #[tokio::test]
+    async fn settle_failure_cannot_clobber_a_completed_row() {
+        // V3: a lagging FAILED write must not revert a COMPLETED row.
+        let db = test_db().await;
+        seed(&db, "a", UploadState::Uploading, 0).await;
+        assert!(db.settle_completed("a").await.expect("complete"));
+        assert!(
+            !db.settle_failure("a", UploadState::Failed, "net")
+                .await
+                .expect("late fail")
+        );
+        assert_eq!(state_of(&db, "a").await, UploadState::Completed);
+    }
+
+    #[tokio::test]
+    async fn settle_failure_moves_active_then_locks_at_terminal() {
+        let db = test_db().await;
+        seed(&db, "a", UploadState::Uploading, 0).await;
+        assert!(
+            db.settle_failure("a", UploadState::Failed, "net")
+                .await
+                .expect("fail")
+        );
+        assert_eq!(state_of(&db, "a").await, UploadState::Failed);
+        // Failed is not terminal, so give-up is allowed.
+        assert!(
+            db.settle_failure("a", UploadState::GaveUp, "gave up")
+                .await
+                .expect("giveup")
+        );
+        assert_eq!(state_of(&db, "a").await, UploadState::GaveUp);
+        // GaveUp is terminal → further failure writes are refused.
+        assert!(
+            !db.settle_failure("a", UploadState::Failed, "x")
+                .await
+                .expect("after terminal")
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_row_persists_and_reads_back() {
+        // V11: a clip's capture resolution survives on the row (default 'none',
+        // then a 'filled' write with JSON reads back intact).
+        let db = test_db().await;
+        seed(&db, "a", UploadState::Staged, 0).await;
+        assert_eq!(
+            db.get_capture_row("a").await.expect("get default"),
+            Some(("none".to_string(), None))
+        );
+        db.set_capture_row("a", "filled", Some(r#"{"lens":"x"}"#))
+            .await
+            .expect("set");
+        assert_eq!(
+            db.get_capture_row("a").await.expect("get filled"),
+            Some(("filled".to_string(), Some(r#"{"lens":"x"}"#.to_string())))
+        );
     }
 }

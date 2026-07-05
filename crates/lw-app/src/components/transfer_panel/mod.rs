@@ -459,14 +459,12 @@ pub fn TransferPanel() -> Element {
                 task.state = UploadState::Pending;
                 task.error_message = None;
                 task.retry_count = 0;
-                let mut task = task.clone();
+                let task = task.clone();
                 drop(tasks);
-                let eng = engine.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = eng.process_task(&mut task).await {
-                        e.log(format_args!("Retry of {}", task.filename));
-                    }
-                });
+                // Dispatch through the bounded, single-flight path (never a bare
+                // process_task spawn): a manual retry must not exceed
+                // max_concurrent or double-drive a row already in flight.
+                engine.dispatch_one(task);
             }
         });
     };
@@ -509,17 +507,33 @@ pub fn TransferPanel() -> Element {
         });
     };
 
-    let db_for_pause = services.db.clone();
+    let engine_for_pause = services.upload_engine.clone();
     let mut app_state_pause = app_state.clone();
     let on_pause = move |task_id: String| {
-        let db = db_for_pause.clone();
+        // Instant feedback: mark the row "Pausing…" right away (rows render a
+        // disabled "Pausing…" instead of the Pause button). We deliberately do NOT
+        // set Paused here — a real Paused only arrives from the engine's
+        // StateChanged{Paused}. Any engine state event, or a no-op pause_task,
+        // clears this transient marker, so the UI can never claim Paused the engine
+        // didn't actually do (no "shows Resume but engine never paused").
+        app_state_pause.pausing.write().insert(task_id.clone());
+        let engine = engine_for_pause.clone();
+        let mut app_state_after = app_state_pause.clone();
         spawn(async move {
-            let _ = db
-                .update_upload_state(&task_id, UploadState::Paused, None)
-                .await;
-            let mut tasks = app_state_pause.upload_tasks.write();
-            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-                task.state = UploadState::Paused;
+            match engine.pause_task(&task_id).await {
+                // Engine accepted: the worker will stop at the next chunk/part
+                // boundary and emit StateChanged{Paused}; upload_runtime clears the
+                // marker and flips the row to Paused (Resume button) then.
+                Ok(true) => {}
+                // No-op: the row already left Uploading (finished/failed just now).
+                // Drop the transient marker — the engine's own event drives the row.
+                Ok(false) => {
+                    app_state_after.pausing.write().remove(&task_id);
+                }
+                Err(e) => {
+                    tracing::warn!("pause_task({task_id}) failed: {e}");
+                    app_state_after.pausing.write().remove(&task_id);
+                }
             }
         });
     };
@@ -538,14 +552,12 @@ pub fn TransferPanel() -> Element {
             if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
                 task.state = UploadState::Pending;
                 task.error_message = None;
-                let mut task = task.clone();
+                let task = task.clone();
                 drop(tasks);
-                let eng = engine.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = eng.process_task(&mut task).await {
-                        e.log(format_args!("Resume of {}", task.filename));
-                    }
-                });
+                // Same bounded, single-flight dispatch as on_retry — spawning
+                // process_task directly here would bypass the upload_semaphore
+                // and single-flight guard.
+                engine.dispatch_one(task);
             }
         });
     };

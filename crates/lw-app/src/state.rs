@@ -7,7 +7,7 @@ use lw_core::error::ConfigError;
 use lw_core::models::{Project, Tenant, UploadState, UploadTask, UserInfo};
 use lw_core::upload::{UploadEngine, UploadEvent};
 use lw_core::version_check::VersionStatus;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tokio::task::JoinHandle;
@@ -180,6 +180,14 @@ pub struct AppState {
     /// `Progress` for tens of seconds). Kept out of `upload_tasks` so a retry
     /// tick doesn't churn the whole list.
     pub part_retrying: Signal<HashMap<String, u32>>,
+    /// Task ids the user just clicked Pause on, held ONLY for the "Pausing…"
+    /// transition. Set on click for instant feedback (the row shows "Pausing…",
+    /// disabled, instead of the Pause button). Cleared as soon as ANY engine
+    /// state event for that task arrives (StateChanged / Completed / Failed) or
+    /// `pause_task` reports a no-op — so the UI never claims Paused on its own; a
+    /// real Paused only comes from the engine's `StateChanged{Paused}`. This makes
+    /// "UI shows Resume but the engine didn't pause" structurally impossible.
+    pub pausing: Signal<HashSet<String>>,
     pub projects: Signal<Vec<Project>>,
     pub tenant_projects: Signal<HashMap<String, Vec<Project>>>,
     pub is_loading: Signal<bool>,
@@ -286,6 +294,7 @@ impl AppState {
             upload_speed: Signal::new(HashMap::new()),
             network_health: Signal::new(None),
             part_retrying: Signal::new(HashMap::new()),
+            pausing: Signal::new(HashSet::new()),
             projects: Signal::new(Vec::new()),
             tenant_projects: Signal::new(HashMap::new()),
             is_loading: Signal::new(false),

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE upload_queue\n                SET state = 'PAUSED', updated_at = datetime('now')\n             WHERE id = ? AND state = 'UPLOADING'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "b71798fbd4ffda2b42a47f2d0a458479323838fce73db454c682e90930694098"
+}

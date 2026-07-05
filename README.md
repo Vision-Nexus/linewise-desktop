@@ -105,7 +105,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed module diagrams (Mermaid), d
 linewise-desktop/
 ├── crates/
 │   ├── lw-core/    # Business logic (auth, upload, storage, DB, video)
-│   └── lw-app/     # Dioxus desktop UI (sidebar, upload queue, login)
+│   ├── lw-app/     # Dioxus desktop UI (sidebar, upload queue, login)
+│   └── xtask/      # Release + packaging tooling (cargo xtask release / bundle-ffmpeg / generate-icons)
+│                   # (crates/lw-chat/ is present but excluded from the workspace — not built)
 ├── package.json     # Tailwind CSS dev dependency
 ├── ARCHITECTURE.md  # Module diagrams
 ├── CLAUDE.md        # AI coding guidelines

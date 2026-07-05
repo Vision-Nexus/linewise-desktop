@@ -161,6 +161,7 @@ impl StorageBackend {
     total_size = session.total_size,
     start_offset,
 ))]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_file_chunked(
     backend: &StorageBackend,
     session: &UploadSession,
@@ -169,6 +170,7 @@ pub async fn upload_file_chunked(
     chunk_size: u64,
     max_retries: u32,
     on_progress: &ProgressFn,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<u64, UploadError> {
     let mut file = tokio::fs::File::open(file_path)
         .await
@@ -199,6 +201,13 @@ pub async fn upload_file_chunked(
     }
 
     while offset < total {
+        // Cooperative pause/cancel: the engine trips this flag from `pause_task`.
+        // Checked at each chunk boundary — already-confirmed bytes are durable
+        // server-side, so a resumed dispatch recovers the true offset via
+        // `query_progress` and picks up cleanly.
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(UploadError::Cancelled);
+        }
         let this_chunk = (total - offset).min(chunk_size) as usize;
         let mut buf = vec![0u8; this_chunk];
         // A short read means the file shrank mid-upload (the snapshot guard above
@@ -584,6 +593,7 @@ impl GcsBackend {
         parts = parts.len(),
         part_size,
     ))]
+    #[allow(clippy::too_many_arguments)]
     pub async fn upload_file_mpu(
         &self,
         file_path: &Path,
@@ -593,6 +603,7 @@ impl GcsBackend {
         max_retries: u32,
         on_progress: &ProgressFn,
         on_retry: Option<&Arc<RetryFn>>,
+        cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<Vec<(u32, String)>, UploadError> {
         // The part layout (per-part offsets/lengths) was computed from
         // `total_size`. If the file is no longer that size, it was mutated after
@@ -653,6 +664,14 @@ impl GcsBackend {
         let mut collected: Vec<(u32, String)> = Vec::with_capacity(parts.len());
         let mut confirmed: u64 = 0;
         while let Some(joined) = join_set.join_next().await {
+            // Cooperative pause/cancel at each part boundary: abort the remaining
+            // in-flight parts and stop. Already-completed parts stay durable on
+            // GCS (ListParts finds them on resume); the MPU is deliberately NOT
+            // aborted here, so a resumed dispatch re-sends only the missing parts.
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                join_set.shutdown().await;
+                return Err(UploadError::Cancelled);
+            }
             let outcome = match joined {
                 Ok(result) => result?,
                 Err(join_err) => {

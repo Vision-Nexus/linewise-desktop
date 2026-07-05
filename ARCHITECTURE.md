@@ -16,14 +16,13 @@ graph TB
         App --> Sidebar
         App --> Upload
         App --> Login
-        App --> ChatUI
         Sidebar --> State
         Upload --> State
         Login --> State
         State --> Core
     end
 
-    subgraph "lw-chat (Chat Component)"
+    subgraph "lw-chat (Chat Component — EXCLUDED from workspace, NOT built into lw-app)"
         direction TB
         ChatUI["ChatPanel<br/>SSE streaming · bubbles<br/>tool call cards"]
         MD["Markdown<br/>pulldown-cmark → RSX<br/>portable (no innerHTML)"]
@@ -161,7 +160,7 @@ graph LR
         A8[project_select.rs]
     end
 
-    subgraph "lw-chat"
+    subgraph "lw-chat (excluded from workspace — not built)"
         H1[chat.rs]
         H2[markdown.rs]
         H3[client.rs]
@@ -185,7 +184,6 @@ graph LR
         C12[error.rs]
     end
 
-    A1 --> H1
     H1 --> H2
     H1 --> H3
     H3 --> H4
@@ -225,7 +223,7 @@ graph LR
 
 | Module | File | Purpose |
 |--------|------|---------|
-| **App** | `app.rs` | Root component, system tray, session restore, global CSS with dark/light theme, Upload/Chat tab bar |
+| **App** | `app.rs` | Root component, system tray, session restore, version-gate banners, global CSS with dark/light theme, transfer panel (in-progress / completed / failed tabs). No Chat tab — lw-chat is not wired in (see lw-chat status below) |
 | **Sidebar** | `components/sidebar.rs` | Two-level org→project tree, expand/collapse, project selection |
 | **Upload Queue** | `components/upload_queue.rs` | Two-step upload (stage→confirm), DnD, progress, history, retry/pause/resume/remove |
 | **Login** | `components/login.rs` | Email/password login, OAuth buttons (Google, Microsoft) |
@@ -234,7 +232,9 @@ graph LR
 | **State** | `state.rs` | `AppState` (Dioxus Signals) + `CoreServices` (Arc shared services) |
 | **Styles** | `styles.rs` | Fixed-px layout constants, CSS variable button/input/select styles |
 
-### lw-chat (Chat Component — self-contained)
+### lw-chat (Chat Component — self-contained) — DORMANT / NOT BUILT
+
+> **Status:** `lw-chat` is **excluded from the Cargo workspace** (`exclude = ["crates/lw-chat"]` in `Cargo.toml`) and is **not a dependency of `lw-app`** — it is present in-tree but is not compiled or mounted into the shipping desktop app. The table below describes the crate's contents for when it is revived; it does not reflect a live feature.
 
 | Module | File | Purpose |
 |--------|------|---------|
@@ -277,7 +277,7 @@ graph LR
 | Credentials | keyring 3.x (OS keychain) |
 | System Tray | tray-icon (via Dioxus desktop) |
 | Theming | CSS variables + `@media (prefers-color-scheme: dark)` |
-| Markdown | pulldown-cmark 0.12 (portable RSX renderer) |
+| Markdown | pulldown-cmark 0.12 (portable RSX renderer — lw-chat only, dormant) |
 | Streaming | async-stream + tokio-stream (SSE parsing) |
 
 ## Configuration
@@ -318,4 +318,4 @@ file_filter = ["video/*"]
 | Get upload URL | POST | `.../documents/{did}/upload-url?resumable=true` |
 | Get document | GET | `.../documents/{did}` |
 | Verify upload | GET | `.../documents/{did}` (poll until gcsUri set) |
-| Chat completions | POST | `/api/org/{tenant}/chat/completions` (SSE stream) |
+| Chat completions | POST | `/api/org/{tenant}/chat/completions` (SSE stream) — used only by the dormant lw-chat crate, not the shipping app |
