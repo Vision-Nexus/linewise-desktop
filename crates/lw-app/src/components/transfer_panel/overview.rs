@@ -125,12 +125,11 @@ pub fn compute_summary(
             }
         }
 
-        if task.state == UploadState::Uploading {
-            if let Some(&spd) = upload_speed.get(&task.id) {
-                if spd > 0.0 {
-                    aggregate_speed_bps += spd;
-                }
-            }
+        if task.state == UploadState::Uploading
+            && let Some(&spd) = upload_speed.get(&task.id)
+            && spd > 0.0
+        {
+            aggregate_speed_bps += spd;
         }
     }
 
@@ -336,5 +335,198 @@ pub fn BatchOverview(summary: BatchSummary) -> Element {
                 }
             }
         }
+    }
+}
+
+/// Which scope a rolled-up nav-dot summarizes. Only affects the "complete"
+/// tooltip wording (a batch reads "Batch complete", an org reads "All batches
+/// complete"); the dot colour/pulse and the in-progress tooltip are identical.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavScope {
+    Batch,
+    Org,
+}
+
+/// Render-ready details for a rolled-up status dot. `None` from [`nav_status`]
+/// means idle — the caller renders no dot at all.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NavStatusDetails {
+    /// CSS custom-property colour token for the dot fill.
+    pub color: &'static str,
+    /// Whether the dot animates (the in-progress `lw-ping` pulse).
+    pub pulse: bool,
+    /// Hover tooltip summarising the rolled-up counts.
+    pub tooltip: String,
+}
+
+/// Roll a task slice up into a nav-dot status. Scope-agnostic: pass a
+/// batch-scoped slice (filtered to one tenant+project) for a batch dot, or an
+/// org-scoped slice (filtered to one tenant, any project) for an org dot.
+///
+/// Returns `None` when the slice is empty (idle → render no dot). Mirrors the
+/// prototype's `getBatchNavStatus`: in-progress wins, then failed, then
+/// complete. Classification uses [`PrimaryTab::contains`] — the single source
+/// of truth also used by the tab counts — so a dot can never disagree with the
+/// tabs. Pure state tally (no progress maps): the dot only changes on state
+/// transitions, so callers re-render on `upload_tasks` changes, not byte ticks.
+pub fn nav_status(tasks: &[UploadTask], scope: NavScope) -> Option<NavStatusDetails> {
+    if tasks.is_empty() {
+        return None;
+    }
+    let (mut completed, mut failed, mut in_progress) = (0usize, 0usize, 0usize);
+    for t in tasks {
+        if PrimaryTab::Completed.contains(&t.state) {
+            completed += 1;
+        } else if PrimaryTab::Failed.contains(&t.state) {
+            failed += 1;
+        } else {
+            in_progress += 1;
+        }
+    }
+    let total = tasks.len();
+    // Wording differs only on the terminal ("complete") tooltips.
+    let complete_lead = match scope {
+        NavScope::Batch => "Batch complete",
+        NavScope::Org => "All batches complete",
+    };
+
+    if in_progress > 0 {
+        return Some(NavStatusDetails {
+            color: "var(--info)",
+            pulse: true,
+            tooltip: format!("{completed} of {total} videos \u{00B7} {in_progress} in progress"),
+        });
+    }
+    if failed > 0 {
+        return Some(NavStatusDetails {
+            color: "var(--error)",
+            pulse: false,
+            tooltip: format!(
+                "{complete_lead} \u{00B7} {completed} succeeded \u{00B7} {failed} failed"
+            ),
+        });
+    }
+    Some(NavStatusDetails {
+        color: "var(--success)",
+        pulse: false,
+        tooltip: format!("{complete_lead} \u{00B7} {completed} of {total} videos"),
+    })
+}
+
+/// The rolled-up status dot: an 8px colour dot with an optional `lw-ping`
+/// pulse and a hover tooltip. Shared by the sidebar org rows, the sidebar
+/// batch rows, and the org-landing batch cards so all three read from the same
+/// [`nav_status`] output and look identical.
+#[component]
+pub fn NavDotView(details: NavStatusDetails) -> Element {
+    rsx! {
+        span {
+            style: "position: relative; display: inline-flex; width: 8px; height: 8px; flex-shrink: 0;",
+            title: "{details.tooltip}",
+            if details.pulse {
+                span {
+                    class: "lw-ping",
+                    style: "position: absolute; inset: 0; border-radius: 999px; background: {details.color};",
+                }
+            }
+            span {
+                style: "position: relative; width: 8px; height: 8px; border-radius: 999px; background: {details.color};",
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lw_core::models::UploadState;
+
+    fn task(state: UploadState) -> UploadTask {
+        UploadTask {
+            id: "t".to_string(),
+            local_path: "/x".to_string(),
+            filename: "f.mp4".to_string(),
+            size: 100,
+            mime_type: "video/mp4".to_string(),
+            tenant_id: "org".to_string(),
+            project_id: "proj".to_string(),
+            document_id: None,
+            session_id: None,
+            mpu_upload_id: None,
+            bytes_uploaded: 0,
+            state,
+            error_message: None,
+            hash: None,
+            source_md5: None,
+            source_crc32c: None,
+            source_sha256_head_256kib: None,
+            validation_warnings: Vec::new(),
+            rejection_reasons: Vec::new(),
+            retry_count: 0,
+            transcode: false,
+            transcoded_size: None,
+            video_info: None,
+            force_upload: false,
+            created_at: "2026-06-28 22:32:15".to_string(),
+            updated_at: "2026-06-28 22:32:15".to_string(),
+        }
+    }
+
+    #[test]
+    fn nav_status_idle_when_no_tasks() {
+        assert!(nav_status(&[], NavScope::Batch).is_none());
+        assert!(nav_status(&[], NavScope::Org).is_none());
+    }
+
+    #[test]
+    fn nav_status_in_progress_wins_over_failed_and_complete() {
+        let tasks = [
+            task(UploadState::Uploading),
+            task(UploadState::Failed),
+            task(UploadState::Completed),
+        ];
+        let d = nav_status(&tasks, NavScope::Batch).expect("some dot");
+        assert_eq!(d.color, "var(--info)");
+        assert!(d.pulse);
+        assert_eq!(d.tooltip, "1 of 3 videos \u{00B7} 1 in progress");
+    }
+
+    #[test]
+    fn nav_status_failed_when_no_in_progress() {
+        let tasks = [
+            task(UploadState::Completed),
+            task(UploadState::Failed),
+            task(UploadState::Rejected),
+        ];
+        let d = nav_status(&tasks, NavScope::Batch).expect("some dot");
+        assert_eq!(d.color, "var(--error)");
+        assert!(!d.pulse);
+        assert_eq!(
+            d.tooltip,
+            "Batch complete \u{00B7} 1 succeeded \u{00B7} 2 failed"
+        );
+    }
+
+    #[test]
+    fn nav_status_complete_when_all_done() {
+        let tasks = [task(UploadState::Completed), task(UploadState::Completed)];
+        let d = nav_status(&tasks, NavScope::Batch).expect("some dot");
+        assert_eq!(d.color, "var(--success)");
+        assert!(!d.pulse);
+        assert_eq!(d.tooltip, "Batch complete \u{00B7} 2 of 2 videos");
+    }
+
+    #[test]
+    fn nav_status_org_scope_changes_complete_wording() {
+        let done = [task(UploadState::Completed)];
+        assert_eq!(
+            nav_status(&done, NavScope::Org).expect("some").tooltip,
+            "All batches complete \u{00B7} 1 of 1 videos"
+        );
+        let with_fail = [task(UploadState::Completed), task(UploadState::GaveUp)];
+        assert_eq!(
+            nav_status(&with_fail, NavScope::Org).expect("some").tooltip,
+            "All batches complete \u{00B7} 1 succeeded \u{00B7} 1 failed"
+        );
     }
 }

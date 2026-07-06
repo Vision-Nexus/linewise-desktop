@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue ORDER BY created_at DESC LIMIT 100",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload, created_at, updated_at\n             FROM upload_queue ORDER BY created_at DESC LIMIT 100",
   "describe": {
     "columns": [
       {
@@ -122,6 +122,16 @@
         "name": "force_upload",
         "ordinal": 23,
         "type_info": "Integer"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 24,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 25,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -151,8 +161,10 @@
       true,
       false,
       true,
+      false,
+      false,
       false
     ]
   },
-  "hash": "69262e5f0b3244210f42185c35c1ed8ac074137a7336a2cd07a1ecd0efce1501"
+  "hash": "ad9873a1675cd113d33898d5c5ee66afc67623fd6f2a0032ef655834b5f97616"
 }

@@ -1098,6 +1098,11 @@ impl UploadEngine {
         let is_video = mime_type.starts_with("video/");
         let t_after_mime = t_entry.elapsed();
 
+        // Mirror the row's DEFAULT `datetime('now')` timestamps in the in-memory
+        // task so the transfer panel shows an "Added" time immediately (the DB
+        // stays the source of truth on reload). UTC, SQLite datetime shape.
+        let now_ts = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
         let task = UploadTask {
             id: Uuid::new_v4().to_string(),
             local_path: path.to_string_lossy().to_string(),
@@ -1134,6 +1139,8 @@ impl UploadEngine {
             transcoded_size: None,
             video_info: None,
             force_upload: false,
+            created_at: now_ts.clone(),
+            updated_at: now_ts,
         };
 
         self.db.insert_upload_task(&task).await?;

@@ -39,6 +39,8 @@ struct UploadRow {
     transcode: i64,
     transcoded_size: Option<i64>,
     force_upload: i64,
+    created_at: Option<String>,
+    updated_at: Option<String>,
 }
 
 impl From<UploadRow> for UploadTask {
@@ -78,6 +80,8 @@ impl From<UploadRow> for UploadTask {
                 .and_then(|s| serde_json::from_str(s).ok())
                 .map(std::sync::Arc::new),
             force_upload: r.force_upload != 0,
+            created_at: r.created_at.unwrap_or_default(),
+            updated_at: r.updated_at.unwrap_or_default(),
         }
     }
 }
@@ -624,7 +628,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload, created_at, updated_at
              FROM upload_queue
              WHERE state = 'FAILED'
                AND retry_count < 10
@@ -646,7 +650,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload, created_at, updated_at
              FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -660,7 +664,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload, created_at, updated_at
              FROM upload_queue
              WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')
              ORDER BY created_at ASC, rowid ASC",
@@ -682,7 +686,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload, created_at, updated_at
              FROM upload_queue WHERE id = ?",
             id,
         )
@@ -696,7 +700,7 @@ impl Database {
             UploadRow,
             "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,
                     document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,
-                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload
+                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload, created_at, updated_at
              FROM upload_queue ORDER BY created_at DESC LIMIT 100",
         )
         .fetch_all(&self.pool)

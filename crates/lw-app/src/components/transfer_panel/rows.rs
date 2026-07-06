@@ -85,6 +85,17 @@ pub struct VideoDetails {
     raw: Vec<(String, String)>,
 }
 
+impl VideoDetails {
+    /// The "Source metadata" rows — Codec / Resolution / Frame rate / Bitrate /
+    /// optional Audio / Duration / Container. Exposed so the Completed-tab
+    /// detail (`completed.rs`) can render the same source specs the in-progress
+    /// `RowDetails` shows, reusing this one `build_video_details` output instead
+    /// of duplicating the probe-formatting logic.
+    pub fn structural(&self) -> &[(String, String)] {
+        &self.structural
+    }
+}
+
 pub fn build_video_details(
     task: &UploadTask,
     device_encoder_signatures: &'static [DeviceEncoderSignature],
@@ -186,6 +197,10 @@ fn RowDetails(
                     div { style: "color: var(--text); word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{task.local_path}" }
                     div { style: "color: var(--text-muted);", "Size" }
                     div { style: "color: var(--text);", "{format_size(task.size)}" }
+                    if let Some(added) = format_clip_time(&task.created_at) {
+                        div { style: "color: var(--text-muted);", "Added" }
+                        div { style: "color: var(--text);", "{added}" }
+                    }
                 }
                 if let Some(d) = details {
                     div { style: "{group_label}", "Source metadata" }
@@ -1166,5 +1181,62 @@ fn format_duration(secs: f64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m}:{s:02}")
+    }
+}
+
+/// Parse a stored upload timestamp into a naive UTC datetime. Accepts the
+/// SQLite `datetime('now')` shape ("YYYY-MM-DD HH:MM:SS", UTC) plus a couple of
+/// ISO-8601 variants. `None` when the string is empty or unrecognised.
+pub fn parse_clip_datetime(raw: &str) -> Option<chrono::NaiveDateTime> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S"))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f"))
+        .ok()
+}
+
+/// Format a stored upload timestamp for display: parse it as UTC, convert to
+/// the local timezone, and render like "Jun 28, 2026 22:32". `None` when the
+/// timestamp can't be parsed, so callers fall back to the raw string.
+pub fn format_clip_time(raw: &str) -> Option<String> {
+    use chrono::{Local, TimeZone, Utc};
+    let naive = parse_clip_datetime(raw)?;
+    let local = Utc.from_utc_datetime(&naive).with_timezone(&Local);
+    Some(local.format("%b %-d, %Y %H:%M").to_string())
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+
+    #[test]
+    fn parses_sqlite_datetime_shape() {
+        let dt = parse_clip_datetime("2026-06-28 22:32:15").expect("parses sqlite form");
+        assert_eq!(dt.to_string(), "2026-06-28 22:32:15");
+    }
+
+    #[test]
+    fn parses_iso_datetime_shape() {
+        assert!(parse_clip_datetime("2026-06-28T22:32:15").is_some());
+    }
+
+    #[test]
+    fn rejects_garbage_timestamps() {
+        assert!(parse_clip_datetime("").is_none());
+        assert!(parse_clip_datetime("not a date").is_none());
+        assert!(parse_clip_datetime("2026-13-40 99:99:99").is_none());
+    }
+
+    #[test]
+    fn formats_valid_and_rejects_garbage() {
+        // Midday mid-month: no timezone shifts the year or month, so these
+        // assertions hold regardless of the test machine's local timezone.
+        let s = format_clip_time("2026-06-28 12:00:00").expect("formats a valid stamp");
+        assert!(s.contains("2026"), "year present: {s}");
+        assert!(s.contains("Jun"), "month present: {s}");
+        assert!(format_clip_time("garbage").is_none());
     }
 }

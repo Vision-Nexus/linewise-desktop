@@ -671,6 +671,14 @@ pub struct UploadTask {
     /// affordance in the UI, which is itself gated on
     /// [`UserInfo::is_super_admin`].
     pub force_upload: bool,
+    /// When the row was first staged (SQLite `datetime('now')` UTC text, e.g.
+    /// "2026-06-28 22:32:15"). Immutable after insert; shown as "Added" on
+    /// in-progress rows. Empty only on rows built before this field existed.
+    pub created_at: String,
+    /// When the row was last written (UTC text). Stamped on every state/progress
+    /// update, so on a `Completed` row it is ~the upload-completion time and is
+    /// shown as "Uploaded".
+    pub updated_at: String,
 }
 
 /// Video probe result

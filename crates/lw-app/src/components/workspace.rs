@@ -3,17 +3,19 @@
 //!
 //! * no org selected  → "Select an organization" empty state
 //! * org, no batch    → the org landing: title + "Select a batch" (with folder
-//!                      cards) or "No batches yet"
+//!   cards) or "No batches yet"
 //! * org + batch      → the batch view: org/batch header + the (batch-scoped)
-//!                      transfer panel
+//!   transfer panel
 //!
 //! Selection still flows through `AppState::selected_tenant` /
 //! `selected_project`; this component just renders the matching view.
 
-use crate::components::transfer_panel::TransferPanel;
+use crate::components::transfer_panel::{
+    NavDotView, NavScope, NavStatusDetails, TransferPanel, compute_summary, nav_status,
+};
 use crate::state::AppState;
 use dioxus::prelude::*;
-use lw_core::models::{Project, Tenant};
+use lw_core::models::{Project, Tenant, UploadTask};
 
 #[component]
 pub fn Workspace() -> Element {
@@ -86,12 +88,57 @@ fn OrgLanding(tenant: Tenant) -> Element {
         format!("{n} batches")
     };
 
+    // Roll every task in this org (across all its batches) up into a status
+    // dot + a one-line summary under the org title. Empty org → no dot, just
+    // the batch count (unchanged look). Same rollup the sidebar org row uses.
+    let upload_tasks = app_state.upload_tasks.read();
+    let org_tasks: Vec<UploadTask> = upload_tasks
+        .iter()
+        .filter(|t| t.tenant_id == tenant.id)
+        .cloned()
+        .collect();
+    let nav = nav_status(&org_tasks, NavScope::Org);
+    let summary = {
+        let up = app_state.upload_progress.read();
+        let hp = app_state.hash_progress.read();
+        let sp = app_state.upload_speed.read();
+        compute_summary(&org_tasks, &up, &hp, &sp)
+    };
+    let status_text = if summary.in_progress_files > 0 {
+        let mut s = format!(
+            "{}% overall \u{00B7} {} in progress",
+            summary.overall_progress_pct, summary.in_progress_files
+        );
+        if summary.failed_files > 0 {
+            s.push_str(&format!(" \u{00B7} {} failed", summary.failed_files));
+        }
+        s
+    } else if summary.failed_files > 0 {
+        format!(
+            "{} of {} videos \u{00B7} {} failed",
+            summary.completed_files, summary.total_files, summary.failed_files
+        )
+    } else {
+        format!(
+            "{} of {} videos",
+            summary.completed_files, summary.total_files
+        )
+    };
+
     rsx! {
         div {
             class: "flex flex-1 flex-col gap-8 p-6",
             header {
                 h1 { class: "text-2xl font-semibold tracking-tight text-foreground", "{tenant.display_name}" }
-                p { class: "text-sm text-muted-foreground", "{batch_label}" }
+                div {
+                    class: "flex items-center gap-2 text-sm text-muted-foreground",
+                    span { "{batch_label}" }
+                    if let Some(dot) = nav {
+                        span { "\u{00B7}" }
+                        NavDotView { details: dot }
+                        span { "{status_text}" }
+                    }
+                }
             }
 
             if projects.is_empty() {
@@ -113,10 +160,21 @@ fn OrgLanding(tenant: Tenant) -> Element {
                     div {
                         class: "flex w-full flex-row flex-wrap justify-start gap-5",
                         for project in projects.iter() {
-                            BatchCard {
-                                key: "{project.id}",
-                                tenant_id: tenant.id.clone(),
-                                project: project.clone(),
+                            {
+                                let project_tasks: Vec<UploadTask> = upload_tasks
+                                    .iter()
+                                    .filter(|t| t.tenant_id == tenant.id && t.project_id == project.id)
+                                    .cloned()
+                                    .collect();
+                                let card_nav = nav_status(&project_tasks, NavScope::Batch);
+                                rsx! {
+                                    BatchCard {
+                                        key: "{project.id}",
+                                        tenant_id: tenant.id.clone(),
+                                        project: project.clone(),
+                                        nav: card_nav,
+                                    }
+                                }
                             }
                         }
                     }
@@ -127,7 +185,7 @@ fn OrgLanding(tenant: Tenant) -> Element {
 }
 
 #[component]
-fn BatchCard(tenant_id: String, project: Project) -> Element {
+fn BatchCard(tenant_id: String, project: Project, nav: Option<NavStatusDetails>) -> Element {
     let app_state = use_context::<AppState>();
     let mut selected_project = app_state.selected_project;
     let mut projects_sig = app_state.projects;
@@ -148,12 +206,18 @@ fn BatchCard(tenant_id: String, project: Project) -> Element {
                 let projs = tenant_projects_sig.read().get(&tid).cloned().unwrap_or_default();
                 projects_sig.set(projs);
             },
-            span {
-                class: "text-muted-foreground group-hover:text-primary transition-colors",
-                style: "display: inline-flex;",
-                // Filled folder (matches the prototype's fill-muted/60) — the
-                // "solid folder" look the card relies on, not a card drop shadow.
-                crate::icons::FolderIcon { size: "36", fill: "oklch(0.97 0 0 / 0.6)" }
+            div {
+                class: "flex items-start justify-between",
+                span {
+                    class: "text-muted-foreground group-hover:text-primary transition-colors",
+                    style: "display: inline-flex;",
+                    // Filled folder (matches the prototype's fill-muted/60) — the
+                    // "solid folder" look the card relies on, not a card drop shadow.
+                    crate::icons::FolderIcon { size: "36", fill: "oklch(0.97 0 0 / 0.6)" }
+                }
+                if let Some(dot) = nav {
+                    NavDotView { details: dot }
+                }
             }
             div {
                 class: "w-full min-w-0",

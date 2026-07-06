@@ -459,6 +459,8 @@ impl AppState {
             transcoded_size: None,
             video_info: None,
             force_upload: false,
+            created_at: "2026-07-06 09:00:00".to_string(),
+            updated_at: "2026-07-06 09:12:34".to_string(),
         };
 
         let mut tasks = vec![

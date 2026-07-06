@@ -14,11 +14,12 @@
 //! with the dedup marker, which this view turns into an "Already exists"
 //! badge instead of an error.
 
-use super::rows::{SectionHeader, format_size};
+use super::rows::{SectionHeader, build_video_details, format_clip_time, format_size};
 use super::tabs::{CompletedTab, SubTabButton};
 use crate::state::AppState;
 use dioxus::prelude::*;
 use lw_core::models::{Project, Tenant, UploadState, UploadTask};
+use lw_core::video;
 
 /// Marker string written into `error_message` by the `DuplicateDetected`
 /// reconcile so a deduped row reads as "already stored" rather than failed.
@@ -210,6 +211,12 @@ fn CompletedDetail(
 
     let detail_style = "display: grid; grid-template-columns: max-content 1fr; column-gap: 12px; row-gap: 4px; font-size: 12px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);";
 
+    // Source specs (codec / resolution / frame rate / bitrate / audio /
+    // duration / container) — reuses the same probe formatting the in-progress
+    // RowDetails shows, so a completed clip is no longer thinner than an
+    // in-progress one. `None` until the probe landed (or non-video).
+    let video_details = build_video_details(&task, video::device_encoder_signatures());
+
     rsx! {
         div {
             style: "{detail_style}",
@@ -219,6 +226,16 @@ fn CompletedDetail(
             div { style: "color: var(--text); word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{task.local_path}" }
             div { style: "color: var(--text-muted);", "Size" }
             div { style: "color: var(--text);", "{format_size(task.size)}" }
+            if let Some(details) = video_details {
+                for (key , value) in details.structural() {
+                    div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                    div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                }
+            }
+            if let Some(uploaded) = format_clip_time(&task.updated_at) {
+                div { style: "color: var(--text-muted);", "Uploaded" }
+                div { style: "color: var(--text);", "{uploaded}" }
+            }
             if already_exists {
                 div { style: "color: var(--text-muted);", "Note" }
                 div { style: "color: var(--text-secondary);", "Content already existed on the server; no new upload was performed." }

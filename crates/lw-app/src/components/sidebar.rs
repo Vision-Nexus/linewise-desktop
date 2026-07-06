@@ -15,9 +15,10 @@
 //! pre-fetch kicks off with a populated tenant list.
 
 use crate::components::network_status::NetworkStatusPill;
+use crate::components::transfer_panel::{NavDotView, NavScope, nav_status};
 use crate::state::{AppState, CoreServices};
 use dioxus::prelude::*;
-use lw_core::models::{Tenant, UploadState, UploadTask};
+use lw_core::models::{Tenant, UploadTask};
 
 /// Initials for an org's avatar tile — first letter of the first two words,
 /// falling back to the first two characters.
@@ -32,63 +33,6 @@ fn org_initials(name: &str) -> String {
     } else {
         initials.to_uppercase()
     }
-}
-
-/// Per-batch nav dot for a project row (mirrors the prototype `getBatchNavStatus`).
-/// `None` = idle (no tasks) → no dot. Otherwise a coloured dot + tooltip; the
-/// in-progress dot pulses.
-struct NavDot {
-    color: &'static str,
-    pulse: bool,
-    tooltip: String,
-}
-
-fn compute_nav_dot(tasks: &[UploadTask], tenant_id: &str, project_id: &str) -> Option<NavDot> {
-    let (mut total, mut completed, mut failed, mut in_progress) = (0usize, 0usize, 0usize, 0usize);
-    for t in tasks
-        .iter()
-        .filter(|t| t.tenant_id == tenant_id && t.project_id == project_id)
-    {
-        total += 1;
-        match t.state {
-            UploadState::Completed => completed += 1,
-            UploadState::Failed | UploadState::GaveUp | UploadState::Rejected => failed += 1,
-            UploadState::QualityChecking
-            | UploadState::Hashing
-            | UploadState::Staged
-            | UploadState::Pending
-            | UploadState::Validating
-            | UploadState::Transcoding
-            | UploadState::Creating
-            | UploadState::Uploading
-            | UploadState::Verifying
-            | UploadState::Paused => in_progress += 1,
-        }
-    }
-    if total == 0 {
-        return None;
-    }
-    if in_progress > 0 {
-        return Some(NavDot {
-            color: "var(--info)",
-            pulse: true,
-            tooltip: format!("{completed} of {total} videos \u{00B7} {in_progress} in progress"),
-        });
-    }
-    if failed > 0 {
-        return Some(NavDot {
-            color: "var(--error)",
-            pulse: false,
-            tooltip: format!(
-                "Batch complete \u{00B7} {completed} succeeded \u{00B7} {failed} failed"
-            ),
-        });
-    }
-    Some(NavDot {
-        color: "var(--success)",
-        pulse: false,
-        tooltip: format!("Batch complete \u{00B7} {completed} of {total} videos"),
-    })
 }
 
 #[component]
@@ -233,6 +177,8 @@ fn OrgList() -> Element {
         format!("{count}")
     };
     let tenant_projects = app_state.tenant_projects.read();
+    // Roll each org's tasks (across all its batches) up into a status dot.
+    let upload_tasks = app_state.upload_tasks.read();
 
     rsx! {
         div {
@@ -275,6 +221,13 @@ fn OrgList() -> Element {
                         format!("{batches} batches")
                     };
                     let initials = org_initials(&tenant.display_name);
+                    // Roll this org's tasks (any batch) up into a trailing status dot.
+                    let org_tasks: Vec<UploadTask> = upload_tasks
+                        .iter()
+                        .filter(|task| task.tenant_id == tenant.id)
+                        .cloned()
+                        .collect();
+                    let nav = nav_status(&org_tasks, NavScope::Org);
                     rsx! {
                         button {
                             key: "{tenant.id}",
@@ -291,6 +244,9 @@ fn OrgList() -> Element {
                                 class: "min-w-0 flex-1",
                                 p { class: "truncate text-[13px] leading-tight text-foreground", "{tenant.display_name}" }
                                 p { class: "truncate text-[11px] leading-tight text-muted-foreground", "{batch_label}" }
+                            }
+                            if let Some(dot) = nav {
+                                NavDotView { details: dot }
                             }
                         }
                     }
@@ -363,7 +319,12 @@ fn BatchList(tenant: Tenant) -> Element {
                     let p = project.clone();
                     let tid_click = tid.clone();
                     let is_active = project.id == selected_project_id;
-                    let nav = compute_nav_dot(&upload_tasks, &tid, &project.id);
+                    let batch_tasks: Vec<UploadTask> = upload_tasks
+                        .iter()
+                        .filter(|task| task.tenant_id == tid && task.project_id == project.id)
+                        .cloned()
+                        .collect();
+                    let nav = nav_status(&batch_tasks, NavScope::Batch);
                     let active_class = if is_active {
                         "bg-accent text-accent-foreground font-medium"
                     } else {
@@ -385,19 +346,7 @@ fn BatchList(tenant: Tenant) -> Element {
                             }
                             span { class: "min-w-0 flex-1 truncate", "{project.name}" }
                             if let Some(dot) = nav {
-                                span {
-                                    style: "position: relative; display: inline-flex; width: 8px; height: 8px; flex-shrink: 0;",
-                                    title: "{dot.tooltip}",
-                                    if dot.pulse {
-                                        span {
-                                            class: "lw-ping",
-                                            style: "position: absolute; inset: 0; border-radius: 999px; background: {dot.color};",
-                                        }
-                                    }
-                                    span {
-                                        style: "position: relative; width: 8px; height: 8px; border-radius: 999px; background: {dot.color};",
-                                    }
-                                }
+                                NavDotView { details: dot }
                             }
                         }
                     }
