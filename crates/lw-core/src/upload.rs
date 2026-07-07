@@ -129,8 +129,15 @@ enum PreCreate {
 fn near_duplicate_message(near: &NearDuplicateMatch) -> String {
     let pct = (near.coverage * 100.0).round() as i64;
     let plural = if near.matched_frames == 1 { "" } else { "s" };
+    // Name the existing video when the backend resolved it (newer servers), so the
+    // user can tell WHAT this clip is a re-encode of; degrade to the generic phrase
+    // on servers that don't send the filename yet.
+    let named = match &near.document_name {
+        Some(name) => format!(" '{name}'"),
+        None => String::new(),
+    };
     format!(
-        "Near-duplicate of an existing video in this tenant ({} frame{plural} matched, {pct}% coverage)",
+        "Near-duplicate of an existing video{named} in this tenant ({} frame{plural} matched, {pct}% coverage)",
         near.matched_frames,
     )
 }
@@ -1685,12 +1692,15 @@ impl UploadEngine {
     }
 
     /// Friendly same-tenant "already uploaded" message that names the
-    /// organization and the project(s) the file already lives in. The
-    /// `/digest-checks` response carries `projectId`/`tenantId` per match;
-    /// this resolves them to display names — the org from the cached whoami
-    /// tenant list, each project via a `list_projects` lookup. Any resolution
-    /// failure degrades gracefully (org → "this organization", project → its
-    /// id): a cosmetic message must never change or fail the dedup verdict.
+    /// organization, the project(s), and the existing filename(s) the file
+    /// already lives in. The `/digest-checks` response carries
+    /// `projectId`/`tenantId`/`documentName` per match; this resolves the org
+    /// from the cached whoami tenant list and each project via a `list_projects`
+    /// lookup, and uses the backend-resolved `documentName` to name the duplicate
+    /// so a user who re-uploaded byte-identical content under a new filename can
+    /// see WHICH file collided. Any resolution failure degrades gracefully (org →
+    /// "this organization", project → its id, filename → omitted): a cosmetic
+    /// message must never change or fail the dedup verdict.
     async fn tenant_match_message(
         &self,
         tenant_id: &str,
@@ -1734,16 +1744,27 @@ impl UploadEngine {
             }
         };
 
-        match projects.as_slice() {
-            [] => format!("Already uploaded in '{org}' ({count} document{plural})"),
-            [one] => {
-                format!("Already uploaded in '{org}', project '{one}' ({count} document{plural})")
-            }
-            many => format!(
-                "Already uploaded in '{org}', projects: {} ({count} document{plural})",
-                many.join(", ")
-            ),
-        }
+        // Distinct filenames the backend resolved (newer servers). Names the
+        // duplicate file(s) so a user who renamed byte-identical content can see
+        // WHAT collided; empty on servers that don't send the filename yet.
+        let mut names: Vec<&str> = matches
+            .iter()
+            .filter_map(|m| m.document_name.as_deref())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        let as_part = match names.as_slice() {
+            [] => String::new(),
+            [one] => format!(" as '{one}'"),
+            many => format!(" as: {}", many.join(", ")),
+        };
+
+        let where_part = match projects.as_slice() {
+            [] => format!("in '{org}'"),
+            [one] => format!("in '{org}', project '{one}'"),
+            many => format!("in '{org}', projects: {}", many.join(", ")),
+        };
+        format!("Already uploaded {where_part}{as_part} ({count} document{plural})")
     }
 
     /// Pick the first tenant match whose `creator_id` is the logged-in

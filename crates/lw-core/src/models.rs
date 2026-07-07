@@ -237,23 +237,33 @@ pub struct DedupCheckMatch {
     /// uploaded this" without a follow-up document GET.
     pub creator_id: String,
     pub document_created_at: String,
+    /// Current filename (`documents.metadata->>'filename'`), resolved live by
+    /// the backend from the tenant `documents` table. `#[serde(default)]` so a
+    /// pre-feature server that omits the key decodes as `None`; also `None` when
+    /// the backend can't resolve the doc row. Lets the reject message name the
+    /// duplicate, so a user who re-uploaded byte-identical content under a new
+    /// filename can tell WHICH existing file it collided with.
+    #[serde(default)]
+    pub document_name: Option<String>,
 }
 
 /// A perceptual near-duplicate hit surfaced by the PDQ escalation — advisory,
 /// same-tenant. Mirrors backend `NearDup` (`features/dedup/DigestCheckModels.scala`).
-/// Carries only the document id + coverage signal (no project / creator), since
-/// it's a "looks like a re-encode of a video you already have" hint, not an
-/// attribution-grade exact match.
 ///
 ///   - `coverage` — fraction (0..1) of this upload's query frames matched.
 ///   - `matched_frames` — absolute count (the numerator) so the UI can show
 ///     "4/5 frames matched" without recomputing.
+///   - `document_name` — current filename of the matched document, resolved live
+///     by the backend. `#[serde(default)]` so a server that doesn't send it yet
+///     decodes as `None`. Lets the near-dup message name the existing video.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NearDuplicateMatch {
     pub document_id: String,
     pub coverage: f64,
     pub matched_frames: u32,
+    #[serde(default)]
+    pub document_name: Option<String>,
 }
 
 /// One row of V2 dedup output for a queried candidate. Mirrors backend
