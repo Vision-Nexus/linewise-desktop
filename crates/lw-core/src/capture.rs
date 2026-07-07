@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::ffmpeg_util::hidden_command;
 
 /// io.visionlab container schema version this client writes.
-pub const CAPTURE_SCHEMA_VERSION: i32 = 1;
+/// v2 adds `io.visionlab.parts` (the object names the operator's hands contact).
+pub const CAPTURE_SCHEMA_VERSION: i32 = 2;
 
 /// ExifTool UserDefined config registering the `io.visionlab.*` keys under the
 /// QuickTime `Keys` table, so they can be written by their `VisionLab*` names.
@@ -35,6 +36,7 @@ const VISIONLAB_CONFIG: &str = r#"%Image::ExifTool::UserDefined = (
     'io.visionlab.operator' => { Name => 'VisionLabOperator' },
     'io.visionlab.action'   => { Name => 'VisionLabAction' },
     'io.visionlab.fov'      => { Name => 'VisionLabFov' },
+    'io.visionlab.parts'    => { Name => 'VisionLabParts' },
   },
 );
 1;
@@ -55,6 +57,11 @@ pub struct CaptureMetadata {
     pub model: Option<String>,
     pub fov: Option<i32>,
     pub action: Option<String>,
+    /// Object names the operator's hands contact in the clip (`io.visionlab.parts`,
+    /// schema v2). Written to the container as a minified JSON string array; the
+    /// backend keeps it verbatim in its lossless `raw` layer. `None`/empty is
+    /// omitted entirely. English standard names, e.g. `["Reflector", "Wrench"]`.
+    pub parts: Option<Vec<String>>,
 }
 
 impl CaptureMetadata {
@@ -69,6 +76,7 @@ impl CaptureMetadata {
             && self.model.is_none()
             && self.fov.is_none()
             && self.action.is_none()
+            && self.parts.as_ref().is_none_or(|p| p.is_empty())
     }
 }
 
@@ -202,6 +210,14 @@ fn write_tags_in_place(target: &Path, meta: &CaptureMetadata) -> Result<(), Capt
         format!("-VisionLabSchema={CAPTURE_SCHEMA_VERSION}"),
     ];
     let fov_str = meta.fov.map(|n| n.to_string());
+    // Parts is a list; the container carries it as one minified JSON array string
+    // (values contain spaces, so a delimited string would be ambiguous). Empty is
+    // omitted. serde_json on a Vec<String> is infallible, hence `.expect`.
+    let parts_json = meta
+        .parts
+        .as_ref()
+        .filter(|p| !p.is_empty())
+        .map(|p| serde_json::to_string(p).expect("Vec<String> always serializes to JSON"));
     {
         let mut push = |flag: &str, value: Option<&str>| {
             if let Some(v) = value
@@ -219,6 +235,7 @@ fn write_tags_in_place(target: &Path, meta: &CaptureMetadata) -> Result<(), Capt
         push("VisionLabOperator", meta.operator.as_deref());
         push("VisionLabAction", meta.action.as_deref());
         push("VisionLabFov", fov_str.as_deref());
+        push("VisionLabParts", parts_json.as_deref());
     }
     args.push(target_str.into());
 
@@ -281,6 +298,11 @@ pub fn parse_capture_from_tags(tags: &[(String, String)]) -> Option<CaptureMetad
             "io.visionlab.station" => meta.station = Some(owned),
             "io.visionlab.operator" => meta.operator = Some(owned),
             "io.visionlab.action" => meta.action = Some(owned),
+            "io.visionlab.parts" => {
+                meta.parts = serde_json::from_str::<Vec<String>>(v)
+                    .ok()
+                    .filter(|p| !p.is_empty())
+            }
             "io.visionlab.fov" => meta.fov = v.parse::<i32>().ok(),
             "make" => meta.make = Some(owned),
             "model" => meta.model = Some(owned),
@@ -424,6 +446,10 @@ mod tests {
             ),
             ("make".to_string(), "DJI".to_string()),
             ("model".to_string(), "Osmo Nano".to_string()),
+            (
+                "com.apple.quicktime.io.visionlab.parts".to_string(),
+                r#"["Reflector","Glass lens","Wrench"]"#.to_string(),
+            ),
             ("major_brand".to_string(), "mp42".to_string()), // unrelated → ignored
             ("io.visionlab.city".to_string(), "  ".to_string()), // blank → skipped
         ];
@@ -433,6 +459,14 @@ mod tests {
         assert_eq!(m.fov, Some(143));
         assert_eq!(m.make.as_deref(), Some("DJI"));
         assert_eq!(m.model.as_deref(), Some("Osmo Nano"));
+        assert_eq!(
+            m.parts,
+            Some(vec![
+                "Reflector".to_string(),
+                "Glass lens".to_string(),
+                "Wrench".to_string()
+            ])
+        );
         assert_eq!(m.city, None);
     }
 
@@ -491,6 +525,7 @@ mod tests {
             model: Some("Osmo Nano".into()),
             fov: Some(143),
             action: Some("Pressing piston rings".into()),
+            parts: Some(vec!["Piston ring".into(), "Cylinder".into()]),
             ..Default::default()
         };
         let outcome = embed_capture_metadata_blocking(&base, &meta, &dir).expect("embed");
@@ -523,6 +558,8 @@ mod tests {
             "missing operator: {out}"
         );
         assert!(out.contains("io.visionlab.fov"), "missing fov: {out}");
+        assert!(out.contains("io.visionlab.parts"), "missing parts: {out}");
+        assert!(out.contains("Piston ring"), "missing part value: {out}");
         assert!(out.contains("\"make\""), "missing make: {out}");
 
         // Restart-recovery path: read the tags back from the file locally.
@@ -532,5 +569,9 @@ mod tests {
         assert_eq!(recovered.fov, Some(143));
         assert_eq!(recovered.make.as_deref(), Some("DJI"));
         assert_eq!(recovered.model.as_deref(), Some("Osmo Nano"));
+        assert_eq!(
+            recovered.parts,
+            Some(vec!["Piston ring".to_string(), "Cylinder".to_string()])
+        );
     }
 }
