@@ -14,10 +14,12 @@
 //! with the dedup marker, which this view turns into an "Already exists"
 //! badge instead of an error.
 
-use super::rows::{SectionHeader, format_size};
+use super::rows::{SectionHeader, build_video_details, format_clip_time, format_size};
+use super::tabs::{CompletedTab, SubTabButton};
 use crate::state::AppState;
 use dioxus::prelude::*;
 use lw_core::models::{Project, Tenant, UploadState, UploadTask};
+use lw_core::video;
 
 /// Marker string written into `error_message` by the `DuplicateDetected`
 /// reconcile so a deduped row reads as "already stored" rather than failed.
@@ -30,6 +32,8 @@ pub fn CompletedList(tasks: Vec<UploadTask>) -> Element {
     // Which row is expanded. `None` = all collapsed. Local state — a fresh
     // mount starting collapsed is the right default.
     let mut expanded: Signal<Option<String>> = use_signal(|| None);
+    // Secondary tab (All / Completed / Already exists). Local state.
+    let mut sub_tab = use_signal(|| CompletedTab::All);
 
     // Own the bucket filter, exactly like InProgressList / FailedList do. The
     // panel hands the full project-scoped list to every tab, so without this
@@ -39,17 +43,68 @@ pub fn CompletedList(tasks: Vec<UploadTask>) -> Element {
         .filter(|t| t.state == UploadState::Completed)
         .cloned()
         .collect();
+    let already_exists_count = completed
+        .iter()
+        .filter(|t| t.error_message.as_deref() == Some(ALREADY_EXISTS_MARKER))
+        .count();
+    let uploaded_count = completed.len() - already_exists_count;
+
+    let active = *sub_tab.read();
+    let shown: Vec<UploadTask> = completed
+        .iter()
+        .filter(|t| {
+            let ae = t.error_message.as_deref() == Some(ALREADY_EXISTS_MARKER);
+            match active {
+                CompletedTab::All => true,
+                CompletedTab::Uploaded => !ae,
+                CompletedTab::AlreadyExists => ae,
+            }
+        })
+        .cloned()
+        .collect();
+
+    // Section title / empty copy per sub-tab (prototype E3): the "Completed"
+    // sub-tab's section reads "Uploaded"; "All" reads "Completed".
+    let (section_title, empty_msg) = match active {
+        CompletedTab::All => ("Completed", "Nothing completed yet"),
+        CompletedTab::Uploaded => ("Uploaded", "Nothing uploaded yet"),
+        CompletedTab::AlreadyExists => ("Already exists", "No files were already on the server"),
+    };
 
     rsx! {
-        if completed.is_empty() {
+        if !completed.is_empty() {
+            div {
+                style: "display: flex; gap: 8px; margin-bottom: 16px;",
+                SubTabButton {
+                    label: "All".to_string(),
+                    count: completed.len(),
+                    active: active == CompletedTab::All,
+                    onclick: move |_| sub_tab.set(CompletedTab::All),
+                }
+                SubTabButton {
+                    label: "Completed".to_string(),
+                    count: uploaded_count,
+                    active: active == CompletedTab::Uploaded,
+                    onclick: move |_| sub_tab.set(CompletedTab::Uploaded),
+                }
+                SubTabButton {
+                    label: "Already exists".to_string(),
+                    count: already_exists_count,
+                    active: active == CompletedTab::AlreadyExists,
+                    onclick: move |_| sub_tab.set(CompletedTab::AlreadyExists),
+                }
+            }
+        }
+
+        if shown.is_empty() {
             div {
                 style: "text-align: center; padding: 40px 16px; color: var(--text-muted); font-size: 13px;",
-                "Nothing completed yet"
+                "{empty_msg}"
             }
         } else {
-            SectionHeader { title: "Completed", count: completed.len() }
+            SectionHeader { title: section_title.to_string(), count: shown.len() }
             div { style: "display: flex; flex-direction: column; gap: 6px;",
-                for task in completed.iter() {
+                for task in shown.iter() {
                     CompletedRow {
                         key: "{task.id}",
                         task: task.clone(),
@@ -156,6 +211,12 @@ fn CompletedDetail(
 
     let detail_style = "display: grid; grid-template-columns: max-content 1fr; column-gap: 12px; row-gap: 4px; font-size: 12px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);";
 
+    // Source specs (codec / resolution / frame rate / bitrate / audio /
+    // duration / container) — reuses the same probe formatting the in-progress
+    // RowDetails shows, so a completed clip is no longer thinner than an
+    // in-progress one. `None` until the probe landed (or non-video).
+    let video_details = build_video_details(&task, video::device_encoder_signatures());
+
     rsx! {
         div {
             style: "{detail_style}",
@@ -165,6 +226,16 @@ fn CompletedDetail(
             div { style: "color: var(--text); word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{task.local_path}" }
             div { style: "color: var(--text-muted);", "Size" }
             div { style: "color: var(--text);", "{format_size(task.size)}" }
+            if let Some(details) = video_details {
+                for (key , value) in details.structural() {
+                    div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                    div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                }
+            }
+            if let Some(uploaded) = format_clip_time(&task.updated_at) {
+                div { style: "color: var(--text-muted);", "Uploaded" }
+                div { style: "color: var(--text);", "{uploaded}" }
+            }
             if already_exists {
                 div { style: "color: var(--text-muted);", "Note" }
                 div { style: "color: var(--text-secondary);", "Content already existed on the server; no new upload was performed." }
@@ -174,7 +245,7 @@ fn CompletedDetail(
             style: "display: flex; justify-content: flex-end; margin-top: 8px;",
             button {
                 class: "btn-outline",
-                style: "height: 24px; padding: 0 10px; font-size: 11px; border-radius: 4px; cursor: pointer; background: transparent; color: var(--text); border: 1px solid var(--border);",
+                style: "height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; cursor: pointer; background: transparent; color: var(--text); border: 1px solid var(--border);",
                 onclick: on_locate,
                 "Locate in sidebar"
             }

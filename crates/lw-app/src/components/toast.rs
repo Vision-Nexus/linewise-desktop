@@ -60,7 +60,7 @@ pub fn ToastOverlay() -> Element {
             div {
                 class: "slide-down",
                 style: "pointer-events: auto; display: flex; align-items: center; gap: 10px; \
-                        padding: 10px 16px; border-radius: 8px; \
+                        padding: 10px 16px; border-radius: 6px; \
                         background: {bg}; border: 1px solid {border}; color: {fg}; \
                         box-shadow: 0 6px 20px rgba(0,0,0,0.18); \
                         font-size: 13px; font-weight: 500; \
@@ -69,7 +69,7 @@ pub fn ToastOverlay() -> Element {
                     style: "width: 20px; height: 20px; border-radius: 9999px; \
                             background: {fg}; color: white; \
                             display: flex; align-items: center; justify-content: center; \
-                            font-size: 12px; font-weight: 700; flex-shrink: 0;",
+                            font-size: 12px; font-weight: 600; flex-shrink: 0;",
                     "{icon}"
                 }
                 span { style: "color: var(--text);", "{toast.message}" }

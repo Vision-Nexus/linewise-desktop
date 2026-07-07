@@ -1,6 +1,6 @@
 use crate::components::login::LoginPage;
-use crate::components::transfer_panel::TransferPanel;
 use crate::components::version_banner::{VersionBlockedScreen, VersionUpdateBanner};
+use crate::components::workspace::Workspace;
 use crate::state::{AppState, CoreServices};
 use dioxus::desktop::WindowCloseBehaviour;
 use dioxus::desktop::trayicon::{init_tray_icon, menu::*};
@@ -10,6 +10,10 @@ use std::sync::Arc;
 
 const TAILWIND_CSS: &str = include_str!("../tailwind.generated.css");
 const DX_COMPONENTS_THEME_CSS: &str = include_str!("../assets/dx-components-theme.css");
+
+/// Inter Variable bundled as a data-URI `@font-face` (see `assets/fonts.css`).
+/// Injected first so the face is defined before `body`/utilities reference 'Inter'.
+const FONTS_CSS: &str = include_str!("../assets/fonts.css");
 
 // Per-component stylesheets are inlined here (same mechanism as TAILWIND_CSS
 // above) because Dioxus's `asset!()` / `#[css_module]` asset resolver doesn't
@@ -199,6 +203,7 @@ pub fn App() -> Element {
     );
 
     rsx! {
+        style { "{FONTS_CSS}" }
         style { "{GLOBAL_CSS}" }
         style { "{TAILWIND_CSS}" }
         style { "{DX_COMPONENTS_THEME_CSS}" }
@@ -470,13 +475,15 @@ fn MainView() -> Element {
             div {
                 style: "flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; position: relative;",
 
-                // Weak-network prompt: appears when connectivity has been weak
-                // for longer than the grace period. Non-modal, above the panel.
-                crate::components::weak_network_banner::WeakNetworkBanner {}
+                // Weak/offline guidance now lives in the sidebar network status
+                // pill's popover (see `network_status::NetworkStatusPill`), so
+                // there is no separate banner row here.
 
+                // Routed main area — swaps by sidebar selection (Select an
+                // organization → Select a batch → the batch's transfer panel).
                 main {
-                    style: "flex: 1; overflow-y: auto; padding: 16px;",
-                    TransferPanel {}
+                    style: "flex: 1; overflow-y: auto; display: flex; flex-direction: column; min-height: 0;",
+                    Workspace {}
                 }
             }
 

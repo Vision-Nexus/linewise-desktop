@@ -5,7 +5,7 @@
     height: 4px;
     box-sizing: border-box;
     border-radius: 2px;
-    background: var(--border);
+    background: var(--bg-tertiary);
 }
 
 .progress[data-state='indeterminate'] .progress-indicator {
@@ -17,7 +17,8 @@
     width: var(--progress-value, 0%);
     min-height: 4px;
     height: 100%;
-    background-color: var(--info);
+    /* Prototype fills the bar with the primary (near-black) colour, not blue. */
+    background-color: var(--btn-primary);
     transition: width 300ms ease;
 }
 

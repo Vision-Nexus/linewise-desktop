@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state IN ('PENDING', 'UPLOADING', 'CREATING', 'VERIFYING', 'VALIDATING', 'DESENSITIZING', 'TRANSCODING')\n             ORDER BY created_at ASC, rowid ASC",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload, created_at, updated_at\n             FROM upload_queue WHERE state = 'STAGED' ORDER BY created_at ASC",
   "describe": {
     "columns": [
       {
@@ -122,6 +122,16 @@
         "name": "force_upload",
         "ordinal": 23,
         "type_info": "Integer"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 24,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 25,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -151,8 +161,10 @@
       true,
       false,
       true,
+      false,
+      false,
       false
     ]
   },
-  "hash": "01b06dc55a372dab0461554c417d709bac1f02bad31010aa1f36b0e5d1e8b44d"
+  "hash": "1e8c017367a33ce588e4f5f915b3d94cb0536d29bfe52941f8f2cb884e2c93cc"
 }

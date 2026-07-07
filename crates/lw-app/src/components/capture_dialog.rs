@@ -36,6 +36,9 @@ struct CaptureForm {
     model: String,
     fov: String,
     action: String,
+    /// Parts Involved, edited as one object name per line; split/deduped into a
+    /// `Vec<String>` on save.
+    parts: String,
 }
 
 impl From<CaptureMetadata> for CaptureForm {
@@ -50,6 +53,7 @@ impl From<CaptureMetadata> for CaptureForm {
             model: m.model.unwrap_or_default(),
             fov: m.fov.map(|n| n.to_string()).unwrap_or_default(),
             action: m.action.unwrap_or_default(),
+            parts: m.parts.unwrap_or_default().join("\n"),
         }
     }
 }
@@ -129,6 +133,17 @@ pub fn CaptureMetadataDialog(
             },
         };
 
+        // Parts Involved: one object name per line — trim, drop blanks,
+        // de-duplicate (order preserved). Optional on desktop — not enforced.
+        let mut parts: Vec<String> = Vec::new();
+        for line in f.parts.lines() {
+            let name = line.trim();
+            if !name.is_empty() && !parts.iter().any(|p| p.as_str() == name) {
+                parts.push(name.to_string());
+            }
+        }
+        let parts_empty = parts.is_empty();
+
         let meta = CaptureMetadata {
             country: opt(&f.country),
             city: opt(&f.city),
@@ -139,6 +154,7 @@ pub fn CaptureMetadataDialog(
             model: opt(&f.model),
             fov,
             action: opt(&f.action),
+            parts: (!parts_empty).then_some(parts),
         };
         error.set(None);
         match &task_save {
@@ -277,6 +293,18 @@ pub fn CaptureMetadataDialog(
                         input { style: input_style, placeholder: "Pressing piston rings into cylinder bore",
                             value: "{form.read().action}",
                             oninput: move |e| form.write().action = e.value() }
+                    }
+                    div { style: "margin-bottom: 10px;",
+                        label { style: label_style, "Parts Involved" }
+                        textarea {
+                            style: "{input_style} min-height: 92px; resize: vertical; font-family: inherit;",
+                            placeholder: "One object per line:\nReflector\nGlass lens\nWrench",
+                            value: "{form.read().parts}",
+                            oninput: move |e| form.write().parts = e.value() }
+                        div {
+                            style: "font-size: 11px; color: var(--text-muted); margin-top: 3px;",
+                            "Every object the operator's hands touch — parts and tools. One per line, English names."
+                        }
                     }
 
                     if let Some(err) = error() {

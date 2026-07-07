@@ -48,14 +48,24 @@ fn capture_summary(m: &lw_core::capture::CaptureMetadata) -> String {
 }
 
 #[component]
-pub fn SectionHeader(title: String, count: usize) -> Element {
+pub fn SectionHeader(
+    title: String,
+    count: usize,
+    #[props(default)] subtitle: Option<String>,
+) -> Element {
     rsx! {
         div {
-            style: "display: flex; align-items: center; gap: 8px; margin-bottom: 8px;",
-            span { style: "font-size: 13px; font-weight: 600; color: var(--text);", "{title}" }
-            span {
-                style: "font-size: 11px; color: var(--text-secondary); background: var(--bg-tertiary); padding: 2px 8px; border-radius: 10px;",
-                "{count}"
+            style: "margin-bottom: 8px;",
+            div {
+                style: "display: flex; align-items: center; gap: 8px;",
+                span { style: "font-size: 13px; font-weight: 600; color: var(--text);", "{title}" }
+                span {
+                    style: "font-size: 11px; color: var(--text-secondary); background: var(--bg-tertiary); padding: 2px 8px; border-radius: 999px;",
+                    "{count}"
+                }
+            }
+            if let Some(sub) = subtitle {
+                div { style: "font-size: 11px; color: var(--text-muted); margin-top: 3px;", "{sub}" }
             }
         }
     }
@@ -73,6 +83,17 @@ pub struct VideoDetails {
     structural: Vec<(String, String)>,
     device: Vec<(String, String)>,
     raw: Vec<(String, String)>,
+}
+
+impl VideoDetails {
+    /// The "Source metadata" rows — Codec / Resolution / Frame rate / Bitrate /
+    /// optional Audio / Duration / Container. Exposed so the Completed-tab
+    /// detail (`completed.rs`) can render the same source specs the in-progress
+    /// `RowDetails` shows, reusing this one `build_video_details` output instead
+    /// of duplicating the probe-formatting logic.
+    pub fn structural(&self) -> &[(String, String)] {
+        &self.structural
+    }
 }
 
 pub fn build_video_details(
@@ -125,69 +146,81 @@ pub fn build_video_details(
     })
 }
 
-/// Renders the dashed-underline summary + the three-group hover
-/// popover (source metadata, device, raw tags). Identical in
-/// `HashingRow` and `StagedRow`; pulled out so adding a new row that
-/// shows probe data doesn't need to copy 60 lines of rsx.
+/// Click-to-expand detail for a task row (E5): a dashed-underline summary line
+/// that toggles a `<dl>` with Org/Project, Local path, Size and — once the probe
+/// has landed — the source-metadata / device / raw-tag groups. Replaces the old
+/// hover popover so every in-progress row uses the same click-expand affordance.
+/// Expand state is per-row.
 #[component]
-pub fn VideoInfoPopover(details: VideoDetails) -> Element {
-    let VideoDetails {
-        summary,
-        structural,
-        device,
-        raw,
-    } = details;
+fn RowDetails(
+    task: UploadTask,
+    device_encoder_signatures: &'static [DeviceEncoderSignature],
+) -> Element {
+    let mut open = use_signal(|| false);
+    let app_state = use_context::<AppState>();
+    let details = build_video_details(&task, device_encoder_signatures);
+    let tenant_name = app_state.tenant_display_name(&task.tenant_id);
+    let project_name = app_state.project_display_name(&task.tenant_id, &task.project_id);
+    let summary = details
+        .as_ref()
+        .map(|d| d.summary.clone())
+        .unwrap_or_else(|| {
+            "\u{2014} \u{00B7} \u{2014} \u{00B7} \u{2014} \u{00B7} \u{2014}".to_string()
+        });
+    let expanded = *open.read();
+    let chevron = if expanded { "\u{25BE}" } else { "\u{25B8}" };
+
+    let group_label = "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 10px; margin-bottom: 6px;";
+    let group_grid = "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;";
+
     rsx! {
-        div {
-            class: "popover-host",
-            style: "margin-top: 4px;",
-            tabindex: "0",
+        div { style: "margin-top: 4px;",
             div {
-                style: "font-size: 11px; color: var(--text-secondary); border-bottom: 1px dashed var(--border); display: inline-block;",
-                "{summary}"
-            }
-            div {
-                class: "popover-panel",
-                style: if raw.is_empty() {
-                    "max-height: 360px; overflow-y: auto;".to_string()
-                } else {
-                    "max-height: 360px; overflow-y: auto; display: grid; grid-template-columns: minmax(200px, 1fr) minmax(220px, 1fr); gap: 12px;".to_string()
+                style: "display: inline-flex; align-items: center; gap: 6px; cursor: pointer;",
+                "aria-expanded": "{expanded}",
+                onclick: move |_| {
+                    let next = !*open.read();
+                    open.set(next);
                 },
+                span { style: "font-size: 11px; color: var(--text-muted);", "{chevron}" }
+                span {
+                    style: "font-size: 11px; color: var(--text-secondary); border-bottom: 1px dashed var(--border);",
+                    "{summary}"
+                }
+            }
+            if expanded {
                 div {
-                    style: "min-width: 0;",
-                    div {
-                        style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
-                        "Source metadata"
-                    }
-                    div {
-                        style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
-                        for (key, value) in structural.iter() {
-                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
-                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
-                        }
-                    }
-                    div {
-                        style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 10px; margin-bottom: 6px;",
-                        "Device"
-                    }
-                    div {
-                        style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
-                        for (key, value) in device.iter() {
-                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
-                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
-                        }
+                    style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 12px; row-gap: 4px; font-size: 12px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);",
+                    div { style: "color: var(--text-muted);", "Org / Project" }
+                    div { style: "color: var(--text); word-break: break-all;", "{tenant_name} / {project_name}" }
+                    div { style: "color: var(--text-muted);", "Local path" }
+                    div { style: "color: var(--text); word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{task.local_path}" }
+                    div { style: "color: var(--text-muted);", "Size" }
+                    div { style: "color: var(--text);", "{format_size(task.size)}" }
+                    if let Some(added) = format_clip_time(&task.created_at) {
+                        div { style: "color: var(--text-muted);", "Added" }
+                        div { style: "color: var(--text);", "{added}" }
                     }
                 }
-                if !raw.is_empty() {
-                    div {
-                        style: "min-width: 0;",
-                        div {
-                            style: "font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;",
-                            "Raw tags"
+                if let Some(d) = details {
+                    div { style: "{group_label}", "Source metadata" }
+                    div { style: "{group_grid}",
+                        for (key , value) in d.structural.iter() {
+                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
                         }
-                        div {
-                            style: "display: grid; grid-template-columns: max-content 1fr; column-gap: 10px; row-gap: 3px; font-size: 11px;",
-                            for (key, value) in raw.iter() {
+                    }
+                    div { style: "{group_label}", "Device" }
+                    div { style: "{group_grid}",
+                        for (key , value) in d.device.iter() {
+                            div { style: "color: var(--text-muted); white-space: nowrap;", "{key}" }
+                            div { style: "color: var(--text); word-break: break-all;", "{value}" }
+                        }
+                    }
+                    if !d.raw.is_empty() {
+                        div { style: "{group_label}", "Raw tags" }
+                        div { style: "{group_grid}",
+                            for (key , value) in d.raw.iter() {
                                 div { style: "color: var(--text-muted); white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;", "{key}" }
                                 div { style: "color: var(--text); word-break: break-all;", "{value}" }
                             }
@@ -199,8 +232,8 @@ pub fn VideoInfoPopover(details: VideoDetails) -> Element {
     }
 }
 
-/// One row in the "Checking" section: a freshly-added video whose
-/// local atom walk + server `/quality-check` round-trip is in flight.
+/// One row in the "Checking files" stage (quality-check half): a freshly-added
+/// video whose local atom walk + server `/quality-check` round-trip is in flight.
 /// Renders an indeterminate progress bar — the network round-trip
 /// has no progress signal we could surface — plus a Remove
 /// affordance. Removing mid-check is safe for the same reason as
@@ -209,10 +242,11 @@ pub fn VideoInfoPopover(details: VideoDetails) -> Element {
 #[component]
 pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> Element {
     let task_id = task.id.clone();
+    let (card_border, card_bg) = card_tone(&task.state, false);
     rsx! {
         div {
             class: "staged-row fade-in",
-            style: "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg);",
+            style: "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg};",
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
                 span {
@@ -226,11 +260,12 @@ pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> 
             }
             div {
                 style: "margin-top: 6px;",
-                // Passing a `None` value flips dioxus-primitives'
-                // Progress into `data-state='indeterminate'`, which
-                // the global CSS animates as a left-to-right shimmer.
+                // Prototype shows a fixed 8% sliver for quality-checking — the
+                // network round-trip has no live progress signal, so a small
+                // determinate bar + friendly sub-label matches the prototype's
+                // `checkingProgressLabel` ("Checking files 8% — Checking your file").
                 Progress {
-                    value: Option::<f64>::None,
+                    value: 8.0,
                     max: 100.0,
                     "aria-label": "Quality check in progress",
                     ProgressIndicator {}
@@ -238,8 +273,9 @@ pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> 
             }
             div {
                 style: "font-size: 11px; margin-top: 2px; color: var(--text-muted);",
-                "Checking video quality…"
+                "Checking files 8% — Checking your file"
             }
+            RowDetails { task: task.clone(), device_encoder_signatures: video::device_encoder_signatures() }
             div {
                 style: "display: flex; justify-content: flex-end; margin-top: 6px;",
                 button {
@@ -253,8 +289,8 @@ pub fn QualityCheckingRow(task: UploadTask, on_remove: EventHandler<String>) -> 
     }
 }
 
-/// One row in the "Hashing" section: a freshly-added file whose
-/// BLAKE3+MD5 stream is in flight. The quality check has already
+/// One row in the "Checking files" stage (hashing half): a freshly-added file
+/// whose BLAKE3+MD5 stream is in flight. The quality check has already
 /// landed, so the row carries the same probe-data popover and
 /// advisory warnings the `Staged` row will eventually show — the
 /// user gets to see the verdict during the hash window instead of
@@ -276,24 +312,23 @@ pub fn HashingRow(
         .get(&task.id)
         .copied()
         .unwrap_or((0, task.size.max(1)));
-    let pct = if total_bytes > 0 {
-        ((bytes_hashed as f64 / total_bytes as f64) * 100.0).min(100.0)
+    let t = if total_bytes > 0 {
+        bytes_hashed as f64 / total_bytes as f64
     } else {
         0.0
     };
-    let label = format!(
-        "Hashing — {} / {} ({:.0}%)",
-        format_size(bytes_hashed),
-        format_size(total_bytes),
-        pct,
-    );
-    let video_details = build_video_details(&task, device_encoder_signatures);
-    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 3px;";
+    // Prototype `checkingProgressPct(hashing)` = lerp(12→100): the "Checking
+    // files" bar picks up where quality-check (8%) left off. Sub-label drops
+    // the byte counts (prototype presentation) — the bar carries the progress.
+    let pct = (12.0 + (100.0 - 12.0) * t).round().min(100.0);
+    let label = format!("Checking files {pct:.0}% — Reading your file");
+    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 4px;";
+    let (card_border, card_bg) = card_tone(&task.state, false);
 
     rsx! {
         div {
             class: "staged-row fade-in",
-            style: "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg);",
+            style: "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg};",
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
                 span {
@@ -305,9 +340,7 @@ pub fn HashingRow(
                     "{format_size(task.size)}"
                 }
             }
-            if let Some(details) = video_details {
-                VideoInfoPopover { details }
-            }
+            RowDetails { task: task.clone(), device_encoder_signatures }
             for warning in task.validation_warnings.iter() {
                 div {
                     style: "{warning_style}",
@@ -393,12 +426,8 @@ pub fn StagedRow(
     let show_transcode_toggle = feature_enabled && is_video && transcode_useful && !rejected;
     let show_already_ok_badge = feature_enabled && is_video && !transcode_useful && !rejected;
 
-    // Probe data is built into the same shape — summary line + three
-    // popover groups — used by `HashingRow`. Lifting it out makes the
-    // hashing row light up with codec/resolution/fps the moment the
-    // quality check returns, instead of waiting for the row to land
-    // in `Staged`.
-    let video_details = build_video_details(&task, device_encoder_signatures);
+    // Row detail (Source metadata / device / raw tags + Org / path / size) is
+    // built by the shared `RowDetails` click-expand below, keyed off the task.
 
     // Required-metadata gate: a `Staged` clip whose capture metadata is neither
     // filled NOR skipped holds here until the user resolves it (fill or Skip).
@@ -417,7 +446,7 @@ pub fn StagedRow(
     let needs_metadata =
         task.state == UploadState::Staged && capture.is_none() && !skipped && embedding.is_none();
 
-    let btn_style = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
+    let btn_style = "height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; cursor: pointer; border: 1px solid var(--border); transition: background 0.15s;";
     let transcode_btn_style = if transcode_on {
         format!(
             "{btn_style} background: var(--btn-primary); color: white; border-color: var(--btn-primary);"
@@ -432,11 +461,11 @@ pub fn StagedRow(
     };
 
     let is_rejected = task.state == UploadState::Rejected;
-    let row_style = if is_rejected {
-        "padding: 10px 12px; border: 1px solid var(--error); border-radius: 6px; background: var(--error-bg); transition: background 0.15s, border-color 0.15s;"
-    } else {
-        "padding: 10px 12px; border: 1px solid var(--staged-border); border-radius: 6px; background: var(--staged-bg); transition: background 0.15s, border-color 0.15s;"
-    };
+    // Card tint by state: staged → sky, rejected → destructive (see `card_tone`).
+    let (card_border, card_bg) = card_tone(&task.state, false);
+    let row_style = format!(
+        "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg}; transition: background 0.15s, border-color 0.15s;"
+    );
     // Two severities, two palettes:
     //   * `warning_style` — recommend-band advisories, telemetry hints,
     //     missing-fingerprint nudges. Warn palette regardless of the
@@ -445,8 +474,8 @@ pub fn StagedRow(
     //     "you might want to" lines from the "this won't upload" lines.
     //   * `reason_style` — acceptance-band reject reasons. Always
     //     error-coloured; only present on rejected rows.
-    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 3px;";
-    let reason_style = "font-size: 11px; color: var(--error); margin-top: 4px; padding: 3px 6px; background: var(--bg); border: 1px solid var(--error); border-radius: 3px;";
+    let warning_style = "font-size: 11px; color: var(--warning); margin-top: 4px; padding: 3px 6px; background: var(--warning-bg); border-radius: 4px;";
+    let reason_style = "font-size: 11px; color: var(--error); margin-top: 4px; padding: 3px 6px; background: var(--bg); border: 1px solid var(--error); border-radius: 4px;";
 
     rsx! {
         div {
@@ -462,7 +491,7 @@ pub fn StagedRow(
                         style: "font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
                         if is_rejected {
                             span {
-                                style: "display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; padding: 1px 5px; margin-right: 6px; border-radius: 3px; background: var(--error); color: white; vertical-align: 1px;",
+                                style: "display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: 0.05em; padding: 1px 5px; margin-right: 6px; border-radius: 4px; background: var(--error); color: white; vertical-align: 1px;",
                                 "REJECTED"
                             }
                         }
@@ -472,9 +501,7 @@ pub fn StagedRow(
                 span { style: "font-size: 12px; color: var(--text-muted); flex-shrink: 0; margin-left: 8px;", "{format_size(task.size)}" }
             }
 
-            if let Some(details) = video_details.clone() {
-                VideoInfoPopover { details }
-            }
+            RowDetails { task: task.clone(), device_encoder_signatures }
 
             // Capture metadata, when set AND not mid-write: a green confirmation
             // line showing the recorded values, so the user can see at a glance
@@ -483,7 +510,7 @@ pub fn StagedRow(
             // "Needs metadata" warning shows instead).
             if let Some(m) = capture.as_ref().filter(|_| embedding.is_none()) {
                 div {
-                    style: "font-size: 11px; color: var(--success, #16a34a); margin-top: 4px; padding: 3px 6px; background: var(--success-bg, rgba(22,163,74,0.1)); border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                    style: "font-size: 11px; color: var(--success); margin-top: 4px; padding: 3px 6px; background: var(--success-bg); border-radius: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
                     title: "Capture metadata written into this clip's file.",
                     "\u{2713} {capture_summary(m)}"
                 }
@@ -494,7 +521,7 @@ pub fn StagedRow(
             // distinct from the green "filled" line. "Add metadata" stays available.
             if skipped && capture.is_none() && embedding.is_none() {
                 div {
-                    style: "font-size: 11px; color: var(--text-muted); margin-top: 4px; padding: 3px 6px; background: var(--bg-secondary, rgba(0,0,0,0.04)); border-radius: 3px;",
+                    style: "font-size: 11px; color: var(--text-muted); margin-top: 4px; padding: 3px 6px; background: var(--bg-secondary, rgba(0,0,0,0.04)); border-radius: 4px;",
                     title: "Capture metadata was skipped for this clip — it uploads without io.visionlab tags.",
                     "Capture metadata skipped"
                 }
@@ -552,7 +579,7 @@ pub fn StagedRow(
                 style: "display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 8px;",
                 if needs_metadata {
                     span {
-                        style: "margin-right: auto; font-size: 11px; color: var(--warning); padding: 2px 6px; border-radius: 3px; background: var(--warning-bg); border: 1px solid var(--warning);",
+                        style: "margin-right: auto; font-size: 11px; color: var(--warning); padding: 2px 6px; border-radius: 4px; background: var(--warning-bg); border: 1px solid var(--warning);",
                         title: "Capture metadata is required before this clip uploads.",
                         "\u{26A0} Needs metadata"
                     }
@@ -580,7 +607,7 @@ pub fn StagedRow(
                 }
                 if show_already_ok_badge {
                     span {
-                        style: "font-size: 11px; color: var(--text-secondary); padding: 2px 6px; border-radius: 3px; background: var(--bg-secondary); border: 1px solid var(--border);",
+                        style: "font-size: 11px; color: var(--text-secondary); padding: 2px 6px; border-radius: 4px; background: var(--bg-secondary); border: 1px solid var(--border);",
                         title: "Source already at or below transcode targets — no benefit to re-encoding.",
                         "Already matches targets"
                     }
@@ -635,6 +662,11 @@ pub fn UploadTaskRow(
     // Phase-aware progress reader. Read from the live signals only — never
     // from the cloned task's `bytes_uploaded`, which lags behind and snaps
     // back to 0 on render races.
+    // Byte-truthful progress: pre-transfer sub-states read 0%, and the transfer
+    // itself is driven by the real confirmed-bytes fraction (see `upload_stage_pct`)
+    // so the bar always agrees with the byte counter — on the multipart path it
+    // steps once per landed part (~32 MiB). Transcoding folds into "Uploading" and
+    // borrows the transcode %, shown without any transcode wording (D1).
     let (progress_pct, uploaded_bytes) = match task.state {
         UploadState::Completed => (100u32, upload_total),
         UploadState::Transcoding => {
@@ -646,23 +678,35 @@ pub fn UploadTaskRow(
             (pct.min(100), 0u64)
         }
         UploadState::Uploading | UploadState::Verifying | UploadState::Paused => {
-            match upload_progress.read().get(&task.id) {
-                Some(&(uploaded, total)) if total > 0 => {
-                    let pct = (uploaded as f64 / total as f64 * 100.0) as u32;
-                    (pct.min(100), uploaded)
-                }
-                _ => (0, 0),
-            }
+            let uploaded = upload_progress
+                .read()
+                .get(&task.id)
+                .map(|&(u, _)| u)
+                .unwrap_or(0);
+            (
+                upload_stage_pct(&task.state, uploaded, upload_total),
+                uploaded,
+            )
+        }
+        UploadState::Pending | UploadState::Validating | UploadState::Creating => {
+            (upload_stage_pct(&task.state, 0, upload_total), 0)
         }
         _ => (0, 0),
     };
 
-    let (status_color, status_bg) = match task.state {
-        UploadState::Completed => ("var(--success)", "var(--success-bg)"),
-        UploadState::Failed | UploadState::GaveUp => ("var(--error)", "var(--error-bg)"),
-        UploadState::Uploading => ("var(--info)", "var(--info-bg)"),
-        UploadState::Paused => ("var(--warning)", "var(--warning-bg)"),
-        _ => ("var(--text-muted)", "var(--bg-secondary)"),
+    // Already-exists rows (Completed + the reconcile marker) render as an amber
+    // "Already exists" chip instead of a plain "Completed".
+    let already_exists = task.error_message.as_deref() == Some(super::ALREADY_EXISTS_MARKER);
+    let (card_border, card_bg) = card_tone(&task.state, already_exists);
+    let (badge_bg, badge_fg) = badge_tone(&task.state, already_exists);
+
+    // Collapse the engine's fine-grained state to the user-facing stage badge
+    // (mirrors the prototype `displayStatusLabel`), so the chip reads
+    // "Uploading" instead of internal jargon like "TRANSCODING"/"CREATING".
+    let badge_label = if already_exists {
+        "Already exists"
+    } else {
+        stage_badge_label(&task.state)
     };
 
     let tenant_name = app_state.tenant_display_name(&task.tenant_id);
@@ -699,7 +743,7 @@ pub fn UploadTaskRow(
     rsx! {
         div {
             class: "card-row",
-            style: "padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: {status_bg}; transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;",
+            style: "padding: 10px 12px; border: 1px solid {card_border}; border-radius: 6px; background: {card_bg}; transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;",
 
             div {
                 style: "display: flex; justify-content: space-between; align-items: center;",
@@ -717,14 +761,16 @@ pub fn UploadTaskRow(
                 div {
                     style: "display: flex; align-items: center; gap: 6px; margin-left: 8px; flex-shrink: 0;",
                     span {
-                        style: "font-size: 11px; color: {status_color}; font-weight: 600; text-transform: uppercase;",
-                        "{task.state.as_str()}"
+                        style: "display: inline-flex; align-items: center; height: 16px; padding: 0 6px; \
+                                font-size: 10px; font-weight: 500; border-radius: 4px; \
+                                background: {badge_bg}; color: {badge_fg}; white-space: nowrap;",
+                        "{badge_label}"
                     }
                     // Action buttons based on state
                     {
                         let id1 = task.id.clone();
                         let id2 = task.id.clone();
-                        let small_btn = "height: 24px; padding: 0 8px; font-size: 11px; border-radius: 4px; cursor: pointer; transition: background 0.15s, transform 0.08s;";
+                        let small_btn = "display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; cursor: pointer; transition: background 0.15s, transform 0.08s;";
                         match task.state {
                             // Pause is offered ONLY while actually uploading — the
                             // one state where a hold is meaningful (state_machine
@@ -766,12 +812,14 @@ pub fn UploadTaskRow(
                                     class: "btn-primary",
                                     style: "{small_btn} background: var(--btn-primary); color: white; border: none;",
                                     onclick: move |_| on_resume.call(id1.clone()),
+                                    crate::icons::PlayIcon {}
                                     "Resume"
                                 }
                                 button {
                                     class: "btn-danger-sm",
                                     style: "{small_btn} background: transparent; color: var(--error); border: 1px solid var(--error);",
                                     onclick: move |_| on_remove.call(id2.clone()),
+                                    crate::icons::TrashIcon {}
                                     "Remove"
                                 }
                             },
@@ -783,20 +831,23 @@ pub fn UploadTaskRow(
                                     class: "btn-primary",
                                     style: "{small_btn} background: var(--btn-primary); color: white; border: none;",
                                     onclick: move |_| on_retry.call(id1.clone()),
+                                    crate::icons::RetryIcon {}
                                     "Retry"
                                 }
                                 button {
                                     class: "btn-danger-sm",
                                     style: "{small_btn} background: transparent; color: var(--error); border: 1px solid var(--error);",
                                     onclick: move |_| on_remove.call(id2.clone()),
+                                    crate::icons::TrashIcon {}
                                     "Remove"
                                 }
                             },
                             UploadState::Completed => rsx! {
                                 button {
                                     class: "btn-outline",
-                                    style: "{small_btn} background: transparent; color: var(--text-muted); border: 1px solid var(--border);",
+                                    style: "{small_btn} background: transparent; color: var(--text); border: 1px solid var(--border);",
                                     onclick: move |_| on_remove.call(id1.clone()),
+                                    crate::icons::TrashIcon {}
                                     "Clear"
                                 }
                             },
@@ -813,6 +864,8 @@ pub fn UploadTaskRow(
                 style: "font-size: 12px; color: var(--text-muted); margin-top: 4px;",
                 "{size_line}"
             }
+
+            RowDetails { task: task.clone(), device_encoder_signatures: video::device_encoder_signatures() }
 
             {
                 let show_progress = task.state.is_active() || task.state == UploadState::Paused;
@@ -888,43 +941,53 @@ pub fn UploadTaskRow(
 
             if let Some(ref err) = task.error_message {
                 div {
-                    style: "font-size: 12px; color: var(--error); margin-top: 4px; padding: 6px 8px; background: var(--error-bg); border-radius: 4px;",
-                    "{err}"
+                    style: "display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--error); margin-top: 4px; padding: 6px 8px; background: var(--error-bg); border-radius: 4px;",
+                    crate::icons::AlertTriangleIcon {}
+                    span { "{err}" }
                 }
             }
 
             for reason in task.rejection_reasons.iter() {
                 div {
-                    style: "font-size: 12px; color: var(--error); margin-top: 2px; padding: 4px 8px; background: var(--error-bg); border-radius: 4px;",
-                    "{reason}"
+                    style: "display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--error); margin-top: 2px; padding: 4px 8px; background: var(--error-bg); border-radius: 4px;",
+                    crate::icons::AlertTriangleIcon {}
+                    span { "{reason}" }
                 }
             }
             for warning in task.validation_warnings.iter() {
                 div {
-                    style: "font-size: 12px; color: var(--warning); margin-top: 2px; padding: 4px 8px; background: var(--warning-bg); border-radius: 4px;",
-                    "{warning}"
+                    style: "display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: var(--warning); margin-top: 2px; padding: 4px 8px; background: var(--warning-bg); border-radius: 4px;",
+                    crate::icons::AlertTriangleIcon {}
+                    span { "{warning}" }
                 }
             }
         }
     }
 }
 
-/// Phase label rendered under the progress bar. Single bar, single label —
-/// the state determines whether we're showing transcode %, upload bytes,
-/// or a static stage name.
+/// Phase label rendered under the progress bar, mirroring the prototype's
+/// `uploadStageProgressLabel` + `uploadStageActivityLabel`: every upload-stage
+/// row reads "Uploading N% — <friendly activity>", so the user sees one stage
+/// with a plain-language sub-line instead of raw engine states. Transcoding
+/// folds in here with a neutral "Preparing your file" — no transcode wording,
+/// per D1. The rate/ETA suffix is appended separately by the caller.
 fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> String {
     match state {
-        UploadState::Transcoding => format!("Transcoding {pct}%"),
+        UploadState::Transcoding => format!("Uploading {pct}% — Preparing your file"),
+        UploadState::Pending => format!("Uploading {pct}% — Waiting to start"),
+        UploadState::Validating => format!("Uploading {pct}% — Confirming file details"),
+        UploadState::Creating => format!("Uploading {pct}% — Setting up your upload"),
         UploadState::Uploading => format!(
-            "Uploading {pct}% — {} / {}",
+            "Uploading {pct}% — Transferring to the cloud — {} / {}",
             format_size(uploaded),
             format_size(total)
         ),
-        UploadState::Validating => "Validating...".to_string(),
-        UploadState::Creating => "Creating...".to_string(),
-        UploadState::Verifying => "Verifying...".to_string(),
-        UploadState::Paused => "Paused".to_string(),
-        UploadState::Pending => "Pending...".to_string(),
+        UploadState::Verifying => format!("Uploading {pct}% — Finishing up"),
+        UploadState::Paused => format!(
+            "Uploading {pct}% — Paused · {} / {}",
+            format_size(uploaded),
+            format_size(total)
+        ),
         UploadState::QualityChecking
         | UploadState::Hashing
         | UploadState::Staged
@@ -932,6 +995,149 @@ fn phase_label(state: &UploadState, pct: u32, uploaded: u64, total: u64) -> Stri
         | UploadState::Completed
         | UploadState::Failed
         | UploadState::GaveUp => String::new(),
+    }
+}
+
+/// 0–100% progress within the "Checking files" stage — quality-check is a fixed
+/// 8% (network round-trip, no live signal), hashing is `lerp(12→100)` over the
+/// hashed bytes. Mirrors the prototype `checkingProgressPct`. Shared with the
+/// batch overview so its byte weighting matches the per-row bars.
+pub(super) fn checking_stage_pct(state: &UploadState, hashed: u64, total: u64) -> u32 {
+    match state {
+        UploadState::QualityChecking => 8,
+        UploadState::Hashing => {
+            let t = if total > 0 {
+                hashed as f64 / total as f64
+            } else {
+                0.0
+            };
+            (12.0 + (100.0 - 12.0) * t).round().min(100.0) as u32
+        }
+        UploadState::Staged
+        | UploadState::Pending
+        | UploadState::Validating
+        | UploadState::Transcoding
+        | UploadState::Creating
+        | UploadState::Uploading
+        | UploadState::Verifying
+        | UploadState::Paused
+        | UploadState::Rejected
+        | UploadState::Completed
+        | UploadState::Failed
+        | UploadState::GaveUp => 0,
+    }
+}
+
+/// 0–100% progress within the "Uploading" stage — fixed markers for the
+/// server-prep sub-states, `lerp(22→96)` for the actual transfer. Mirrors the
+/// prototype `uploadStageProgressPct`. Transcoding is handled by the caller
+/// (it borrows the live transcode %), so it returns 0 here.
+pub(super) fn upload_stage_pct(state: &UploadState, uploaded: u64, total: u64) -> u32 {
+    match state {
+        // Pre-transfer stages: nothing is uploaded yet, so the bar honestly reads
+        // 0% — consistent with the "0 B / total" byte counter. The stage badge +
+        // spinner convey that prep work is happening.
+        UploadState::Pending | UploadState::Validating | UploadState::Creating => 0,
+        // Truthful, byte-driven progress: the fraction of bytes actually confirmed
+        // on the server, with no synthetic floor. On the multipart path this
+        // advances one part (~32 MiB) at a time as each part's PUT lands — coarse
+        // but real, and always consistent with the byte counter.
+        UploadState::Uploading | UploadState::Paused => {
+            let t = if total > 0 {
+                uploaded as f64 / total as f64
+            } else {
+                0.0
+            };
+            (t * 100.0).round().min(100.0) as u32
+        }
+        UploadState::Verifying => 99,
+        UploadState::Transcoding
+        | UploadState::QualityChecking
+        | UploadState::Hashing
+        | UploadState::Staged
+        | UploadState::Rejected
+        | UploadState::Completed
+        | UploadState::Failed
+        | UploadState::GaveUp => 0,
+    }
+}
+
+/// User-facing stage badge — mirrors the prototype `displayStatusLabel` /
+/// `userFacingStatusLabel`. The engine's fine-grained pipeline states collapse
+/// to the three user-facing stages, so the chip never shows internal jargon
+/// like "TRANSCODING" or "CREATING". (`already exists` refinement for Completed
+/// lives in the Completed tab; here Completed simply reads "Completed".)
+fn stage_badge_label(state: &UploadState) -> &'static str {
+    match state {
+        UploadState::QualityChecking | UploadState::Hashing => "Checking files",
+        UploadState::Staged => "In queue",
+        UploadState::Pending
+        | UploadState::Validating
+        | UploadState::Transcoding
+        | UploadState::Creating
+        | UploadState::Uploading
+        | UploadState::Verifying
+        | UploadState::Paused => "Uploading",
+        UploadState::Rejected => "Rejected",
+        UploadState::Completed => "Completed",
+        UploadState::Failed | UploadState::GaveUp => "Failed",
+    }
+}
+
+/// Prototype `cardTone`: the row's `(border, background)` tint by stage. Uses
+/// low-alpha accent tints (mirroring the wave `bg-sky-500/[0.03]` approach) so
+/// the same values read correctly over both the light and dark app background.
+/// `already_exists` — a completed row whose marker says the content was already
+/// on the server — takes the amber tone. Checking and the upload stage stay
+/// neutral (Plan A's primary is neutral, so a "primary tint" would be invisible);
+/// the accent tints are reserved for the states the prototype colours.
+fn card_tone(state: &UploadState, already_exists: bool) -> (&'static str, &'static str) {
+    if already_exists {
+        return ("rgba(245,158,11,0.28)", "rgba(245,158,11,0.06)");
+    }
+    match state {
+        UploadState::QualityChecking
+        | UploadState::Hashing
+        | UploadState::Pending
+        | UploadState::Validating
+        | UploadState::Transcoding
+        | UploadState::Creating
+        | UploadState::Uploading
+        | UploadState::Verifying => ("var(--border)", "var(--bg-secondary)"),
+        UploadState::Staged => ("rgba(59,130,246,0.25)", "rgba(59,130,246,0.05)"),
+        UploadState::Paused => ("rgba(245,158,11,0.28)", "rgba(245,158,11,0.06)"),
+        UploadState::Completed => ("rgba(34,197,94,0.25)", "rgba(34,197,94,0.05)"),
+        UploadState::Failed | UploadState::GaveUp | UploadState::Rejected => {
+            ("rgba(239,68,68,0.28)", "rgba(239,68,68,0.05)")
+        }
+    }
+}
+
+/// Prototype `statusBadgeClass`: the badge pill's `(background, foreground)`.
+/// Same accent family as [`card_tone`], a touch stronger so the chip reads as a
+/// pill. Checking/upload-stage use a neutral chip; the coloured accents match
+/// the prototype for staged (sky), paused/already-exists (amber), completed
+/// (emerald) and failed/rejected (destructive).
+fn badge_tone(state: &UploadState, already_exists: bool) -> (&'static str, &'static str) {
+    if already_exists {
+        return ("rgba(245,158,11,0.15)", "var(--warning)");
+    }
+    match state {
+        UploadState::QualityChecking | UploadState::Hashing => {
+            ("var(--bg-tertiary)", "var(--text-secondary)")
+        }
+        UploadState::Staged => ("rgba(59,130,246,0.15)", "var(--info)"),
+        UploadState::Pending
+        | UploadState::Validating
+        | UploadState::Transcoding
+        | UploadState::Creating
+        | UploadState::Uploading
+        | UploadState::Verifying => ("var(--bg-tertiary)", "var(--text)"),
+        UploadState::Paused => ("rgba(245,158,11,0.15)", "var(--warning)"),
+        UploadState::Completed => ("rgba(34,197,94,0.15)", "var(--success)"),
+        UploadState::Failed | UploadState::GaveUp | UploadState::Rejected => {
+            ("rgba(239,68,68,0.12)", "var(--error)")
+        }
     }
 }
 
@@ -980,5 +1186,62 @@ fn format_duration(secs: f64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m}:{s:02}")
+    }
+}
+
+/// Parse a stored upload timestamp into a naive UTC datetime. Accepts the
+/// SQLite `datetime('now')` shape ("YYYY-MM-DD HH:MM:SS", UTC) plus a couple of
+/// ISO-8601 variants. `None` when the string is empty or unrecognised.
+pub fn parse_clip_datetime(raw: &str) -> Option<chrono::NaiveDateTime> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S"))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f"))
+        .ok()
+}
+
+/// Format a stored upload timestamp for display: parse it as UTC, convert to
+/// the local timezone, and render like "Jun 28, 2026 22:32". `None` when the
+/// timestamp can't be parsed, so callers fall back to the raw string.
+pub fn format_clip_time(raw: &str) -> Option<String> {
+    use chrono::{Local, TimeZone, Utc};
+    let naive = parse_clip_datetime(raw)?;
+    let local = Utc.from_utc_datetime(&naive).with_timezone(&Local);
+    Some(local.format("%b %-d, %Y %H:%M").to_string())
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+
+    #[test]
+    fn parses_sqlite_datetime_shape() {
+        let dt = parse_clip_datetime("2026-06-28 22:32:15").expect("parses sqlite form");
+        assert_eq!(dt.to_string(), "2026-06-28 22:32:15");
+    }
+
+    #[test]
+    fn parses_iso_datetime_shape() {
+        assert!(parse_clip_datetime("2026-06-28T22:32:15").is_some());
+    }
+
+    #[test]
+    fn rejects_garbage_timestamps() {
+        assert!(parse_clip_datetime("").is_none());
+        assert!(parse_clip_datetime("not a date").is_none());
+        assert!(parse_clip_datetime("2026-13-40 99:99:99").is_none());
+    }
+
+    #[test]
+    fn formats_valid_and_rejects_garbage() {
+        // Midday mid-month: no timezone shifts the year or month, so these
+        // assertions hold regardless of the test machine's local timezone.
+        let s = format_clip_time("2026-06-28 12:00:00").expect("formats a valid stamp");
+        assert!(s.contains("2026"), "year present: {s}");
+        assert!(s.contains("Jun"), "month present: {s}");
+        assert!(format_clip_time("garbage").is_none());
     }
 }

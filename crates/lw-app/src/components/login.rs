@@ -137,7 +137,7 @@ pub fn LoginPage() -> Element {
                             "Welcome to Linewise"
                         }
                         span {
-                            class: "text-[15px] text-muted-foreground font-normal",
+                            class: "text-sm text-muted-foreground font-normal",
                             "Sign in to your account to continue"
                         }
                     }
@@ -156,7 +156,7 @@ pub fn LoginPage() -> Element {
 
                         // Google
                         button {
-                            class: "btn-social flex items-center justify-center gap-2.5 w-full h-[42px] px-4 border border-border rounded-lg text-sm font-medium bg-background text-foreground transition ease-out hover:bg-secondary",
+                            class: "btn-social flex items-center justify-center gap-2.5 w-full h-[42px] px-4 border border-border rounded-md text-sm font-medium bg-background text-foreground transition ease-out hover:bg-secondary",
                             disabled: *loading.read(),
                             onclick: on_google,
                             crate::icons::GoogleIcon {}
@@ -165,7 +165,7 @@ pub fn LoginPage() -> Element {
 
                         // Microsoft
                         button {
-                            class: "btn-social flex items-center justify-center gap-2.5 w-full h-[42px] px-4 border border-border rounded-lg text-sm font-medium bg-background text-foreground transition ease-out hover:bg-secondary",
+                            class: "btn-social flex items-center justify-center gap-2.5 w-full h-[42px] px-4 border border-border rounded-md text-sm font-medium bg-background text-foreground transition ease-out hover:bg-secondary",
                             disabled: *loading.read(),
                             onclick: on_microsoft,
                             crate::icons::MicrosoftIcon {}
@@ -190,7 +190,7 @@ pub fn LoginPage() -> Element {
                                     value: "{email}",
                                     oninput: move |evt| email.set(evt.value()),
                                     required: true,
-                                    class: "h-[38px] px-3 border border-input rounded-md text-sm bg-background text-foreground outline-none transition focus:border-ring focus:shadow-[0_0_0_2px_rgba(103,19,219,0.15)]",
+                                    class: "h-[38px] px-3 border border-input rounded-md text-sm bg-background text-foreground outline-none transition focus:border-ring focus:shadow-[0_0_0_2px_rgba(0,0,0,0.12)]",
                                 }
 
                                 input {
@@ -199,13 +199,13 @@ pub fn LoginPage() -> Element {
                                     value: "{password}",
                                     oninput: move |evt| password.set(evt.value()),
                                     required: true,
-                                    class: "h-[38px] px-3 border border-input rounded-md text-sm bg-background text-foreground outline-none transition focus:border-ring focus:shadow-[0_0_0_2px_rgba(103,19,219,0.15)]",
+                                    class: "h-[38px] px-3 border border-input rounded-md text-sm bg-background text-foreground outline-none transition focus:border-ring focus:shadow-[0_0_0_2px_rgba(0,0,0,0.12)]",
                                 }
 
                                 button {
                                     r#type: "submit",
                                     disabled: *loading.read(),
-                                    class: "flex items-center justify-center w-full h-[42px] px-4 bg-primary text-primary-foreground rounded-lg text-sm font-medium transition ease-out hover:bg-primary-hovered active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed",
+                                    class: "flex items-center justify-center w-full h-[42px] px-4 bg-primary text-primary-foreground rounded-md text-sm font-medium transition ease-out hover:bg-primary-hovered active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed",
                                     if *loading.read() {
                                         span { class: "spinner spinner-sm mr-1.5" }
                                         "Signing in..."
@@ -218,7 +218,7 @@ pub fn LoginPage() -> Element {
                             button {
                                 disabled: *loading.read(),
                                 onclick: move |_| show_email_form.set(true),
-                                class: "w-full h-[42px] px-4 bg-transparent text-muted-foreground rounded-lg text-sm font-medium transition ease-out hover:bg-accent hover:text-accent-foreground",
+                                class: "w-full h-[42px] px-4 bg-transparent text-muted-foreground rounded-md text-sm font-medium transition ease-out hover:bg-accent hover:text-accent-foreground",
                                 "Sign in with Email"
                             }
                         }

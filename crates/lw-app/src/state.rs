@@ -4,7 +4,7 @@ use lw_core::auth::{AuthClientConfig, AuthService};
 use lw_core::config::AppConfig;
 use lw_core::db::Database;
 use lw_core::error::ConfigError;
-use lw_core::models::{Project, Tenant, UploadTask, UserInfo};
+use lw_core::models::{Project, Tenant, UploadState, UploadTask, UserInfo};
 use lw_core::upload::{UploadEngine, UploadEvent};
 use lw_core::version_check::VersionStatus;
 use std::collections::{HashMap, HashSet};
@@ -405,5 +405,126 @@ impl AppState {
             return project.name.clone();
         }
         project_id.to_string()
+    }
+
+    /// Dev-only: populate the transfer panel with one sample task per state so
+    /// the UI (the three In-progress stages, plus Completed and Failed) can be
+    /// reviewed without logging in or moving real files. Compiled only in debug
+    /// builds — its trigger button is likewise `#[cfg(debug_assertions)]`, so
+    /// release builds never see it. Writes `upload_tasks` and the progress maps
+    /// directly, deliberately bypassing the `UploadRuntime` single-writer
+    /// invariant: this is an offline preview, no engine is emitting events.
+    #[cfg(debug_assertions)]
+    pub fn seed_sample_tasks(&mut self) {
+        use UploadState::*;
+
+        let tenant = self
+            .selected_tenant
+            .peek()
+            .as_ref()
+            .map(|t| t.id.clone())
+            .unwrap_or_else(|| "acme-corp".to_string());
+        let project = self
+            .selected_project
+            .peek()
+            .as_ref()
+            .map(|p| p.id.clone())
+            .unwrap_or_else(|| "proj-alpha".to_string());
+
+        let mb: u64 = 1024 * 1024;
+        let gb: u64 = 1024 * mb;
+
+        let make = |id: &str, filename: &str, size: u64, state: UploadState| UploadTask {
+            id: id.to_string(),
+            local_path: format!("C:\\samples\\{filename}"),
+            filename: filename.to_string(),
+            size,
+            mime_type: "video/mp4".to_string(),
+            tenant_id: tenant.clone(),
+            project_id: project.clone(),
+            document_id: None,
+            session_id: None,
+            mpu_upload_id: None,
+            bytes_uploaded: 0,
+            state,
+            error_message: None,
+            hash: None,
+            source_md5: None,
+            source_crc32c: None,
+            source_sha256_head_256kib: None,
+            validation_warnings: Vec::new(),
+            rejection_reasons: Vec::new(),
+            retry_count: 0,
+            transcode: false,
+            transcoded_size: None,
+            video_info: None,
+            force_upload: false,
+            created_at: "2026-07-06 09:00:00".to_string(),
+            updated_at: "2026-07-06 09:12:34".to_string(),
+        };
+
+        let mut tasks = vec![
+            make("s-qc", "clip_quality_check.mp4", 2 * gb, QualityChecking),
+            make("s-hash", "clip_hashing.mp4", 3 * gb, Hashing),
+            make("s-staged", "clip_ready.mp4", 1200 * mb, Staged),
+            make("s-pending", "clip_pending.mp4", 900 * mb, Pending),
+            make("s-validating", "clip_validating.mp4", 900 * mb, Validating),
+            make("s-creating", "clip_creating.mp4", 900 * mb, Creating),
+            make("s-uploading", "clip_uploading.mp4", 4 * gb, Uploading),
+            make("s-verifying", "clip_verifying.mp4", 800 * mb, Verifying),
+            make("s-paused", "clip_paused.mp4", 2 * gb, Paused),
+            make("s-completed", "clip_done.mp4", 700 * mb, Completed),
+            make("s-exists", "clip_duplicate.mp4", 650 * mb, Completed),
+            make("s-failed", "clip_failed.mp4", 1500 * mb, Failed),
+            make("s-rejected", "clip_rejected.mp4", 500 * mb, Rejected),
+            make("s-gaveup", "clip_gaveup.mp4", 1800 * mb, GaveUp),
+        ];
+
+        for t in tasks.iter_mut() {
+            match t.id.as_str() {
+                "s-exists" => {
+                    // Matches the prototype ALREADY_EXISTS_MARKER so the Completed
+                    // tab shows an "Already exists" row (see E3).
+                    t.error_message = Some("Already exists on server".to_string());
+                }
+                "s-failed" => {
+                    t.error_message = Some("Upload failed — connection reset by peer".to_string());
+                }
+                "s-rejected" => {
+                    t.rejection_reasons =
+                        vec!["Bitrate 8.2 Mbps is below the 30 Mbps minimum".to_string()];
+                }
+                "s-gaveup" => {
+                    t.error_message = Some(
+                        "Gave up after repeated network errors. Check your connection and retry."
+                            .to_string(),
+                    );
+                    t.retry_count = 5;
+                }
+                "s-hash" => {
+                    t.validation_warnings =
+                        vec!["No device fingerprint found — provenance is weaker".to_string()];
+                }
+                _ => {}
+            }
+        }
+
+        self.upload_tasks.set(tasks);
+
+        // Determinate progress for the rows that show a live bar.
+        self.hash_progress
+            .write()
+            .insert("s-hash".to_string(), (1400 * mb, 3 * gb)); // ~45%
+        {
+            let mut up = self.upload_progress.write();
+            up.insert("s-uploading".to_string(), (2600 * mb, 4 * gb)); // ~63%
+            up.insert("s-paused".to_string(), (900 * mb, 2 * gb)); // ~44%
+            up.insert("s-verifying".to_string(), (800 * mb, 800 * mb)); // 100% bytes, 99% stage
+        }
+        self.upload_speed
+            .write()
+            .insert("s-uploading".to_string(), 12.5 * mb as f64); // 12.5 MB/s
+
+        self.show_toast("Seeded 14 sample tasks (debug only)", ToastKind::Info);
     }
 }

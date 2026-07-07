@@ -376,6 +376,7 @@ fn handle_upload_event(
                 t.state = UploadState::Completed;
                 t.error_message = Some(ALREADY_EXISTS_MARKER.to_string());
                 t.document_id = Some(existing_document_id.clone());
+                t.updated_at = now_timestamp();
             });
         }
         UploadEvent::Completed { task_id } => {
@@ -384,7 +385,12 @@ fn handle_upload_event(
             hash_progress.write().remove(&task_id);
             app_state.part_retrying.write().remove(&task_id);
             app_state.pausing.write().remove(&task_id);
-            update_task(app_state, &task_id, |t| t.state = UploadState::Completed);
+            update_task(app_state, &task_id, |t| {
+                t.state = UploadState::Completed;
+                // Refresh to ~completion time so the Completed detail's "Uploaded"
+                // matches the DB's `datetime('now')` write in settle_completed.
+                t.updated_at = now_timestamp();
+            });
         }
         UploadEvent::Failed { task_id, error } => {
             upload_progress.write().remove(&task_id);
@@ -432,4 +438,12 @@ fn update_task(app_state: &mut AppState, task_id: &str, f: impl FnOnce(&mut Uplo
     if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
         f(task);
     }
+}
+
+/// Current UTC wall-clock in SQLite `datetime('now')` shape
+/// ("YYYY-MM-DD HH:MM:SS"). Used to refresh a completed row's `updated_at`
+/// in-memory so its "Uploaded" time reflects this-session completions (the DB
+/// writes the authoritative value at the same instant in `settle_completed`).
+fn now_timestamp() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }

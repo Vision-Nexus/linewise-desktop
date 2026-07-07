@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload\n             FROM upload_queue\n             WHERE state = 'FAILED'\n               AND retry_count < 10\n               AND (error_message LIKE '%Network%'\n                    OR error_message LIKE '%timeout%'\n                    OR error_message LIKE '%no healthy upstream%'\n                    OR error_message LIKE '%Interrupted%'\n                    OR error_message LIKE '%error sending request%')\n             ORDER BY created_at ASC\n             LIMIT 20",
+  "query": "SELECT id, local_path, filename, size, mime_type, tenant_id, project_id,\n                    document_id, session_id, mpu_upload_id, bytes_uploaded, state, error_message,\n                    hash, source_md5, source_crc32c, source_sha256_head_256kib, validation_warnings, rejection_reasons, retry_count, video_info, transcode, transcoded_size, force_upload, created_at, updated_at\n             FROM upload_queue WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -122,10 +122,20 @@
         "name": "force_upload",
         "ordinal": 23,
         "type_info": "Integer"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 24,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 25,
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       true,
@@ -151,8 +161,10 @@
       true,
       false,
       true,
+      false,
+      false,
       false
     ]
   },
-  "hash": "01d31b1411e3045b78c451d788838a96b14ae224d57f391110e8c2f7fa881141"
+  "hash": "0b6abcf913f0fe80365561724ae0f391c8521aa0bbaf5563ace2225c2ec4325d"
 }

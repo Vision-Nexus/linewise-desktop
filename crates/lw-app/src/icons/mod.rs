@@ -206,3 +206,297 @@ pub fn MicrosoftIcon() -> Element {
         }
     }
 }
+
+// ── Action icons (lucide, 14px, currentColor) — for button/label parity with the
+//    wave design system. Sized 14px to sit in the dense row/toolbar buttons. ──
+
+#[component]
+pub fn UploadIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }
+            polyline { points: "17 8 12 3 7 8" }
+            line { x1: "12", y1: "3", x2: "12", y2: "15" }
+        }
+    }
+}
+
+#[component]
+pub fn AlertTriangleIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" }
+            path { d: "M12 9v4" }
+            path { d: "M12 17h.01" }
+        }
+    }
+}
+
+#[component]
+pub fn PauseIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            rect { x: "14", y: "4", width: "4", height: "16", rx: "1" }
+            rect { x: "6", y: "4", width: "4", height: "16", rx: "1" }
+        }
+    }
+}
+
+#[component]
+pub fn PlayIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            polygon { points: "6 3 20 12 6 21 6 3" }
+        }
+    }
+}
+
+#[component]
+pub fn RetryIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" }
+            path { d: "M3 3v5h5" }
+        }
+    }
+}
+
+#[component]
+pub fn TrashIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M3 6h18" }
+            path { d: "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }
+            line { x1: "10", y1: "11", x2: "10", y2: "17" }
+            line { x1: "14", y1: "11", x2: "14", y2: "17" }
+        }
+    }
+}
+
+#[component]
+pub fn ChevronRightIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "m9 18 6-6-6-6" }
+        }
+    }
+}
+
+#[component]
+pub fn ChevronDownIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "m6 9 6 6 6-6" }
+        }
+    }
+}
+
+// Loader2 (lucide) — spins via the global `.lw-spin` keyframe. Used as the
+// batch-overview "active work" indicator. 12px to sit in the compact header.
+#[component]
+pub fn SpinnerIcon() -> Element {
+    rsx! {
+        svg {
+            class: "lw-spin",
+            width: "12", height: "12", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M21 12a9 9 0 1 1-6.219-8.56" }
+        }
+    }
+}
+
+// CheckCircle2 (lucide) — batch-complete indicator.
+#[component]
+pub fn CheckCircleIcon() -> Element {
+    rsx! {
+        svg {
+            width: "12", height: "12", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M22 11.08V12a10 10 0 1 1-5.93-9.14" }
+            path { d: "m9 11 3 3L22 4" }
+        }
+    }
+}
+
+// Building2 (lucide) — "Select an organization" empty-state media.
+#[component]
+pub fn BuildingIcon(#[props(default = "16")] size: &'static str) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z" }
+            path { d: "M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" }
+            path { d: "M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2" }
+            path { d: "M10 6h4" }
+            path { d: "M10 10h4" }
+            path { d: "M10 14h4" }
+            path { d: "M10 18h4" }
+        }
+    }
+}
+
+// Folder (lucide) — batch folder card (filled, `fill` set) + "No batches yet"
+// media (outline, default fill none).
+#[component]
+pub fn FolderIcon(
+    #[props(default = "16")] size: &'static str,
+    #[props(default = "none")] fill: &'static str,
+) -> Element {
+    rsx! {
+        svg {
+            width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "{fill}",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "1.5", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }
+        }
+    }
+}
+
+// FolderOpen (lucide) — leading icon on sidebar batch rows.
+#[component]
+pub fn FolderOpenIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" }
+        }
+    }
+}
+
+// ArrowLeft (lucide) — sidebar "All organizations" back link.
+#[component]
+pub fn ArrowLeftIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "m12 19-7-7 7-7" }
+            path { d: "M19 12H5" }
+        }
+    }
+}
+
+// ChevronsUpDown (lucide) — sidebar profile footer trigger.
+#[component]
+pub fn ChevronsUpDownIcon() -> Element {
+    rsx! {
+        svg {
+            width: "16", height: "16", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "m7 15 5 5 5-5" }
+            path { d: "m7 9 5-5 5 5" }
+        }
+    }
+}
+
+// Search (lucide) — sidebar org search box.
+#[component]
+pub fn SearchIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            circle { cx: "11", cy: "11", r: "8" }
+            path { d: "m21 21-4.3-4.3" }
+        }
+    }
+}
+
+// FileUp (lucide) — Upload menu "Select files…".
+#[component]
+pub fn FileUpIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z" }
+            path { d: "M14 2v4a2 2 0 0 0 2 2h4" }
+            path { d: "M12 12v6" }
+            path { d: "m15 15-3-3-3 3" }
+        }
+    }
+}
+
+// FolderUp (lucide) — Upload menu "Select folder…".
+#[component]
+pub fn FolderUpIcon() -> Element {
+    rsx! {
+        svg {
+            width: "14", height: "14", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }
+            path { d: "M12 10v6" }
+            path { d: "m9 13 3-3 3 3" }
+        }
+    }
+}
+
+// Wifi (lucide) — network status pill, connected/degraded.
+#[component]
+pub fn WifiIcon() -> Element {
+    rsx! {
+        svg {
+            width: "12", height: "12", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M12 20h.01" }
+            path { d: "M2 8.82a15 15 0 0 1 20 0" }
+            path { d: "M5 12.859a10 10 0 0 1 14 0" }
+            path { d: "M8.5 16.429a5 5 0 0 1 7 0" }
+        }
+    }
+}
+
+// WifiOff (lucide) — network status pill, offline.
+#[component]
+pub fn WifiOffIcon() -> Element {
+    rsx! {
+        svg {
+            width: "12", height: "12", view_box: "0 0 24 24", fill: "none",
+            xmlns: "http://www.w3.org/2000/svg", stroke: "currentColor",
+            stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M12 20h.01" }
+            path { d: "M8.5 16.429a5 5 0 0 1 7 0" }
+            path { d: "M5 12.859a10 10 0 0 1 5.17-2.69" }
+            path { d: "M19 12.859a10 10 0 0 0-2.007-1.523" }
+            path { d: "M2 8.82a15 15 0 0 1 4.177-2.643" }
+            path { d: "M22 8.82a15 15 0 0 0-11.288-3.764" }
+            path { d: "m2 2 20 20" }
+        }
+    }
+}
