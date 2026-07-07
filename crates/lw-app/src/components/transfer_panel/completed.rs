@@ -21,11 +21,22 @@ use dioxus::prelude::*;
 use lw_core::models::{Project, Tenant, UploadState, UploadTask};
 use lw_core::video;
 
-/// Marker string written into `error_message` by the `DuplicateDetected`
-/// reconcile so a deduped row reads as "already stored" rather than failed.
-/// Kept in one place so the writer (event handler) and the reader (this
-/// view) can't drift.
-pub const ALREADY_EXISTS_MARKER: &str = "Already exists on server";
+/// Marker PREFIX written into `error_message` for a deduped row so it reads as
+/// "already stored" rather than failed. Defined in lw-core (the engine persists
+/// it to the DB via `settle_already_exists`) and re-exported here so the reader
+/// (this view) and the writer can't drift. The stored message is the bare marker
+/// or `"<marker>: <existing filename>"`, so detection is a prefix match and the
+/// matched filename can be recovered with [`already_exists_name`].
+pub use lw_core::upload::ALREADY_EXISTS_MARKER;
+
+/// Recover the matched existing filename from an already-exists `error_message`,
+/// if the engine attached one (`"<marker>: <name>"`). `None` for a bare marker.
+pub fn already_exists_name(error_message: Option<&str>) -> Option<&str> {
+    error_message
+        .and_then(|m| m.strip_prefix(ALREADY_EXISTS_MARKER))
+        .and_then(|rest| rest.strip_prefix(": "))
+        .filter(|s| !s.is_empty())
+}
 
 #[component]
 pub fn CompletedList(tasks: Vec<UploadTask>) -> Element {
@@ -45,7 +56,11 @@ pub fn CompletedList(tasks: Vec<UploadTask>) -> Element {
         .collect();
     let already_exists_count = completed
         .iter()
-        .filter(|t| t.error_message.as_deref() == Some(ALREADY_EXISTS_MARKER))
+        .filter(|t| {
+            t.error_message
+                .as_deref()
+                .is_some_and(|m| m.starts_with(ALREADY_EXISTS_MARKER))
+        })
         .count();
     let uploaded_count = completed.len() - already_exists_count;
 
@@ -53,7 +68,10 @@ pub fn CompletedList(tasks: Vec<UploadTask>) -> Element {
     let shown: Vec<UploadTask> = completed
         .iter()
         .filter(|t| {
-            let ae = t.error_message.as_deref() == Some(ALREADY_EXISTS_MARKER);
+            let ae = t
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.starts_with(ALREADY_EXISTS_MARKER));
             match active {
                 CompletedTab::All => true,
                 CompletedTab::Uploaded => !ae,
@@ -125,7 +143,10 @@ fn CompletedRow(task: UploadTask, is_expanded: bool, on_toggle: EventHandler<Str
     let app_state = use_context::<AppState>();
     let tenant_name = app_state.tenant_display_name(&task.tenant_id);
     let project_name = app_state.project_display_name(&task.tenant_id, &task.project_id);
-    let already_exists = task.error_message.as_deref() == Some(ALREADY_EXISTS_MARKER);
+    let already_exists = task
+        .error_message
+        .as_deref()
+        .is_some_and(|m| m.starts_with(ALREADY_EXISTS_MARKER));
 
     let toggle_id = task.id.clone();
     let chevron = if is_expanded { "▾" } else { "▸" };
@@ -217,6 +238,12 @@ fn CompletedDetail(
     // in-progress one. `None` until the probe landed (or non-video).
     let video_details = build_video_details(&task, video::device_encoder_signatures());
 
+    // Filename of the already-stored document this content matched, when the
+    // engine resolved it (e.g. a local hash-cache hit). Shown so a user who
+    // re-uploaded byte-identical content under a NEW name can see WHICH file it
+    // collided with — the whole point of the "renamed duplicate" case.
+    let matched_name = already_exists_name(task.error_message.as_deref());
+
     rsx! {
         div {
             style: "{detail_style}",
@@ -235,6 +262,10 @@ fn CompletedDetail(
             if let Some(uploaded) = format_clip_time(&task.updated_at) {
                 div { style: "color: var(--text-muted);", "Uploaded" }
                 div { style: "color: var(--text);", "{uploaded}" }
+            }
+            if let Some(name) = matched_name {
+                div { style: "color: var(--text-muted); white-space: nowrap;", "Matches existing" }
+                div { style: "color: var(--text); word-break: break-all;", "{name}" }
             }
             if already_exists {
                 div { style: "color: var(--text-muted);", "Note" }

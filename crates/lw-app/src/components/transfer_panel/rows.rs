@@ -696,7 +696,10 @@ pub fn UploadTaskRow(
 
     // Already-exists rows (Completed + the reconcile marker) render as an amber
     // "Already exists" chip instead of a plain "Completed".
-    let already_exists = task.error_message.as_deref() == Some(super::ALREADY_EXISTS_MARKER);
+    let already_exists = task
+        .error_message
+        .as_deref()
+        .is_some_and(|m| m.starts_with(super::ALREADY_EXISTS_MARKER));
     let (card_border, card_bg) = card_tone(&task.state, already_exists);
     let (badge_bg, badge_fg) = badge_tone(&task.state, already_exists);
 

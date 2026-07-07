@@ -142,6 +142,26 @@ fn near_duplicate_message(near: &NearDuplicateMatch) -> String {
     )
 }
 
+/// Prefix written into `error_message` for a row that reconciled to a duplicate
+/// already stored on the server — a success ("nothing new to upload"), not a
+/// failure. The Completed view keys the "Already exists" badge/sub-tab off this
+/// prefix; the engine persists it via [`crate::db::Database::settle_already_exists`]
+/// so the classification survives a restart. Lives in lw-core (not the UI crate)
+/// because the engine is the one that writes it to the DB.
+pub const ALREADY_EXISTS_MARKER: &str = "Already exists on server";
+
+/// Build the `error_message` for an already-exists reconciliation. Always starts
+/// with [`ALREADY_EXISTS_MARKER`] (so detection is a stable prefix match), and
+/// appends the matched document's filename when known, so the UI can show the
+/// user WHICH already-stored file their (possibly renamed) upload collided with.
+/// One source of truth shared by the DB settle and the UI event handler.
+pub fn already_exists_message(existing_name: Option<&str>) -> String {
+    match existing_name {
+        Some(name) if !name.is_empty() => format!("{ALREADY_EXISTS_MARKER}: {name}"),
+        _ => ALREADY_EXISTS_MARKER.to_string(),
+    }
+}
+
 /// Coarse connectivity tier reported by the auto-retry loop's periodic probe,
 /// classified from the round-trip time of a HEAD to `storage.googleapis.com`
 /// (through the same proxy-aware client the uploads use). A "game ping"-style
@@ -272,6 +292,12 @@ pub enum UploadEvent {
     DuplicateDetected {
         task_id: String,
         existing_document_id: String,
+        /// Filename of the already-stored document this content matches
+        /// (`file_hashes.filename` for a local cache hit). `None` when the name
+        /// can't be resolved (e.g. an in-flight sibling). Lets the "Already
+        /// exists" row name the file the user's (possibly renamed) upload
+        /// collided with, instead of only a document id.
+        existing_document_name: Option<String>,
     },
     Completed {
         task_id: String,
@@ -1485,6 +1511,28 @@ impl UploadEngine {
         });
     }
 
+    /// Reconcile a row to the terminal "already exists on the server" success:
+    /// a duplicate is a success ("nothing new to upload"), not a failure. Persist
+    /// `COMPLETED` + the [`already_exists_message`] marker (survives restart,
+    /// drives the "Already exists" badge) and emit `DuplicateDetected` so the UI
+    /// moves the row into Completed → "Already exists", naming the matched file.
+    /// Callers `return Ok(())` after this so the dispatcher's `Ok` arm runs and
+    /// its `Err`-path `settle_failure` can never clobber the reconciliation.
+    async fn settle_as_already_exists(
+        &self,
+        task_id: &str,
+        existing_id: String,
+        existing_name: Option<String>,
+    ) {
+        let message = already_exists_message(existing_name.as_deref());
+        let _ = self.db.settle_already_exists(task_id, &message).await;
+        let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
+            task_id: task_id.to_string(),
+            existing_document_id: existing_id,
+            existing_document_name: existing_name,
+        });
+    }
+
     /// One write + two events: persist state + warnings + reasons,
     /// notify the UI, return the state for logging. Shared by both
     /// terminal paths so the DB and event order can't drift between
@@ -2105,13 +2153,18 @@ impl UploadEngine {
             // Stage 4; this local guard is a fast fail-fast for the common
             // re-add-the-same-file case.
             if !task.force_upload
-                && let Ok(Some(existing_id)) = self.db.find_by_hash(&hashes.blake3_hex).await
+                && let Ok(Some((existing_id, existing_name))) =
+                    self.db.find_by_hash(&hashes.blake3_hex).await
             {
-                let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
-                    task_id: task.id.clone(),
-                    existing_document_id: existing_id.clone(),
-                });
-                return Err(UploadError::Duplicate { existing_id });
+                // This exact content already finished uploading from this machine
+                // (`file_hashes` is written only after Verify). That's success, not
+                // failure — reconcile to Completed → "Already exists", naming the
+                // matched file so a renamed re-upload shows WHAT it collided with.
+                // Returning Ok stops processing without the dispatcher's Err path
+                // clobbering the reconciliation with a Failed settle.
+                self.settle_as_already_exists(&task.id, existing_id, Some(existing_name))
+                    .await;
+                return Ok(());
             }
             // The in-flight sibling de-dup that used to sit here ran only for
             // rows that need rehashing. It now lives in the pre-create gate in
@@ -2254,11 +2307,13 @@ impl UploadEngine {
                     existing_id
                 }
                 PreCreate::AlreadyInFlight { existing_id } => {
-                    let _ = self.event_tx.send(UploadEvent::DuplicateDetected {
-                        task_id: task.id.clone(),
-                        existing_document_id: existing_id.clone(),
-                    });
-                    return Err(UploadError::Duplicate { existing_id });
+                    // A sibling in this machine's queue is already uploading the
+                    // same content. Not a failure — reconcile to Completed →
+                    // "Already exists" (the sibling's filename isn't resolved on
+                    // this path, so no name) rather than a Failed row.
+                    self.settle_as_already_exists(&task.id, existing_id, None)
+                        .await;
+                    return Ok(());
                 }
                 PreCreate::Rejected(reason) => {
                     tracing::info!(

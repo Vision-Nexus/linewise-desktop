@@ -174,7 +174,13 @@ pub async fn check_duplicate(db: &Database, path: &Path) -> Result<Option<String
     let hash = hash_file(path)
         .await
         .map_err(|e| AppError::Upload(crate::error::UploadError::Io(e)))?;
-    let found = db.find_by_hash(&hash).await.map_err(AppError::Database)?;
+    // `find_by_hash` now returns `(document_id, filename)`; this helper only
+    // reports the matched document id, so drop the name.
+    let found = db
+        .find_by_hash(&hash)
+        .await
+        .map_err(AppError::Database)?
+        .map(|(document_id, _filename)| document_id);
     tracing::debug!(found = found.is_some(), "dedup local-cache check");
     Ok(found)
 }
