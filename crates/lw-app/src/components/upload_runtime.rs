@@ -24,9 +24,11 @@
 use crate::components::transfer_panel::ALREADY_EXISTS_MARKER;
 use crate::state::{AppState, CoreServices};
 use dioxus::prelude::*;
+use lw_core::analytics::Analytics;
 use lw_core::models::{UploadState, UploadTask};
 use lw_core::upload::UploadEvent;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Upper bound on how many events one drain round applies in a single
 /// synchronous batch. A staging burst (100 files → hundreds of events) is
@@ -93,8 +95,10 @@ pub fn UploadRuntime() -> Element {
     // live in `AppState`; this loop is their sole writer.
     let app_state_events = app_state.clone();
     let event_rx = services.event_rx.clone();
+    let analytics = services.analytics.clone();
     use_future(move || {
         let event_rx = event_rx.clone();
+        let analytics = analytics.clone();
         let mut app_state = app_state_events.clone();
         let mut transcode_progress = app_state.transcode_progress;
         let mut upload_progress = app_state.upload_progress;
@@ -167,6 +171,7 @@ pub fn UploadRuntime() -> Element {
                         &mut transcode_progress,
                         &mut upload_progress,
                         &mut hash_progress,
+                        &analytics,
                         event,
                     );
                 }
@@ -234,11 +239,19 @@ fn sample_upload_speed(
 /// no longer carries event-handling logic. `app_state.upload_tasks` carries
 /// task identity/state; the three progress signals carry byte-level progress
 /// (kept separate so a `Progress` tick doesn't re-render the whole list).
+///
+/// `analytics` is threaded in from the pump (which holds `CoreServices`) so the
+/// upload-lifecycle events can be captured here — the one place every state
+/// transition lands. Every `capture` is fire-and-forget and MUST NOT change
+/// control flow: it reads task fields already loaded into `app_state` and emits
+/// after the state write, so a batch roll-up sees the just-applied terminal
+/// state.
 fn handle_upload_event(
     app_state: &mut AppState,
     transcode_progress: &mut Signal<HashMap<String, f32>>,
     upload_progress: &mut Signal<HashMap<String, (u64, u64)>>,
     hash_progress: &mut Signal<HashMap<String, (u64, u64)>>,
+    analytics: &Arc<Analytics>,
     event: UploadEvent,
 ) {
     match event {
@@ -272,6 +285,47 @@ fn handle_upload_event(
             // (e.g. it finished first). Either way, drop the transient "Pausing…"
             // marker so it can never linger claiming a pause the engine didn't do.
             app_state.pausing.write().remove(&task_id);
+            // Lifecycle analytics for the three user-visible transitions we
+            // track. Matched by reference before `state` is moved into the
+            // update below; the props don't depend on the write, so order is
+            // immaterial (analytics never affects control flow).
+            match &state {
+                UploadState::Uploading => {
+                    // NOTE: resume-from-pause also re-enters `Uploading`, so
+                    // this can emit `upload_started` more than once per task.
+                    // Deliberately no dedup state — a coarse count is enough.
+                    let size = task_field(app_state, &task_id, |t| t.size).unwrap_or(0);
+                    analytics.capture("upload_started", serde_json::json!({ "size": size }));
+                }
+                UploadState::Paused => {
+                    analytics.capture("upload_paused", serde_json::json!({}));
+                }
+                UploadState::Rejected => {
+                    // Include the first rejection reason if it's already on the
+                    // row (populated by the earlier `ValidationWarnings` event);
+                    // omit the field entirely otherwise.
+                    let reason = task_field(app_state, &task_id, |t| {
+                        t.rejection_reasons.first().cloned()
+                    })
+                    .flatten();
+                    let props = match reason {
+                        Some(r) => serde_json::json!({ "reason": r }),
+                        None => serde_json::json!({}),
+                    };
+                    analytics.capture("quality_check_rejected", props);
+                }
+                UploadState::QualityChecking
+                | UploadState::Hashing
+                | UploadState::Staged
+                | UploadState::Pending
+                | UploadState::Validating
+                | UploadState::Transcoding
+                | UploadState::Creating
+                | UploadState::Verifying
+                | UploadState::Completed
+                | UploadState::Failed
+                | UploadState::GaveUp => {}
+            }
             update_task(app_state, &task_id, |t| t.state = state);
         }
         UploadEvent::Progress {
@@ -378,6 +432,12 @@ fn handle_upload_event(
                 t.document_id = Some(existing_document_id.clone());
                 t.updated_at = now_timestamp();
             });
+            let size = task_field(app_state, &task_id, |t| t.size).unwrap_or(0);
+            analytics.capture(
+                "upload_completed",
+                serde_json::json!({ "size": size, "already_exists": true }),
+            );
+            maybe_capture_batch_completed(app_state, analytics, &task_id);
         }
         UploadEvent::Completed { task_id } => {
             upload_progress.write().remove(&task_id);
@@ -391,6 +451,12 @@ fn handle_upload_event(
                 // matches the DB's `datetime('now')` write in settle_completed.
                 t.updated_at = now_timestamp();
             });
+            let size = task_field(app_state, &task_id, |t| t.size).unwrap_or(0);
+            analytics.capture(
+                "upload_completed",
+                serde_json::json!({ "size": size, "already_exists": false }),
+            );
+            maybe_capture_batch_completed(app_state, analytics, &task_id);
         }
         UploadEvent::Failed { task_id, error } => {
             upload_progress.write().remove(&task_id);
@@ -403,10 +469,20 @@ fn handle_upload_event(
             // A give-up arrives as this `Failed` event (carrying the terminal
             // message) followed by a `StateChanged → GaveUp`; keep the message
             // and let the later StateChanged flip the state.
+            let reason_category = classify_failure_reason(&error);
             update_task(app_state, &task_id, |t| {
                 t.state = UploadState::Failed;
                 t.error_message = Some(error);
             });
+            let retry_count = task_field(app_state, &task_id, |t| t.retry_count).unwrap_or(0);
+            analytics.capture(
+                "upload_failed",
+                serde_json::json!({
+                    "retry_count": retry_count,
+                    "reason_category": reason_category,
+                }),
+            );
+            maybe_capture_batch_completed(app_state, analytics, &task_id);
         }
         UploadEvent::Retrying { task_id, attempt } => {
             // Record the auto-retry attempt on the row; the in-progress row
@@ -438,6 +514,85 @@ fn update_task(app_state: &mut AppState, task_id: &str, f: impl FnOnce(&mut Uplo
     if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
         f(task);
     }
+}
+
+/// Read one derived value off the task with `task_id`, or `None` if the row is
+/// gone. Analytics-only reader — never mutates. Keeps each `capture` call site
+/// to a single non-panicking lookup (no indexing, no `unwrap`).
+fn task_field<T>(
+    app_state: &AppState,
+    task_id: &str,
+    f: impl FnOnce(&UploadTask) -> T,
+) -> Option<T> {
+    let tasks = app_state.upload_tasks.read();
+    tasks.iter().find(|t| t.id == task_id).map(f)
+}
+
+/// Coarse `reason_category` bucket for an upload failure message. Intentionally
+/// a single case-insensitive substring match — this is a rough analytics facet,
+/// not a diagnostic taxonomy. "network" covers transport/connectivity phrasing;
+/// everything else is "other".
+fn classify_failure_reason(error: &str) -> &'static str {
+    let e = error.to_lowercase();
+    let network = e.contains("network")
+        || e.contains("connection")
+        || e.contains("connect")
+        || e.contains("timeout")
+        || e.contains("timed out")
+        || e.contains("dns")
+        || e.contains("sending request")
+        || e.contains("unreachable");
+    if network { "network" } else { "other" }
+}
+
+/// Best-effort `batch_completed`: after a task in `(tenant_id, project_id)`
+/// reaches a terminal state, if that batch now has ZERO in-progress rows, emit
+/// one roll-up for the batch. The state classification mirrors
+/// `PrimaryTab::contains` in the transfer panel; it's kept local here because
+/// that enum isn't reachable from this module (private `tabs` submodule) and
+/// this file is the only one in scope for the task.
+fn maybe_capture_batch_completed(app_state: &AppState, analytics: &Arc<Analytics>, task_id: &str) {
+    let Some((tenant_id, project_id)) = task_field(app_state, task_id, |t| {
+        (t.tenant_id.clone(), t.project_id.clone())
+    }) else {
+        return;
+    };
+    let tasks = app_state.upload_tasks.read();
+    let batch = tasks
+        .iter()
+        .filter(|t| t.tenant_id == tenant_id && t.project_id == project_id);
+    let mut total = 0usize;
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut in_progress = 0usize;
+    for t in batch {
+        total += 1;
+        match t.state {
+            UploadState::Completed => succeeded += 1,
+            UploadState::Rejected | UploadState::Failed | UploadState::GaveUp => failed += 1,
+            UploadState::QualityChecking
+            | UploadState::Hashing
+            | UploadState::Staged
+            | UploadState::Pending
+            | UploadState::Validating
+            | UploadState::Transcoding
+            | UploadState::Creating
+            | UploadState::Uploading
+            | UploadState::Verifying
+            | UploadState::Paused => in_progress += 1,
+        }
+    }
+    if in_progress > 0 {
+        return;
+    }
+    analytics.capture(
+        "batch_completed",
+        serde_json::json!({
+            "total": total,
+            "succeeded": succeeded,
+            "failed": failed,
+        }),
+    );
 }
 
 /// Current UTC wall-clock in SQLite `datetime('now')` shape
