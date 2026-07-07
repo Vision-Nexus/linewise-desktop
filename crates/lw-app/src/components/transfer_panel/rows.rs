@@ -662,10 +662,10 @@ pub fn UploadTaskRow(
     // Phase-aware progress reader. Read from the live signals only — never
     // from the cloned task's `bytes_uploaded`, which lags behind and snaps
     // back to 0 on render races.
-    // Prototype-aligned stage percents (wave `uploadStageProgressPct`): the
-    // upload stage shows fixed markers for the server-prep sub-states and a
-    // lerp(22→96) for the actual transfer, so the bar never sits at 0% while
-    // the engine is clearly working. Transcoding folds into "Uploading" and
+    // Byte-truthful progress: pre-transfer sub-states read 0%, and the transfer
+    // itself is driven by the real confirmed-bytes fraction (see `upload_stage_pct`)
+    // so the bar always agrees with the byte counter — on the multipart path it
+    // steps once per landed part (~32 MiB). Transcoding folds into "Uploading" and
     // borrows the transcode %, shown without any transcode wording (D1).
     let (progress_pct, uploaded_bytes) = match task.state {
         UploadState::Completed => (100u32, upload_total),
@@ -1034,16 +1034,21 @@ pub(super) fn checking_stage_pct(state: &UploadState, hashed: u64, total: u64) -
 /// (it borrows the live transcode %), so it returns 0 here.
 pub(super) fn upload_stage_pct(state: &UploadState, uploaded: u64, total: u64) -> u32 {
     match state {
-        UploadState::Pending => 2,
-        UploadState::Validating => 10,
-        UploadState::Creating => 18,
+        // Pre-transfer stages: nothing is uploaded yet, so the bar honestly reads
+        // 0% — consistent with the "0 B / total" byte counter. The stage badge +
+        // spinner convey that prep work is happening.
+        UploadState::Pending | UploadState::Validating | UploadState::Creating => 0,
+        // Truthful, byte-driven progress: the fraction of bytes actually confirmed
+        // on the server, with no synthetic floor. On the multipart path this
+        // advances one part (~32 MiB) at a time as each part's PUT lands — coarse
+        // but real, and always consistent with the byte counter.
         UploadState::Uploading | UploadState::Paused => {
             let t = if total > 0 {
                 uploaded as f64 / total as f64
             } else {
                 0.0
             };
-            (22.0 + (96.0 - 22.0) * t).round() as u32
+            (t * 100.0).round().min(100.0) as u32
         }
         UploadState::Verifying => 99,
         UploadState::Transcoding
