@@ -317,7 +317,13 @@ impl AppConfig {
                 .is_empty();
             if needs_id {
                 config.ensure_device_id();
-                config.save()?;
+                // Best-effort persist: the in-memory id is set regardless. A
+                // read-only/locked config dir must NOT wedge boot here — an
+                // existing config already loaded fine, so a failed rewrite just
+                // means we regenerate the id on the next start. (The create-new
+                // branch below keeps `?`: if we can't write the very first
+                // config, that's a real startup failure.)
+                let _ = config.save();
             }
             Ok(config)
         } else {

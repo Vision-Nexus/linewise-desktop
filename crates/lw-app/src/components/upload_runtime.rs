@@ -301,18 +301,20 @@ fn handle_upload_event(
                     analytics.capture("upload_paused", serde_json::json!({}));
                 }
                 UploadState::Rejected => {
-                    // Include the first rejection reason if it's already on the
-                    // row (populated by the earlier `ValidationWarnings` event);
-                    // omit the field entirely otherwise.
+                    // Bucket the first rejection reason into a coarse category.
+                    // The raw string is free-text prose that, for dedup
+                    // rejections, embeds tenant/organization display names and
+                    // project names — that PII must NEVER reach analytics, so we
+                    // emit only the controlled category, never the raw text.
                     let reason = task_field(app_state, &task_id, |t| {
                         t.rejection_reasons.first().cloned()
                     })
                     .flatten();
-                    let props = match reason {
-                        Some(r) => serde_json::json!({ "reason": r }),
-                        None => serde_json::json!({}),
-                    };
-                    analytics.capture("quality_check_rejected", props);
+                    let reason_category = classify_rejection_reason(reason.as_deref());
+                    analytics.capture(
+                        "quality_check_rejected",
+                        serde_json::json!({ "reason_category": reason_category }),
+                    );
                 }
                 UploadState::QualityChecking
                 | UploadState::Hashing
@@ -543,6 +545,38 @@ fn classify_failure_reason(error: &str) -> &'static str {
         || e.contains("sending request")
         || e.contains("unreachable");
     if network { "network" } else { "other" }
+}
+
+/// Coarse `reason_category` bucket for a quality-check rejection message. Same
+/// style as [`classify_failure_reason`]: a single case-insensitive substring
+/// match, not a diagnostic taxonomy. Critically, this NEVER returns the raw
+/// rejection string — that prose embeds tenant/organization/project display
+/// names (PII) for dedup rejections and must not reach analytics. A missing
+/// reason (no string on the row) falls through to "other". "duplicate" is
+/// checked first because a dedup rejection is the PII-bearing case we most need
+/// to keep out of the event payload.
+fn classify_rejection_reason(reason: Option<&str>) -> &'static str {
+    let Some(r) = reason else { return "other" };
+    let r = r.to_lowercase();
+    if r.contains("duplicate")
+        || r.contains("already exists")
+        || r.contains("tenant")
+        || r.contains("organization")
+    {
+        "duplicate"
+    } else if r.contains("bitrate")
+        || r.contains("resolution")
+        || r.contains("fps")
+        || r.contains("codec")
+        || r.contains("quality")
+        || r.contains("format")
+        || r.contains("unsupported")
+        || r.contains("playable")
+    {
+        "quality"
+    } else {
+        "other"
+    }
 }
 
 /// Best-effort `batch_completed`: after a task in `(tenant_id, project_id)`
