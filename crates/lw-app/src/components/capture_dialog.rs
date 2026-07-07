@@ -36,6 +36,9 @@ struct CaptureForm {
     model: String,
     fov: String,
     action: String,
+    /// Parts Involved, edited as one object name per line; split/deduped into a
+    /// `Vec<String>` on save.
+    parts: String,
 }
 
 impl From<CaptureMetadata> for CaptureForm {
@@ -50,6 +53,7 @@ impl From<CaptureMetadata> for CaptureForm {
             model: m.model.unwrap_or_default(),
             fov: m.fov.map(|n| n.to_string()).unwrap_or_default(),
             action: m.action.unwrap_or_default(),
+            parts: m.parts.unwrap_or_default().join("\n"),
         }
     }
 }
@@ -129,6 +133,17 @@ pub fn CaptureMetadataDialog(
             },
         };
 
+        // Parts Involved: one object name per line — trim, drop blanks,
+        // de-duplicate (order preserved). Required — validated per branch below.
+        let mut parts: Vec<String> = Vec::new();
+        for line in f.parts.lines() {
+            let name = line.trim();
+            if !name.is_empty() && !parts.iter().any(|p| p.as_str() == name) {
+                parts.push(name.to_string());
+            }
+        }
+        let parts_empty = parts.is_empty();
+
         let meta = CaptureMetadata {
             country: opt(&f.country),
             city: opt(&f.city),
@@ -139,8 +154,10 @@ pub fn CaptureMetadataDialog(
             model: opt(&f.model),
             fov,
             action: opt(&f.action),
+            parts: (!parts_empty).then_some(parts),
         };
         error.set(None);
+        let parts_required_msg = "Parts Involved is required — list the objects the operator's hands touch (one per line).";
         match &task_save {
             // Per-file: embed into this clip's source file in place (Save-time), so
             // the file is self-describing. `embed_capture_in_place` records the
@@ -149,6 +166,10 @@ pub fn CaptureMetadataDialog(
             Some(id) => {
                 if meta.is_empty() {
                     error.set(Some("Fill at least one field before saving.".to_string()));
+                    return;
+                }
+                if parts_empty {
+                    error.set(Some(parts_required_msg.to_string()));
                     return;
                 }
                 let engine = engine_save.clone();
@@ -167,6 +188,13 @@ pub fn CaptureMetadataDialog(
             // Batch: embed into every clip already in the queue (sequentially) AND
             // keep as the default for files added later.
             None => {
+                // Batch sets the default applied to every clip. If it carries any
+                // real value it must include parts (required); an entirely blank
+                // form is allowed as a "clear the default" action.
+                if !meta.is_empty() && parts_empty {
+                    error.set(Some(parts_required_msg.to_string()));
+                    return;
+                }
                 engine_save.set_batch_capture_metadata((!meta.is_empty()).then_some(meta.clone()));
                 if !meta.is_empty() {
                     let engine = engine_save.clone();
@@ -277,6 +305,18 @@ pub fn CaptureMetadataDialog(
                         input { style: input_style, placeholder: "Pressing piston rings into cylinder bore",
                             value: "{form.read().action}",
                             oninput: move |e| form.write().action = e.value() }
+                    }
+                    div { style: "margin-bottom: 10px;",
+                        label { style: label_style, "Parts Involved (required)" }
+                        textarea {
+                            style: "{input_style} min-height: 92px; resize: vertical; font-family: inherit;",
+                            placeholder: "One object per line:\nReflector\nGlass lens\nWrench",
+                            value: "{form.read().parts}",
+                            oninput: move |e| form.write().parts = e.value() }
+                        div {
+                            style: "font-size: 11px; color: var(--text-muted); margin-top: 3px;",
+                            "Every object the operator's hands touch — parts and tools. One per line, English names."
+                        }
                     }
 
                     if let Some(err) = error() {
