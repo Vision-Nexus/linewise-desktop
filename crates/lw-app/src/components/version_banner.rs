@@ -68,6 +68,43 @@ pub fn VersionUpdateBanner() -> Element {
 #[component]
 pub fn VersionBlockedScreen() -> Element {
     let app_state = use_context::<AppState>();
+
+    // Fire `force_upgrade_shown` exactly once when the app enters the
+    // unsupported state. Keyed on `version_status`: the effect re-runs when
+    // the status changes, and a `fired` latch keeps it to a single capture per
+    // entry into `Unsupported` (not once per render). This screen is mounted
+    // above the `CoreServices` context provider — it can appear during boot /
+    // pre-auth — so analytics is read from `AppState.services` (an `Option`)
+    // rather than `use_context::<CoreServices>()`, which would panic here.
+    let mut fired = use_signal(|| false);
+    let effect_state = app_state.clone();
+    use_effect(move || {
+        let status = effect_state.version_status.read().clone();
+        let Some(VersionStatus::Unsupported {
+            running,
+            min_supported,
+            ..
+        }) = status
+        else {
+            // Left the unsupported state — re-arm so a later re-entry fires again.
+            fired.set(false);
+            return;
+        };
+        if *fired.peek() {
+            return;
+        }
+        if let Some(services) = effect_state.services.peek().as_ref() {
+            services.analytics.capture(
+                "force_upgrade_shown",
+                serde_json::json!({
+                    "current": running.to_string(),
+                    "min_supported": min_supported.to_string(),
+                }),
+            );
+        }
+        fired.set(true);
+    });
+
     let status = app_state.version_status.read().clone();
 
     let Some(VersionStatus::Unsupported {

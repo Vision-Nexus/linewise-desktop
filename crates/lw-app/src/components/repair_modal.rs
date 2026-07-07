@@ -51,6 +51,16 @@ pub fn RepairModal(on_close: EventHandler<()>) -> Element {
         if !phrase_matches || !any_selected || is_running {
             return;
         }
+        // Record the confirmed, destructive run before the spawn takes the
+        // services bundle out of `AppState`. RepairModal is mounted above the
+        // `CoreServices` context provider (it must reach a pre-auth / wedged
+        // app), so analytics is read from `AppState.services` rather than
+        // `use_context::<CoreServices>()`.
+        if let Some(services) = app_state_run.services.peek().as_ref() {
+            services
+                .analytics
+                .capture("repair_invoked", serde_json::json!({}));
+        }
         running.set(true);
         let chosen = *selection.read();
         let mut app_state = app_state_run.clone();

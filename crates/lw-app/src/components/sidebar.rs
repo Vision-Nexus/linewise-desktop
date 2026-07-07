@@ -153,6 +153,7 @@ fn SidebarBrand() -> Element {
 #[component]
 fn OrgList() -> Element {
     let app_state = use_context::<AppState>();
+    let services = use_context::<CoreServices>();
     let mut selected_tenant = app_state.selected_tenant;
     let mut selected_project = app_state.selected_project;
     let mut org_query = use_signal(String::new);
@@ -214,6 +215,7 @@ fn OrgList() -> Element {
             for tenant in filtered.iter() {
                 {
                     let t = tenant.clone();
+                    let analytics = services.analytics.clone();
                     let batches = tenant_projects.get(&tenant.id).map(|p| p.len()).unwrap_or(0);
                     let batch_label = if batches == 1 {
                         "1 batch".to_string()
@@ -233,6 +235,7 @@ fn OrgList() -> Element {
                             key: "{tenant.id}",
                             class: "w-full flex items-center gap-2.5 px-2.5 py-2 mb-1 rounded-lg text-left bg-transparent border-none cursor-pointer transition-colors hover:bg-accent",
                             onclick: move |_| {
+                                analytics.capture("org_selected", serde_json::json!({}));
                                 selected_tenant.set(Some(t.clone()));
                                 selected_project.set(None);
                             },
@@ -268,6 +271,7 @@ fn OrgList() -> Element {
 #[component]
 fn BatchList(tenant: Tenant) -> Element {
     let app_state = use_context::<AppState>();
+    let services = use_context::<CoreServices>();
     let mut selected_tenant = app_state.selected_tenant;
     let mut selected_project = app_state.selected_project;
     let mut projects_sig = app_state.projects;
@@ -318,6 +322,7 @@ fn BatchList(tenant: Tenant) -> Element {
                 {
                     let p = project.clone();
                     let tid_click = tid.clone();
+                    let analytics = services.analytics.clone();
                     let is_active = project.id == selected_project_id;
                     let batch_tasks: Vec<UploadTask> = upload_tasks
                         .iter()
@@ -335,6 +340,7 @@ fn BatchList(tenant: Tenant) -> Element {
                             key: "{project.id}",
                             class: "w-full flex items-center gap-2 h-9 px-3 mb-0.5 rounded-lg text-[13px] text-left bg-transparent border-none cursor-pointer transition-colors {active_class}",
                             onclick: move |_| {
+                                analytics.capture("batch_opened", serde_json::json!({}));
                                 selected_project.set(Some(p.clone()));
                                 let projs = tenant_projects_sig.read().get(&tid_click).cloned().unwrap_or_default();
                                 projects_sig.set(projs);
@@ -468,8 +474,13 @@ fn SidebarSignOut(on_done: EventHandler<()>) -> Element {
         }
         signing_out.set(true);
         let auth = services.auth.clone();
+        let analytics = services.analytics.clone();
         let mut app_state = app_state_signout.clone();
         on_done.call(());
+        // Record the sign-out, then reset analytics identity so subsequent
+        // events aren't attributed to the signed-out user.
+        analytics.capture("signed_out", serde_json::json!({}));
+        analytics.reset();
         spawn(async move {
             auth.sign_out().await;
             app_state.is_authenticated.set(false);

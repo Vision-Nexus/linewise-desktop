@@ -1,4 +1,4 @@
-use crate::state::{AppState, ToastKind};
+use crate::state::{AppState, CoreServices, ToastKind};
 use dioxus::prelude::*;
 use lw_core::config::Environment;
 
@@ -13,9 +13,11 @@ use lw_core::config::Environment;
 #[component]
 pub fn EnvironmentSettingsPane() -> Element {
     let mut app_state = use_context::<AppState>();
+    let services = use_context::<CoreServices>();
     let initial = app_state.config.read().server.environment;
     let selected = use_signal(|| initial);
 
+    let analytics = services.analytics.clone();
     let switch = move |_| {
         let target = *selected.read();
         let current = app_state.config.read().server.environment;
@@ -27,6 +29,9 @@ pub fn EnvironmentSettingsPane() -> Element {
         next.server.environment = target;
         match app_state.save_config(next) {
             Ok(()) => {
+                // `Environment` serializes lowercase (dev|testing|production)
+                // via its serde rename, matching the analytics contract.
+                analytics.capture("environment_switched", serde_json::json!({ "to": target }));
                 // Drop tenant/project caches that belong to the outgoing
                 // environment — those IDs may not exist in the new one
                 // and the sidebar would otherwise render dangling

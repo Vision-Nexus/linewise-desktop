@@ -69,13 +69,16 @@ use tabs::{PrimaryTab, PrimaryTabButton, TRANSFER_TAB_CSS};
 /// UI thread via `spawn_blocking` (`collect_videos_in_dir` is synchronous
 /// `std::fs`); then each video is staged via `stage_files`. A folder with no
 /// videos shows an info toast so the click doesn't feel like a no-op.
+///
+/// Returns the number of videos found and staged, so the folder-picker call
+/// site can report a `files_staged` count without re-walking.
 async fn stage_folder(
     engine: std::sync::Arc<lw_core::upload::UploadEngine>,
     dir: PathBuf,
     tenant_id: String,
     project_id: String,
     mut app_state_for_toast: AppState,
-) {
+) -> usize {
     let walk_dir = dir.clone();
     let videos =
         match tokio::task::spawn_blocking(move || upload::collect_videos_in_dir(&walk_dir)).await {
@@ -86,7 +89,7 @@ async fn stage_folder(
                     "Failed to scan the selected folder".to_string(),
                     ToastKind::Error,
                 );
-                return;
+                return 0;
             }
         };
     tracing::info!(dir = %dir.display(), video_count = videos.len(), "folder picker staged videos");
@@ -95,9 +98,11 @@ async fn stage_folder(
             "No videos found in the selected folder".to_string(),
             ToastKind::Info,
         );
-        return;
+        return 0;
     }
+    let count = videos.len();
     stage_files(engine, videos, tenant_id, project_id, app_state_for_toast).await;
+    count
 }
 
 /// Stage each path in `paths` into `(tenant_id, project_id)`, one at a time,
@@ -304,6 +309,9 @@ pub fn TransferPanel() -> Element {
     let engine_for_files = services.upload_engine.clone();
     let engine_for_folder = services.upload_engine.clone();
     let engine_for_drop = services.upload_engine.clone();
+    let analytics_for_files = services.analytics.clone();
+    let analytics_for_folder = services.analytics.clone();
+    let analytics_for_drop = services.analytics.clone();
 
     // "Select files…" — multi-select file picker. These are explicit picks,
     // so every chosen path is staged as-is (no video sniff). Stages via the
@@ -312,6 +320,7 @@ pub fn TransferPanel() -> Element {
     let on_pick_files = move |_| {
         upload_menu_open.set(false);
         let engine = engine_for_files.clone();
+        let analytics = analytics_for_files.clone();
         let tenant_id = app_state_files
             .selected_tenant
             .read()
@@ -333,6 +342,10 @@ pub fn TransferPanel() -> Element {
                 .await;
             let Some(files) = files else { return };
             let paths: Vec<PathBuf> = files.iter().map(|f| PathBuf::from(f.path())).collect();
+            analytics.capture(
+                "files_staged",
+                serde_json::json!({ "source": "files", "count": paths.len() }),
+            );
             stage_files(engine, paths, tenant_id, project_id, app_state_for_toast).await;
         });
     };
@@ -343,6 +356,7 @@ pub fn TransferPanel() -> Element {
     let on_pick_folder = move |_| {
         upload_menu_open.set(false);
         let engine = engine_for_folder.clone();
+        let analytics = analytics_for_folder.clone();
         let tenant_id = app_state_folder
             .selected_tenant
             .read()
@@ -363,7 +377,7 @@ pub fn TransferPanel() -> Element {
                 .pick_folder()
                 .await;
             let Some(folder) = folder else { return };
-            stage_folder(
+            let count = stage_folder(
                 engine,
                 PathBuf::from(folder.path()),
                 tenant_id,
@@ -371,6 +385,10 @@ pub fn TransferPanel() -> Element {
                 app_state_for_toast,
             )
             .await;
+            analytics.capture(
+                "files_staged",
+                serde_json::json!({ "source": "folder", "count": count }),
+            );
         });
     };
 
@@ -542,10 +560,12 @@ pub fn TransferPanel() -> Element {
 
     let engine_for_resume = services.upload_engine.clone();
     let db_for_resume = services.db.clone();
+    let analytics_for_resume = services.analytics.clone();
     let mut app_state_resume = app_state.clone();
     let on_resume = move |task_id: String| {
         let engine = engine_for_resume.clone();
         let db = db_for_resume.clone();
+        analytics_for_resume.capture("upload_resumed", serde_json::json!({}));
         spawn(async move {
             let _ = db
                 .update_upload_state(&task_id, UploadState::Pending, None)
@@ -616,6 +636,7 @@ pub fn TransferPanel() -> Element {
             return;
         }
         let engine = engine_for_drop.clone();
+        let analytics = analytics_for_drop.clone();
         let tenant_id = app_state_drop
             .selected_tenant
             .read()
@@ -660,6 +681,14 @@ pub fn TransferPanel() -> Element {
             return;
         }
 
+        analytics.capture(
+            "files_staged",
+            serde_json::json!({
+                "source": "drop",
+                "count": files_to_stage.len() + dirs_to_walk.len(),
+            }),
+        );
+
         spawn(async move {
             for path in files_to_stage {
                 if let Err(e) = engine.stage_file(&path, &tenant_id, &project_id).await {
@@ -668,7 +697,9 @@ pub fn TransferPanel() -> Element {
                 }
             }
             for dir in dirs_to_walk {
-                stage_folder(
+                // Drop reports one aggregate `files_staged` above; the per-dir
+                // video count from `stage_folder` isn't needed here.
+                let _ = stage_folder(
                     engine.clone(),
                     dir,
                     tenant_id.clone(),
@@ -712,9 +743,11 @@ pub fn TransferPanel() -> Element {
     // the ready-count re-render immediately (the engine's capture maps aren't
     // reactive). The auto-advance dispatch happens inside the engine.
     let engine_for_skip = services.upload_engine.clone();
+    let analytics_for_skip = services.analytics.clone();
     let app_state_skip = app_state.clone();
     let on_skip_metadata = move |task_id: String| {
         let engine = engine_for_skip.clone();
+        analytics_for_skip.capture("metadata_skipped", serde_json::json!({}));
         let mut capture_rev = app_state_skip.capture_rev;
         spawn(async move {
             engine.skip_capture_and_advance(&task_id).await;
@@ -929,9 +962,22 @@ pub fn TransferPanel() -> Element {
             CaptureMetadataDialog {
                 open: capture_open(),
                 task_id: capture_task(),
-                on_close: move |_saved: bool| {
-                    capture_open.set(false);
-                    capture_task.set(None);
+                on_close: {
+                    let analytics = services.analytics.clone();
+                    move |saved: bool| {
+                        if saved {
+                            // Per-file fill sets a task id; the batch fill
+                            // (header button) leaves it None. Read scope
+                            // before clearing `capture_task`.
+                            let scope = if capture_task().is_some() { "file" } else { "batch" };
+                            analytics.capture(
+                                "metadata_filled",
+                                serde_json::json!({ "scope": scope }),
+                            );
+                        }
+                        capture_open.set(false);
+                        capture_task.set(None);
+                    }
                 },
             }
         }

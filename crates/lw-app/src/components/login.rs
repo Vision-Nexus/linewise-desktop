@@ -1,5 +1,6 @@
 use crate::state::{AppState, CoreServices};
 use dioxus::prelude::*;
+use lw_core::analytics::Analytics;
 use lw_core::api_client::ApiClient;
 use lw_core::auth::AuthService;
 use lw_core::error::AuthError;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 /// share this tail — only the initial credential step differs.
 async fn complete_sign_in<F>(
     api: Arc<ApiClient>,
+    analytics: Arc<Analytics>,
     mut app_state: AppState,
     mut error: Signal<Option<String>>,
     method: &'static str,
@@ -27,6 +29,22 @@ async fn complete_sign_in<F>(
             match api.whoami().await {
                 Ok(resp) => {
                     if let Some(info) = lw_core::models::UserInfo::from_whoami(resp, system_roles) {
+                        // Associate PostHog events with the interactively
+                        // signed-in user, mirroring app.rs's session-restore
+                        // identify. Closes the gap where interactive sign-in
+                        // wasn't identified.
+                        let tenant_ids: Vec<String> =
+                            info.tenants.iter().map(|t| t.id.clone()).collect();
+                        analytics.identify(
+                            &info.uid,
+                            serde_json::json!({
+                                "email": info.email,
+                                "name": info.display_name,
+                                "tenant_ids": tenant_ids,
+                                "tenant_count": tenant_ids.len(),
+                            }),
+                        );
+                        analytics.capture("signed_in", serde_json::json!({ "method": method }));
                         app_state.user_info.set(Some(info));
                         app_state.is_authenticated.set(true);
                     } else {
@@ -60,17 +78,19 @@ pub fn LoginPage() -> Element {
 
     let run_sign_in = {
         let api = services.api.clone();
+        let analytics = services.analytics.clone();
         let app_state = app_state.clone();
         let mut error = error;
         move |method: &'static str,
               sign_in: Box<dyn Future<Output = Result<AuthTokens, AuthError>> + Send>| {
             let api = api.clone();
+            let analytics = analytics.clone();
             let app_state = app_state.clone();
             spawn(async move {
                 loading.set(true);
                 error.set(None);
                 let fut = Box::into_pin(sign_in);
-                complete_sign_in(api, app_state, error, method, fut).await;
+                complete_sign_in(api, analytics, app_state, error, method, fut).await;
                 loading.set(false);
             });
         }
