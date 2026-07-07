@@ -21,11 +21,10 @@
 //! [`AppState`] (not here), so the transfer view can read them without owning
 //! the pump. This component is the only writer of those maps.
 
-use crate::components::transfer_panel::ALREADY_EXISTS_MARKER;
 use crate::state::{AppState, CoreServices};
 use dioxus::prelude::*;
 use lw_core::models::{UploadState, UploadTask};
-use lw_core::upload::UploadEvent;
+use lw_core::upload::{UploadEvent, already_exists_message};
 use std::collections::HashMap;
 
 /// Upper bound on how many events one drain round applies in a single
@@ -358,6 +357,7 @@ fn handle_upload_event(
         UploadEvent::DuplicateDetected {
             task_id,
             existing_document_id,
+            existing_document_name,
         } => {
             // A duplicate means the content is already stored on the server —
             // that is success from the user's standpoint, not a failure. Land
@@ -374,7 +374,10 @@ fn handle_upload_event(
             app_state.part_retrying.write().remove(&task_id);
             update_task(app_state, &task_id, |t| {
                 t.state = UploadState::Completed;
-                t.error_message = Some(ALREADY_EXISTS_MARKER.to_string());
+                // Mirror exactly what the engine persisted (marker + optional
+                // matched filename) so the in-memory row and the DB agree and the
+                // Completed → "Already exists" view can name the matched file.
+                t.error_message = Some(already_exists_message(existing_document_name.as_deref()));
                 t.document_id = Some(existing_document_id.clone());
                 t.updated_at = now_timestamp();
             });

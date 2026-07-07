@@ -304,6 +304,28 @@ impl Database {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Guarded terminal ALREADY-EXISTS — the content is already durable on the
+    /// server (a local hash-cache hit or an in-flight sibling), so this is a
+    /// SUCCESS outcome, not a failure. Like [`Self::settle_completed`] it moves
+    /// the row to `COMPLETED` and folds in the retry-count reset under one
+    /// guarded UPDATE that refuses to revert a row that is already terminal — but
+    /// unlike it, it KEEPS `error_message` (the [`crate::upload::already_exists_message`]
+    /// marker) so the Completed view renders the "Already exists" badge and the
+    /// classification survives a restart. Returns `true` iff it applied.
+    pub async fn settle_already_exists(&self, id: &str, message: &str) -> Result<bool, DbError> {
+        let result = sqlx::query!(
+            "UPDATE upload_queue
+                SET state = 'COMPLETED', error_message = ?, retry_count = 0,
+                    updated_at = datetime('now')
+             WHERE id = ? AND state NOT IN ('COMPLETED', 'GAVE_UP', 'REJECTED', 'PAUSED')",
+            message,
+            id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Guarded terminal FAILURE — moves a row to `Failed` or `GaveUp` with a
     /// message, but refuses to overwrite a row that is ALREADY terminal, so a
     /// lagging failure write can never clobber a `COMPLETED` a sibling just
@@ -737,11 +759,18 @@ impl Database {
         Ok(())
     }
 
-    pub async fn find_by_hash(&self, hash: &str) -> Result<Option<String>, DbError> {
-        let row = sqlx::query!("SELECT document_id FROM file_hashes WHERE hash = ?", hash,)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| r.document_id))
+    /// Local content-hash cache hit: returns the `(document_id, filename)` of the
+    /// already-uploaded document with this BLAKE3, or `None`. The filename lets a
+    /// re-upload of byte-identical content (often under a NEW name) tell the user
+    /// WHICH stored file it matched, instead of only a document id.
+    pub async fn find_by_hash(&self, hash: &str) -> Result<Option<(String, String)>, DbError> {
+        let row = sqlx::query!(
+            "SELECT document_id, filename FROM file_hashes WHERE hash = ?",
+            hash,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.document_id, r.filename)))
     }
 
     /// The earliest-created NON-terminal upload-queue row carrying this content
