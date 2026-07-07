@@ -11,6 +11,12 @@ pub struct AppConfig {
     pub app: GeneralConfig,
     #[serde(default)]
     pub watch_folders: Vec<WatchFolderEntry>,
+    /// Stable per-install anonymous id for analytics (PostHog distinct_id).
+    /// Generated once on first load and persisted; `#[serde(default)]` keeps
+    /// config.toml files written before this field existed loading cleanly,
+    /// so upgrading users need no migration — they just get an id on next load.
+    #[serde(default)]
+    pub analytics_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +276,7 @@ impl Default for AppConfig {
                 log_filter: default_log_filter(),
             },
             watch_folders: Vec::new(),
+            analytics_device_id: None,
         }
     }
 }
@@ -299,12 +306,36 @@ impl AppConfig {
         let path = Self::config_path();
         if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            Ok(toml::from_str(&content)?)
+            let mut config: Self = toml::from_str(&content)?;
+            // Backfill a stable analytics device id for configs written before
+            // this field existed. Persist once, only when just generated, so we
+            // don't rewrite the file on every load.
+            let needs_id = config
+                .analytics_device_id
+                .as_deref()
+                .unwrap_or("")
+                .is_empty();
+            if needs_id {
+                config.ensure_device_id();
+                config.save()?;
+            }
+            Ok(config)
         } else {
-            let config = Self::default();
+            let mut config = Self::default();
+            config.ensure_device_id();
             config.save()?;
             Ok(config)
         }
+    }
+
+    /// Ensure a stable per-install analytics device id exists, generating one
+    /// on first use. Returns the id. Pure/in-memory — callers persist via
+    /// [`AppConfig::save`].
+    pub fn ensure_device_id(&mut self) -> String {
+        if self.analytics_device_id.as_deref().unwrap_or("").is_empty() {
+            self.analytics_device_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        self.analytics_device_id.clone().unwrap_or_default()
     }
 
     pub fn save(&self) -> Result<(), crate::error::ConfigError> {
@@ -313,5 +344,23 @@ impl AppConfig {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(Self::config_path(), content)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_device_id_generates_once_and_is_idempotent() {
+        let mut config = AppConfig::default();
+        assert!(config.analytics_device_id.is_none());
+
+        let first = config.ensure_device_id();
+        assert!(!first.is_empty(), "device id should be generated");
+        assert_eq!(config.analytics_device_id.as_deref(), Some(first.as_str()));
+
+        let second = config.ensure_device_id();
+        assert_eq!(first, second, "ensure_device_id must not regenerate");
     }
 }
