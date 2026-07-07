@@ -179,6 +179,14 @@ pub fn App() -> Element {
             match CoreServices::init().await {
                 Ok(services) => {
                     tracing::info!("boot complete");
+                    // Fire once per successful boot, before login, so it's
+                    // attributed to the device id (version/environment/$lib are
+                    // auto-added by the client). This branch runs exactly once
+                    // per init, so it won't fire on re-render.
+                    services.analytics.capture(
+                        "app_launched",
+                        serde_json::json!({ "os": std::env::consts::OS }),
+                    );
                     boot.set(BootState::Ready(Arc::new(services)));
                 }
                 Err(e) => {
@@ -278,6 +286,7 @@ fn AuthedShell(services: Arc<CoreServices>) -> Element {
     use_future(move || {
         let auth = services.auth.clone();
         let api = services.api.clone();
+        let analytics = services.analytics.clone();
         let mut app_state = app_state_restore.clone();
         async move {
             if let Ok(_tokens) = auth.try_restore_session().await {
@@ -285,7 +294,7 @@ fn AuthedShell(services: Arc<CoreServices>) -> Element {
                 if let Ok(token) = auth.get_id_token().await {
                     app_state.auth_token.set(token);
                 }
-                fetch_user_info(&auth, &api, &mut app_state).await;
+                fetch_user_info(&auth, &api, &analytics, &mut app_state).await;
             }
             restoring.set(false);
         }
@@ -428,6 +437,7 @@ fn DbErrorScreen(error: String, on_retry: EventHandler<()>) -> Element {
 async fn fetch_user_info(
     auth: &lw_core::auth::AuthService,
     api: &lw_core::api_client::ApiClient,
+    analytics: &lw_core::analytics::Analytics,
     app_state: &mut AppState,
 ) {
     let system_roles = match auth.get_id_token().await {
@@ -449,6 +459,18 @@ async fn fetch_user_info(
                         ..Default::default()
                     }));
                 });
+                // Associate PostHog events with the signed-in user. Only the
+                // fields below cross to analytics — no other PII.
+                let tenant_ids: Vec<String> = info.tenants.iter().map(|t| t.id.clone()).collect();
+                analytics.identify(
+                    &info.uid,
+                    serde_json::json!({
+                        "email": info.email,
+                        "name": info.display_name,
+                        "tenant_ids": tenant_ids,
+                        "tenant_count": tenant_ids.len(),
+                    }),
+                );
                 app_state.user_info.set(Some(info));
                 app_state.is_authenticated.set(true);
             } else {

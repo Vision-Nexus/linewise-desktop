@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use lw_core::analytics::Analytics;
 use lw_core::api_client::ApiClient;
 use lw_core::auth::{AuthClientConfig, AuthService};
 use lw_core::config::AppConfig;
@@ -27,6 +28,11 @@ const GOOGLE_OAUTH_CLIENT_ID: &str =
 const GOOGLE_OAUTH_CLIENT_SECRET: &str = "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";
 const MICROSOFT_OAUTH_CLIENT_ID: &str = "e83e590c-33fd-4361-8063-b93e95206a14";
 
+// PostHog project key (public client key — safe to embed, like FIREBASE_API_KEY / the Sentry DSN).
+// Placeholder for now; fill with the "Linewise Desktop" project key.
+const POSTHOG_API_KEY: &str = "";
+const POSTHOG_HOST: &str = "https://us.i.posthog.com";
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct CoreServices {
@@ -44,6 +50,9 @@ pub struct CoreServices {
     /// alive across `Database::reset_local_files` would let the pool
     /// recreate WAL/SHM sidecars mid-wipe.
     pub auto_retry_handle: Arc<TokioMutex<Option<JoinHandle<()>>>>,
+    /// PostHog analytics client. Empty api key = no-op (see `Analytics::new`),
+    /// so wiring this in is safe even before the project key is filled in.
+    pub analytics: Arc<Analytics>,
 }
 
 /// Identity-based equality for Dioxus prop memoization. Two `CoreServices`
@@ -58,6 +67,7 @@ impl PartialEq for CoreServices {
             && Arc::ptr_eq(&self.db, &other.db)
             && Arc::ptr_eq(&self.upload_engine, &other.upload_engine)
             && Arc::ptr_eq(&self.event_rx, &other.event_rx)
+            && Arc::ptr_eq(&self.analytics, &other.analytics)
     }
 }
 
@@ -124,6 +134,26 @@ impl CoreServices {
         // doc comment on `auto_retry_handle`.
         let auto_retry = upload_engine.spawn_auto_retry();
 
+        // PostHog analytics client, sharing the same optional proxy as the
+        // HTTP clients. Empty api key => no-op, so this is inert until the
+        // project key is filled in. The device id is generated + persisted on
+        // config load (`ensure_device_id`), so `analytics_device_id` is set by
+        // the time we get here; default to empty as a belt-and-braces guard.
+        let environment_label = match config.server.environment {
+            lw_core::config::Environment::Dev => "dev",
+            lw_core::config::Environment::Testing => "testing",
+            lw_core::config::Environment::Production => "production",
+        };
+        let device_id = config.analytics_device_id.clone().unwrap_or_default();
+        let analytics = Arc::new(Analytics::new(
+            POSTHOG_API_KEY.to_string(),
+            POSTHOG_HOST.to_string(),
+            proxy_url.as_deref(),
+            environment_label,
+            env!("CARGO_PKG_VERSION").to_string(),
+            device_id,
+        ));
+
         tracing::info!("core services ready");
         Ok(Self {
             auth,
@@ -133,6 +163,7 @@ impl CoreServices {
             config,
             event_rx: Arc::new(TokioMutex::new(event_rx)),
             auto_retry_handle: Arc::new(TokioMutex::new(Some(auto_retry))),
+            analytics,
         })
     }
 }
