@@ -104,6 +104,8 @@ fn OrgLanding(tenant: Tenant) -> Element {
         let sp = app_state.upload_speed.read();
         compute_summary(&org_tasks, &up, &hp, &sp)
     };
+    // total_files is the non-failed count (failed are excluded from progress),
+    // so the all-failed case (total_files == 0) reads just "N failed".
     let status_text = if summary.in_progress_files > 0 {
         let mut s = format!(
             "{}% overall \u{00B7} {} in progress",
@@ -113,16 +115,17 @@ fn OrgLanding(tenant: Tenant) -> Element {
             s.push_str(&format!(" \u{00B7} {} failed", summary.failed_files));
         }
         s
-    } else if summary.failed_files > 0 {
-        format!(
-            "{} of {} videos \u{00B7} {} failed",
-            summary.completed_files, summary.total_files, summary.failed_files
-        )
-    } else {
-        format!(
+    } else if summary.total_files > 0 {
+        let mut s = format!(
             "{} of {} videos",
             summary.completed_files, summary.total_files
-        )
+        );
+        if summary.failed_files > 0 {
+            s.push_str(&format!(" \u{00B7} {} failed", summary.failed_files));
+        }
+        s
+    } else {
+        format!("{} failed", summary.failed_files)
     };
 
     rsx! {

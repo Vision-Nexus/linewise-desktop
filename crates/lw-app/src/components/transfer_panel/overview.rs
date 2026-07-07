@@ -86,25 +86,17 @@ pub fn compute_summary(
     let (mut checking, mut queued, mut uploading) = (0usize, 0usize, 0usize);
 
     for task in tasks {
-        let total = task.size;
-        let (hashed, hash_total) = hash_progress
-            .get(&task.id)
-            .copied()
-            .unwrap_or((0, total.max(1)));
-        let (uploaded, upload_total) = upload_progress.get(&task.id).copied().unwrap_or((0, total));
-
-        // Byte weighting: pipeline % of this file's size counts as transferred.
-        // `task_pipeline_pct` already returns 100 for completed and 0 for
-        // failed/rejected, so no special-casing is needed here.
-        let pct = task_pipeline_pct(task, hashed, hash_total, uploaded, upload_total);
-        let done = ((total as u128 * pct as u128) / 100) as u64;
-        total_bytes += total;
-        transferred_bytes += done;
+        // Terminal-failure rows never contribute to the batch's upload PROGRESS
+        // (bytes, %, "of N videos") — only to the failed count. A batch of one
+        // uploading file plus twenty failed ones should read as that one file's
+        // progress, not ~1% dragged down by files that will never upload.
+        if PrimaryTab::Failed.contains(&task.state) {
+            failed_files += 1;
+            continue;
+        }
 
         if PrimaryTab::Completed.contains(&task.state) {
             completed_files += 1;
-        } else if PrimaryTab::Failed.contains(&task.state) {
-            failed_files += 1;
         } else {
             in_progress_files += 1;
             match task.state {
@@ -117,13 +109,26 @@ pub fn compute_summary(
                 | UploadState::Uploading
                 | UploadState::Verifying
                 | UploadState::Paused => uploading += 1,
-                // Classified as completed/failed above — unreachable here.
+                // Completed handled above; failed short-circuited via `continue`.
                 UploadState::Completed
                 | UploadState::Failed
                 | UploadState::GaveUp
                 | UploadState::Rejected => {}
             }
         }
+
+        // Byte weighting (non-failed only): pipeline % of this file's size counts
+        // as transferred. `task_pipeline_pct` returns 100 for completed.
+        let total = task.size;
+        let (hashed, hash_total) = hash_progress
+            .get(&task.id)
+            .copied()
+            .unwrap_or((0, total.max(1)));
+        let (uploaded, upload_total) = upload_progress.get(&task.id).copied().unwrap_or((0, total));
+        let pct = task_pipeline_pct(task, hashed, hash_total, uploaded, upload_total);
+        let done = ((total as u128 * pct as u128) / 100) as u64;
+        total_bytes += total;
+        transferred_bytes += done;
 
         if task.state == UploadState::Uploading
             && let Some(&spd) = upload_speed.get(&task.id)
@@ -133,6 +138,8 @@ pub fn compute_summary(
         }
     }
 
+    // "of N videos" and the % are over the non-failed set (completed + in-flight).
+    let total_files = completed_files + in_progress_files;
     let remaining_bytes = total_bytes.saturating_sub(transferred_bytes);
     let overall_progress_pct = if total_bytes > 0 {
         ((transferred_bytes as f64 / total_bytes as f64) * 100.0).round() as u32
@@ -147,7 +154,7 @@ pub fn compute_summary(
     };
 
     BatchSummary {
-        total_files: tasks.len(),
+        total_files,
         completed_files,
         in_progress_files,
         failed_files,
@@ -177,15 +184,16 @@ fn fill_segments(s: &BatchSummary) -> Vec<FillSegment> {
     if s.total_files == 0 {
         return Vec::new();
     }
-    // Prototype colour order: completed(emerald) / uploading(primary) /
-    // checking(muted) / queued(sky) / failed(destructive). Plan A's primary is
+    // Segments partition the non-failed set (total_files), so failed is NOT a
+    // stripe here — it contributes no transferred bytes and is surfaced as a
+    // separate "N failed" note in the meta line. Colour order: completed(emerald)
+    // / uploading(primary) / checking(muted) / queued(sky). Plan A's primary is
     // neutral, so "uploading" uses the near-black text colour.
     let defs = [
         ("completed", s.completed_files, "var(--success)"),
         ("uploading", s.uploading, "var(--text)"),
         ("checking", s.checking, "var(--text-muted)"),
         ("in queue", s.queued, "var(--info)"),
-        ("failed", s.failed_files, "var(--error)"),
     ];
     defs.iter()
         .filter(|(_, count, _)| *count > 0)
@@ -216,14 +224,22 @@ fn format_eta_long(secs: f64) -> String {
 
 /// The ` · `-joined meta line under the headline. Mirrors `buildMetaLine`.
 fn build_meta_line(s: &BatchSummary) -> String {
-    let mut parts: Vec<String> = vec![
-        format!("{} of {} videos", s.completed_files, s.total_files),
-        format!(
+    let mut parts: Vec<String> = Vec::new();
+    if s.total_files > 0 {
+        parts.push(format!("{} of {} videos", s.completed_files, s.total_files));
+    }
+    if s.total_bytes > 0 {
+        parts.push(format!(
             "{} / {}",
             format_size(s.transferred_bytes),
             format_size(s.total_bytes)
-        ),
-    ];
+        ));
+    }
+    // Surface failures here while uploading; once finished the headline already
+    // reads "X succeeded · Y failed", so don't duplicate it.
+    if s.failed_files > 0 && !s.batch_finished {
+        parts.push(format!("{} failed", s.failed_files));
+    }
     if !s.batch_finished {
         if let Some(secs) = s.estimated_secs_remaining {
             parts.push(format!("Est. {} left", format_eta_long(secs)));
@@ -241,7 +257,10 @@ fn build_meta_line(s: &BatchSummary) -> String {
 /// prototype's `totalFiles === 0 → null`).
 #[component]
 pub fn BatchOverview(summary: BatchSummary) -> Element {
-    if summary.total_files == 0 {
+    // `total_files` is the non-failed count, so gate on it OR any failures —
+    // an all-failed batch should still render "Batch complete · 0 succeeded · N
+    // failed" rather than vanish.
+    if summary.total_files == 0 && summary.failed_files == 0 {
         return rsx! {};
     }
 
@@ -527,6 +546,30 @@ mod tests {
         assert_eq!(
             nav_status(&with_fail, NavScope::Org).expect("some").tooltip,
             "All batches complete \u{00B7} 1 succeeded \u{00B7} 1 failed"
+        );
+    }
+
+    #[test]
+    fn compute_summary_excludes_failed_from_progress() {
+        // 1 completed + 3 terminal-failure files, each 100 bytes. Failed rows
+        // must NOT inflate the progress denominator (total_files / total_bytes)
+        // or drag the overall %, but must still be counted as failed.
+        let tasks = [
+            task(UploadState::Completed),
+            task(UploadState::Failed),
+            task(UploadState::Rejected),
+            task(UploadState::GaveUp),
+        ];
+        let empty: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
+        let speed: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let s = compute_summary(&tasks, &empty, &empty, &speed);
+        assert_eq!(s.completed_files, 1);
+        assert_eq!(s.failed_files, 3);
+        assert_eq!(s.total_files, 1, "total_files excludes failed/rejected");
+        assert_eq!(s.total_bytes, 100, "only the completed file's size counts");
+        assert_eq!(
+            s.overall_progress_pct, 100,
+            "100/100, not dragged to 25% by 3 failed files"
         );
     }
 }
