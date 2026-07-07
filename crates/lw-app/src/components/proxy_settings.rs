@@ -1,4 +1,4 @@
-use crate::state::{AppState, ToastKind};
+use crate::state::{AppState, CoreServices, ToastKind};
 use dioxus::prelude::*;
 
 /// Optional fixed HTTP proxy for every outbound client (API, auth, GCS
@@ -23,6 +23,7 @@ const MPU_CONCURRENCY_MAX: u32 = 16;
 #[component]
 pub fn ProxySettingsPane() -> Element {
     let mut app_state = use_context::<AppState>();
+    let services = use_context::<CoreServices>();
     // Treat None and Some("") identically as "blank" for the text field.
     let initial = app_state
         .config
@@ -35,10 +36,14 @@ pub fn ProxySettingsPane() -> Element {
     let initial_concurrency = app_state.config.read().upload.mpu_part_concurrency;
     let mut mpu_concurrency = use_signal(|| initial_concurrency);
 
+    let analytics = services.analytics.clone();
     let save = move |_| {
         // Trim and normalise empty -> None so a blank field clears the
         // override rather than persisting an empty string.
         let trimmed = proxy_url.read().trim().to_string();
+        // Record only whether a proxy is set, never the URL itself — the
+        // value can carry host/port a user considers sensitive.
+        let proxy_set = !trimmed.is_empty();
         let value = if trimmed.is_empty() {
             None
         } else {
@@ -52,6 +57,7 @@ pub fn ProxySettingsPane() -> Element {
             (*mpu_concurrency.read()).clamp(MPU_CONCURRENCY_MIN, MPU_CONCURRENCY_MAX);
         match app_state.save_config(next) {
             Ok(()) => {
+                analytics.capture("proxy_configured", serde_json::json!({ "set": proxy_set }));
                 app_state.show_toast(
                     "Network settings saved — takes effect on next launch",
                     ToastKind::Success,

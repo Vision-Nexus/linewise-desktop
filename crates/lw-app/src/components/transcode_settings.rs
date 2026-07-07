@@ -1,7 +1,7 @@
 use crate::components::slider::{Slider, SliderRange, SliderThumb, SliderTrack};
 use crate::components::switch::{Switch, SwitchThumb};
 use crate::components::toggle_group::{ToggleGroup, ToggleItem};
-use crate::state::{AppState, ToastKind};
+use crate::state::{AppState, CoreServices, ToastKind};
 use dioxus::prelude::*;
 use lw_core::config::TranscodeConfig;
 use lw_core::transcode::probe_availability;
@@ -14,6 +14,7 @@ const AUDIO_BITRATES: &[u32] = &[128, 192];
 #[component]
 pub fn TranscodeSettingsPane() -> Element {
     let mut app_state = use_context::<AppState>();
+    let services = use_context::<CoreServices>();
     // Seed local edit-state from the live config signal — anything the
     // user persists via Save flows back through `AppState::save_config`.
     let mut config = use_signal(|| app_state.config.read().transcode.clone());
@@ -28,13 +29,19 @@ pub fn TranscodeSettingsPane() -> Element {
     }
     let master_enabled = ffmpeg_ok && config.read().enabled;
 
+    let analytics = services.analytics.clone();
     let save = move |_| {
         let tc = config.read().clone();
+        let enabled = tc.enabled;
         let mut next = app_state.config.read().clone();
         next.transcode = tc;
         match app_state.save_config(next) {
             Ok(()) => {
                 tracing::info!("Transcode settings saved");
+                analytics.capture(
+                    "transcode_toggled",
+                    serde_json::json!({ "enabled": enabled }),
+                );
                 app_state.show_toast("Settings saved", ToastKind::Success);
             }
             Err(e) => {
