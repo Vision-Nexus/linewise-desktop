@@ -178,49 +178,56 @@ pub fn LoginPage() -> Element {
                             "or"
                         }
 
-                        // Email form (toggle)
-                        if *show_email_form.read() {
-                            form {
-                                onsubmit: on_submit,
-                                class: "fade-in flex flex-col gap-3 w-full",
+                        // Email form + toggle. Both are ALWAYS mounted; visibility
+                        // flips via an inline `display` style instead of an if/else
+                        // that swaps a <form> for a <button> at the same slot. That
+                        // node swap did not re-render on click (the reported
+                        // "Sign in with Email does nothing"); toggling a style
+                        // attribute on stable nodes is a plain attribute diff Dioxus
+                        // applies reliably. `type=button` keeps the toggle from ever
+                        // acting as a submit.
+                        form {
+                            onsubmit: on_submit,
+                            class: "fade-in flex flex-col gap-3 w-full",
+                            style: if *show_email_form.read() { "" } else { "display: none;" },
 
-                                input {
-                                    r#type: "email",
-                                    placeholder: "Email",
-                                    value: "{email}",
-                                    oninput: move |evt| email.set(evt.value()),
-                                    required: true,
-                                    class: "h-[38px] px-3 border border-input rounded-md text-sm bg-background text-foreground outline-none transition focus:border-ring focus:shadow-[0_0_0_2px_rgba(0,0,0,0.12)]",
-                                }
-
-                                input {
-                                    r#type: "password",
-                                    placeholder: "Password",
-                                    value: "{password}",
-                                    oninput: move |evt| password.set(evt.value()),
-                                    required: true,
-                                    class: "h-[38px] px-3 border border-input rounded-md text-sm bg-background text-foreground outline-none transition focus:border-ring focus:shadow-[0_0_0_2px_rgba(0,0,0,0.12)]",
-                                }
-
-                                button {
-                                    r#type: "submit",
-                                    disabled: *loading.read(),
-                                    class: "flex items-center justify-center w-full h-[42px] px-4 bg-primary text-primary-foreground rounded-md text-sm font-medium transition ease-out hover:bg-primary-hovered active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed",
-                                    if *loading.read() {
-                                        span { class: "spinner spinner-sm mr-1.5" }
-                                        "Signing in..."
-                                    } else {
-                                        "Sign in"
-                                    }
-                                }
+                            input {
+                                r#type: "email",
+                                placeholder: "Email",
+                                value: "{email}",
+                                oninput: move |evt| email.set(evt.value()),
+                                required: true,
+                                class: "h-[38px] px-3 border border-input rounded-md text-sm bg-background text-foreground outline-none transition focus:border-ring focus:shadow-[0_0_0_2px_rgba(0,0,0,0.12)]",
                             }
-                        } else {
+
+                            input {
+                                r#type: "password",
+                                placeholder: "Password",
+                                value: "{password}",
+                                oninput: move |evt| password.set(evt.value()),
+                                required: true,
+                                class: "h-[38px] px-3 border border-input rounded-md text-sm bg-background text-foreground outline-none transition focus:border-ring focus:shadow-[0_0_0_2px_rgba(0,0,0,0.12)]",
+                            }
+
                             button {
+                                r#type: "submit",
                                 disabled: *loading.read(),
-                                onclick: move |_| show_email_form.set(true),
-                                class: "w-full h-[42px] px-4 bg-transparent text-muted-foreground rounded-md text-sm font-medium transition ease-out hover:bg-accent hover:text-accent-foreground",
-                                "Sign in with Email"
+                                class: "flex items-center justify-center w-full h-[42px] px-4 bg-primary text-primary-foreground rounded-md text-sm font-medium transition ease-out hover:bg-primary-hovered active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed",
+                                if *loading.read() {
+                                    span { class: "spinner spinner-sm mr-1.5" }
+                                    "Signing in..."
+                                } else {
+                                    "Sign in"
+                                }
                             }
+                        }
+                        button {
+                            r#type: "button",
+                            disabled: *loading.read(),
+                            onclick: move |_| show_email_form.set(true),
+                            class: "w-full h-[42px] px-4 bg-transparent text-muted-foreground rounded-md text-sm font-medium transition ease-out hover:bg-accent hover:text-accent-foreground",
+                            style: if *show_email_form.read() { "display: none;" } else { "" },
+                            "Sign in with Email"
                         }
                     }
 

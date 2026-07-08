@@ -469,7 +469,12 @@ fn SidebarSignOut(on_done: EventHandler<()>) -> Element {
         signing_out.set(true);
         let auth = services.auth.clone();
         let mut app_state = app_state_signout.clone();
-        on_done.call(());
+        // Do NOT close the menu here: `on_done` flips the parent `open` signal to
+        // false, which unmounts THIS component's scope in the same event tick —
+        // and Dioxus 0.7 drops the just-spawned future along with the scope, so
+        // the sign-out body never runs (the observed "clicking Sign out does
+        // nothing"). Flip auth state inside the task first (that alone swaps
+        // MainView -> LoginPage and tears the sidebar down), then close the menu.
         spawn(async move {
             auth.sign_out().await;
             app_state.is_authenticated.set(false);
@@ -478,6 +483,7 @@ fn SidebarSignOut(on_done: EventHandler<()>) -> Element {
             app_state.selected_project.set(None);
             app_state.projects.set(Vec::new());
             app_state.upload_tasks.set(Vec::new());
+            on_done.call(());
         });
     };
 
