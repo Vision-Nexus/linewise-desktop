@@ -8,8 +8,9 @@ mod single_instance;
 mod state;
 pub mod styles;
 
-use std::borrow::Cow;
+use std::sync::LazyLock;
 
+use base64::Engine as _;
 use dioxus::desktop::muda::{Menu, PredefinedMenuItem, Submenu};
 use dioxus::desktop::{Config, WindowCloseBehaviour};
 use dioxus::prelude::*;
@@ -18,6 +19,18 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 static LOGIN_IMG: &[u8] = include_bytes!("../../../assets/login-img.png");
+
+/// The login background as a self-contained `data:` URI, encoded once on first
+/// use. Served this way instead of a `localasset://` custom protocol because
+/// that scheme doesn't resolve uniformly across platforms (it 404'd the image on
+/// Windows WebView2); a `data:` URI needs no protocol registration and renders
+/// identically everywhere. `pub` so `components::login` can reference it.
+pub static LOGIN_IMG_DATA_URI: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(LOGIN_IMG)
+    )
+});
 
 const SENTRY_DSN: &str = "https://cf5b74f304f4ea35de113d3ac566b957@o4509472431407104.ingest.us.sentry.io/4511116827820032";
 
@@ -136,24 +149,12 @@ fn main() {
         tracing::warn!("FFmpeg not available — transcoding disabled: {e}");
     }
 
+    // The login background is embedded and served as a `data:` URI (see
+    // LOGIN_IMG_DATA_URI) rather than a custom protocol, so no `localasset`
+    // handler is registered here.
     let cfg = Config::new()
         .with_close_behaviour(WindowCloseBehaviour::WindowHides)
         .with_menu(Some(build_app_menu()))
-        .with_custom_protocol("localasset", |_webview_id, request| {
-            let uri = request.uri().to_string();
-            let path = request.uri().path();
-            tracing::debug!("localasset request: uri={uri} path={path}");
-            let (body, content_type): (Cow<'static, [u8]>, &str) =
-                match path.trim_start_matches('/') {
-                    "login-img.png" => (Cow::Borrowed(LOGIN_IMG), "image/png"),
-                    _ => (Cow::Borrowed(b"Not Found" as &[u8]), "text/plain"),
-                };
-            dioxus::desktop::wry::http::Response::builder()
-                .header("Content-Type", content_type)
-                .header("Access-Control-Allow-Origin", "*")
-                .body(body)
-                .expect("failed to build protocol response")
-        })
         .with_window(build_window());
 
     LaunchBuilder::desktop().with_cfg(cfg).launch(app::App);
