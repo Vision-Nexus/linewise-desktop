@@ -189,7 +189,12 @@ pub fn LoginPage() -> Element {
                         form {
                             onsubmit: on_submit,
                             class: "fade-in flex flex-col gap-3 w-full",
-                            style: if *show_email_form.read() { "" } else { "display: none;" },
+                            // Both branches MUST be non-empty: Dioxus 0.7 does not
+                            // clear a prior inline `display:none` when the style is
+                            // set back to "" (observed: the toggle button hid but
+                            // this form stayed hidden). Set an explicit display both
+                            // ways; `flex-col` still comes from the class.
+                            style: if *show_email_form.read() { "display: flex;" } else { "display: none;" },
 
                             input {
                                 r#type: "email",
@@ -243,7 +248,9 @@ pub fn LoginPage() -> Element {
             div {
                 class: "flex-1 h-full overflow-hidden",
                 img {
-                    src: "localasset://localhost/login-img.png",
+                    // Embedded data: URI (see crate::LOGIN_IMG_DATA_URI) — the old
+                    // `localasset://` custom protocol didn't resolve on Windows.
+                    src: crate::LOGIN_IMG_DATA_URI.as_str(),
                     alt: "Login Background",
                     class: "w-full h-full object-cover",
                 }
