@@ -802,14 +802,27 @@ pub fn UploadTaskRow(
                                     }
                                 }
                             }
-                            // Other active/queued stages: no action button. Pausing
-                            // QC/validate/transcode/create/verify/pending is meaningless,
-                            // so we don't offer it (matches the tightened state machine).
+                            // Queued / preparing stages (waiting for an upload slot,
+                            // validating, transcoding, creating the doc, verifying).
+                            // Pause is meaningless here (state_machine allows only
+                            // Uploading -> Paused), but ALWAYS offer Remove — otherwise
+                            // a row wedged in one of these stages (e.g. queued behind
+                            // max_concurrent, or stuck in Creating on repeated API
+                            // 503s) has no action at all and is unrecoverable from the
+                            // UI. Remove routes through abort_in_flight_and_remove.
                             UploadState::Validating
                             | UploadState::Transcoding
                             | UploadState::Creating
                             | UploadState::Verifying
-                            | UploadState::Pending => rsx! {},
+                            | UploadState::Pending => rsx! {
+                                button {
+                                    class: "btn-danger-sm",
+                                    style: "{small_btn} background: transparent; color: var(--error); border: 1px solid var(--error);",
+                                    onclick: move |_| on_remove.call(id1.clone()),
+                                    crate::icons::TrashIcon {}
+                                    "Remove"
+                                }
+                            },
                             UploadState::Paused => rsx! {
                                 button {
                                     class: "btn-primary",
@@ -1065,22 +1078,27 @@ pub(super) fn upload_stage_pct(state: &UploadState, uploaded: u64, total: u64) -
     }
 }
 
-/// User-facing stage badge — mirrors the prototype `displayStatusLabel` /
-/// `userFacingStatusLabel`. The engine's fine-grained pipeline states collapse
-/// to the three user-facing stages, so the chip never shows internal jargon
-/// like "TRANSCODING" or "CREATING". (`already exists` refinement for Completed
-/// lives in the Completed tab; here Completed simply reads "Completed".)
+/// User-facing stage badge. Queued stages (Staged/Pending) read "In queue" and
+/// the distinct pipeline stages keep their own labels (Validating / Transcoding
+/// / Creating / Uploading / Verifying / Paused) so a row waiting for an upload
+/// slot is never mislabeled as "Uploading" — only a row actually moving bytes
+/// reads "Uploading". (`already exists` refinement for Completed lives in the
+/// Completed tab; here Completed simply reads "Completed".)
 fn stage_badge_label(state: &UploadState) -> &'static str {
     match state {
         UploadState::QualityChecking | UploadState::Hashing => "Checking files",
-        UploadState::Staged => "In queue",
-        UploadState::Pending
-        | UploadState::Validating
-        | UploadState::Transcoding
-        | UploadState::Creating
-        | UploadState::Uploading
-        | UploadState::Verifying
-        | UploadState::Paused => "Uploading",
+        // Pending = accepted but waiting for an upload slot (behind the
+        // max_concurrent gate). Label it as queued, NOT "Uploading", so a
+        // waiting row is visibly distinct from one that is actually transferring
+        // — otherwise N queued rows all read "Uploading" while only
+        // max_concurrent are really moving bytes.
+        UploadState::Staged | UploadState::Pending => "In queue",
+        UploadState::Validating => "Validating",
+        UploadState::Transcoding => "Transcoding",
+        UploadState::Creating => "Creating",
+        UploadState::Uploading => "Uploading",
+        UploadState::Verifying => "Verifying",
+        UploadState::Paused => "Paused",
         UploadState::Rejected => "Rejected",
         UploadState::Completed => "Completed",
         UploadState::Failed | UploadState::GaveUp => "Failed",
