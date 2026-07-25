@@ -1,6 +1,6 @@
 # Linewise Desktop
 
-Cross-platform desktop client for Linewise — handles data desensitization, resumable uploads, video validation, and action camera integration. Built with Rust + Dioxus.
+Cross-platform desktop client for Linewise — handles data desensitization, resumable uploads, video validation, and action camera integration. Built with Rust + Dioxus 0.7.
 
 **Docs**: [README.md](README.md) | [ARCHITECTURE.md](ARCHITECTURE.md) (Mermaid diagrams)
 
@@ -49,8 +49,9 @@ Workspace members are `lw-core`, `lw-app`, and `xtask`; `default-members` builds
 
 | Module | Purpose |
 |--------|---------|
-| `auth.rs` | Firebase Auth REST API (email/password, OAuth, token refresh) |
+| `auth/` | Firebase Auth REST API — email/password plus Google/Microsoft OAuth over an Authorization Code + PKCE loopback flow (`auth/oauth.rs` → Firebase `signInWithIdp`); token refresh |
 | `api_client.rs` | Linewise API client (documents, upload URLs, verification) |
+| `storage.rs` | Storage backends: GCS via signed URLs (same protocol as the web frontend) plus S3-compatible stores (AWS S3, Alibaba OSS, Tencent COS, MinIO) |
 | `upload.rs` | Upload engine (queue, dedup, validation, upload, verify, auto-clean) |
 | `db.rs` | SQLite via sqlx (`query!` macros, async pool) — upload queue persistence, file hash dedup |
 | `video.rs` | ffprobe-based video parameter validation (30fps/1080p/30Mbps targets) |
