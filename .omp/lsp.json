@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "rust-analyzer": {
+      "command": "rust-analyzer",
+      "fileTypes": [".rs"],
+      "rootMarkers": ["Cargo.toml"],
+      "warmupTimeoutMs": 30000
+    }
+  }
+}
