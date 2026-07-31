@@ -14,6 +14,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true
+  # Single canonical FFmpeg version — must match release.yml and
+  # `BUNDLED_FFMPEG_VERSION` in crates/xtask/src/bundle_ffmpeg/mod.rs. One
+  # ffmpeg everywhere is required for cross-producer PDQ bit-exactness
+  # (crates/lw-core/src/pdq.rs::PDQ_VF_FILTER).
+  # WARNING / TBD / PLACEHOLDER: 7.1 matches Windows today; canonical version pending a
+  # prod hash-divergence measurement. Only Windows is pinned to it so far —
+  # macOS (brew) and Linux (apt) alignment is a tracked follow-up.
+  BUNDLED_FFMPEG_VERSION: "7.1"
 
 jobs:
   test:
@@ -61,12 +69,16 @@ jobs:
       # --- FFmpeg setup (mirrors release.yml so test and release agree on
       #     the libavcodec/libavformat ABI in scope). ---
 
+      # NOTE: brew installs current ffmpeg (~8.x), NOT BUNDLED_FFMPEG_VERSION.
+      # macOS is not yet aligned to the canonical pin (tracked follow-up).
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install ffmpeg pkg-config
           echo "FFMPEG_DIR=$(brew --prefix ffmpeg)" >> $GITHUB_ENV
 
+      # NOTE: apt installs ffmpeg ~6.1, NOT BUNDLED_FFMPEG_VERSION. Linux is not
+      # yet aligned to the canonical pin (tracked follow-up).
       - name: Install FFmpeg and system deps (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -81,7 +93,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ffmpegVersion = "7.1"
+          # Pinned to the single canonical version (see top-level env).
+          $ffmpegVersion = "${{ env.BUNDLED_FFMPEG_VERSION }}"
           $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n${ffmpegVersion}-latest-win64-gpl-shared-${ffmpegVersion}.zip"
           Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-build
