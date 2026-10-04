@@ -110,7 +110,8 @@ linewise-desktop/
 │                   # (crates/lw-chat/ is present but excluded from the workspace — not built)
 ├── package.json     # Tailwind CSS dev dependency
 ├── ARCHITECTURE.md  # Module diagrams
-├── CLAUDE.md        # AI coding guidelines
+├── AGENTS.md        # Shared AI coding guidelines
+├── CLAUDE.md        # Imports AGENTS.md for Claude Code
 └── Cargo.toml       # Workspace root
 ```
 
