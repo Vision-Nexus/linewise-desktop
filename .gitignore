@@ -25,3 +25,8 @@ crates/lw-app/tailwind.generated.css
 # whole repo) and per-machine agent settings overrides.
 .claude/worktrees/
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
+CLAUDE.local.md
+.agents/settings.local.json
+.agents/worktrees/
+.codex/config.toml
