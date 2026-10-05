@@ -11,6 +11,17 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true
+  # Single canonical FFmpeg version for ALL OSes. Mirrors
+  # `BUNDLED_FFMPEG_VERSION` in crates/xtask/src/bundle_ffmpeg/mod.rs — keep the
+  # two in sync. One ffmpeg everywhere is required for cross-producer PDQ
+  # bit-exactness (see crates/lw-core/src/pdq.rs::PDQ_VF_FILTER).
+  # WARNING / TBD / PLACEHOLDER: 7.1 matches what Windows already pinned; the canonical
+  # version is pending a prod hash-divergence measurement. Windows pins this
+  # exact BtbN build today; macOS (brew) and Linux (apt) are NOT yet pinned to
+  # it — aligning those is a tracked follow-up (needs a pinnable source, e.g.
+  # a BtbN/static build for Linux). Bump in lockstep with the xtask constant
+  # and the server sidecar.
+  BUNDLED_FFMPEG_VERSION: "7.1"
 
 jobs:
   build:
@@ -59,12 +70,21 @@ jobs:
 
       # --- FFmpeg setup ---
 
+      # NOTE: brew installs the current ffmpeg (~8.x), NOT BUNDLED_FFMPEG_VERSION.
+      # macOS is therefore NOT yet aligned to the canonical pin — pinning it to a
+      # specific version is a tracked follow-up (brew has no clean version pin;
+      # likely needs a downloaded static build). PDQ hashes from a macOS build
+      # can diverge from Windows/Linux until then.
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install ffmpeg pkg-config
           echo "FFMPEG_DIR=$(brew --prefix ffmpeg)" >> $GITHUB_ENV
 
+      # NOTE: apt on ubuntu-24.04 installs ffmpeg ~6.1, NOT BUNDLED_FFMPEG_VERSION.
+      # Linux is therefore NOT yet aligned to the canonical pin — switching to a
+      # pinnable source (e.g. a BtbN linux64 build matching the Windows pin) is a
+      # tracked follow-up. PDQ hashes from a Linux build can diverge until then.
       - name: Install FFmpeg and system deps (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -81,7 +101,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ffmpegVersion = "7.1"
+          # Pinned to the single canonical version (see top-level env). This is
+          # the only OS currently aligned to BUNDLED_FFMPEG_VERSION.
+          $ffmpegVersion = "${{ env.BUNDLED_FFMPEG_VERSION }}"
           $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n${ffmpegVersion}-latest-win64-gpl-shared-${ffmpegVersion}.zip"
           Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-build
