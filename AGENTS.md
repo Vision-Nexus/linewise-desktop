@@ -1,209 +1,121 @@
 # Linewise Desktop
 
-Cross-platform desktop client for Linewise — handles data desensitization, resumable uploads, video validation, and action camera integration. Built with Rust + Dioxus 0.7.
+Cross-platform Linewise client for resumable uploads, video validation, and action-camera ingestion. See [README.md](README.md) and [ARCHITECTURE.md](ARCHITECTURE.md) for the user and system overview.
 
-**Docs**: [README.md](README.md) | [ARCHITECTURE.md](ARCHITECTURE.md) (Mermaid diagrams)
+## Core contracts
 
-## Agent files
+- `crates/lw-core/` owns business logic and has no UI dependency; `crates/lw-app/` is the thin Dioxus shell.
+- Use `thiserror` domain error enums for core operations. Keep variants specific to the failure and carry useful domain context; do not replace the error model with `Other(String)`.
+- `linewise-api` is the source of truth for API DTOs. Read its Scala case classes before changing Rust models; do not copy or infer fields from the web client's transformed TypeScript types.
+- Uploads follow the web contract: create the document, request its signed upload URL, PUT the file to GCS, then verify the document.
+- The workspace uses SQLx with SQLite, not `rusqlite`. Justify any new external crate in the change.
 
-`AGENTS.md` is the only full copy of the project rules; `CLAUDE.md` contains only `@AGENTS.md`. Portable skills and their resources live in `.agents/skills/`, with relative Claude discovery links under `.claude/skills/`. Keep vendor-specific settings, hooks, workflows, and local state in their own configuration directories. Update installed skills listed in `skills-lock.json` from their source rather than editing those copies.
+## State and database rules
 
-## Contract
+Pass state explicitly and do not use `thread_local!` or `std::thread_local`; `clippy.toml` disallows the macro and CI runs Clippy with warnings denied.
 
-- Core business logic lives in `crates/lw-core/` — zero UI dependencies
-- Desktop UI lives in `crates/lw-app/` — thin Dioxus shell over lw-core
-- Typed errors via `thiserror` ADT enums in `crates/lw-core/src/error.rs` — add variants as needed
-- **linewise-api (Scala) is the single source of truth for all API types.** When defining Rust DTOs in `models.rs`, always read the case classes from `linewise-api/src/` — never guess from frontend TypeScript types. The frontend may transform/rename fields.
-- Upload flow must match the web frontend protocol: create doc → get signed URL → PUT to GCS → verify
-- All state passed explicitly through function parameters — **no `thread_local!` or `std::thread_local`**
-- **Local `let mut` is permitted.** Prefer immutable bindings, but `let mut` inside a function body is fine for loop control and local accumulation. Mutable state must never escape the function — don't return `&mut`, don't store in struct fields, don't pass as `&mut` to other functions. If mutation needs to be shared, use explicit shared-ownership types (`Arc<RwLock<T>>`, Dioxus `Signal`).
-- **Database: always use `sqlx` (with SQLite) over `rusqlite`.** sqlx provides async access, compile-time query checking, and migration tooling. Use `sqlx::sqlite::SqlitePool` for connection pooling. **Always use `sqlx::query!` macro** (compile-time checked) instead of `sqlx::query()` function (runtime string). This catches SQL errors at compile time.
-- Allowed external crates: see `Cargo.toml` workspace dependencies. Do NOT add new crates without justification.
+Local `let mut` is fine for loop control and local accumulation. Avoid storing shared mutable state in structs; use explicit ownership or synchronization when state must be shared across tasks.
 
-## Build & Test
+Prefer `sqlx::query!` or `sqlx::query_as!` for static SQL when the offline query cache can check it. Runtime `sqlx::query()` remains appropriate for dynamic SQL or a static statement whose cache entry would add needless upkeep. `crates/lw-core/src/db.rs` has an intentional runtime-query example for that reason.
+
+## Build and release commands
 
 ```bash
-cd linewise-desktop
-cargo check                    # Type-check
-cargo build                    # Debug build
-cargo build --release          # Release build
-cargo test                     # Run tests
-cargo clippy -- -D warnings    # Lint (must pass clean)
-cargo fmt -- --check           # Format check
+cargo check
+cargo test
+cargo clippy -- -D warnings
+cargo fmt -- --check
+cargo xtask release vX.Y.Z
 ```
 
-## Architecture
+The workspace contains `lw-core`, `lw-app`, and `xtask`; `crates/lw-chat/` is excluded and is not mounted by the app. The release command updates the workspace version, refreshes the lockfile, commits, and tags the release, so use it only for an explicitly requested release.
 
-### Workspace Layout
+## API and upload behavior
 
-```
-crates/
-├── lw-core/    # Business logic library (auth, upload engine, API client, DB, video validation)
-├── lw-app/     # Dioxus desktop application (UI components, state, tray) — bin `linewise-desktop`
-└── xtask/      # Release + packaging tooling (cut release/tag, bundle ffmpeg+exiftool, generate icons)
+The desktop client sends Firebase Bearer tokens to the API. Tenant-scoped requests use `/api/org/{tenant}/...`; the who-am-I call is user-scoped at `/api/users/whoami`.
 
-# crates/lw-chat/ is a dormant Dioxus chat component, EXCLUDED from the workspace
-# (`exclude = ["crates/lw-chat"]` in Cargo.toml) and NOT a dependency of lw-app —
-# present in-tree but not compiled or mounted into the app.
-```
+Keep the upload order intact: create the document, request the signed URL, upload bytes directly to GCS, and verify the completed document through the API. Do not send file bytes through the document-creation request.
 
-Workspace members are `lw-core`, `lw-app`, and `xtask`; `default-members` builds `lw-core` + `lw-app`. Cut a release with `cargo xtask release vX.Y.Z` (rewrites `[workspace.package].version`, refreshes `Cargo.lock`, commits, tags).
+The signed-URL flow is shared with the web client. Changes to upload metadata, verification, or retry behavior need to remain compatible with the API and browser implementation.
 
-### Key Modules (lw-core)
+`lw-core` emits upload events to the UI over a Tokio unbounded channel. The UI calls core services through their async APIs; keep UI rendering and platform-specific behavior out of core.
 
-| Module | Purpose |
-|--------|---------|
-| `auth/` | Firebase Auth REST API — email/password plus Google/Microsoft OAuth over an Authorization Code + PKCE loopback flow (`auth/oauth.rs` → Firebase `signInWithIdp`); token refresh |
-| `api_client.rs` | Linewise API client (documents, upload URLs, verification) |
-| `storage.rs` | Storage backends: GCS via signed URLs (same protocol as the web frontend) plus S3-compatible stores (AWS S3, Alibaba OSS, Tencent COS, MinIO) |
-| `upload.rs` | Upload engine (queue, dedup, validation, upload, verify, auto-clean) |
-| `db.rs` | SQLite via sqlx (`query!` macros, async pool) — upload queue persistence, file hash dedup |
-| `video.rs` | ffprobe-based video parameter validation (30fps/1080p/30Mbps targets) |
-| `dedup.rs` | BLAKE3 file hashing for duplicate detection |
-| `config.rs` | TOML configuration (server env, upload prefs, desensitization, watch folders) |
-| `models.rs` | Domain types mirroring backend entities |
-| `error.rs` | Typed error ADT enums (AuthError, UploadError, VideoValidationError) |
+## Persistence and external storage
 
-### Communication Pattern
+SQLite persistence is accessed through the SQLx pool. Keep database operations async and use the existing migrations and row models when changing the upload queue.
 
-`lw-core` ↔ `lw-app` via:
-- **Core → UI**: `tokio::sync::mpsc::UnboundedSender<UploadEvent>` for async events
-- **UI → Core**: Direct async function calls on `Arc<UploadEngine>`, `Arc<AuthService>`, etc.
+The upload engine persists queue state and file-hash data so it can resume after restart and avoid duplicate work. Preserve that link when changing queue or deduplication semantics.
 
-### API Integration
+Cloud storage uses signed URLs for GCS and supports the configured S3-compatible backends. Keep provider-specific storage behavior behind the storage layer rather than leaking it into UI code.
 
-All endpoints follow `/api/org/{tenant}/...` pattern. Bearer token from Firebase Auth.
+Video validation uses the existing ffprobe-based checks. If changing limits or accepted formats, keep validation errors typed so the caller can explain the rejected media.
 
-| Action | Endpoint |
-|--------|----------|
-| Who am I | `GET /api/users/whoami` |
-| List projects | `GET /api/org/{tenant}/projects` |
-| Create document | `POST /api/org/{tenant}/projects/{pid}/documents` |
-| Get upload URL | `POST .../documents/{did}/upload-url` |
-| Verify upload | `GET .../documents/{did}` |
+## Domain and failure behavior
 
-### Reference Files (web frontend)
+Use structured errors for authentication, upload, configuration, storage, and video validation failures. Each error should retain enough context to identify the failed operation without exposing credentials.
 
-- `linewise-frontend/src/data/mutations.ts` — upload flow functions
-- `linewise-frontend/src/data/entities.ts` — TypeScript types to mirror
-- `linewise-frontend/src/lib/firebase.ts` — Firebase config keys
+## Clippy configuration
 
-## Type Safety
+`clippy.toml` sets a 200-line function threshold and a nesting threshold of 5 and disallows `std::thread_local`. CI runs `cargo clippy --locked --workspace --all-targets -- -D warnings`.
 
-- **No `.unwrap()`.** Use `.expect("reason")` for trusted invariants, `?` for untrusted paths.
-- **No silent error swallowing.** No `.unwrap_or_default()`, `.ok()` to discard errors.
-- **Structured error types** via `thiserror`. Each variant carries domain-specific fields. No `Other(String)` catch-all variants.
+## References for contract changes
 
-  ```rust
-  // Bad — stringly typed
-  Err(AppError::Config("not found".to_string()))
+The web upload implementation is in `../linewise-frontend/src/data/mutations.ts`; its entity types are in `../linewise-frontend/src/data/entities.ts`.
 
-  // Good — structured variant
-  Err(AuthError::InvalidCredentials)
-  ```
+The desktop API client, upload engine, and persistent queue live in `crates/lw-core/`. Keep shared API contract changes aligned with `linewise-api` and the web client.
 
-- **Enums over booleans** for behavioral flags.
-- **Exhaustive `match` — no `_ =>` catch-all.** When you add a new enum variant, the compiler must flag every match site.
+When touching packaging or release behavior, use the `xtask` command rather than hand-editing version metadata or tags.
 
-  ```rust
-  // Bad — silently ignores new variants
-  match state {
-      UploadState::Pending => ...,
-      UploadState::Uploading => ...,
-      _ => {},
-  }
+Keep `crates/lw-chat/` separate from the active app: it is present in the repository but excluded from the Cargo workspace and is not a dependency of `lw-app`.
 
-  // Good — compiler forces handling new variants
-  match state {
-      UploadState::Pending => ...,
-      UploadState::Validating => ...,
-      UploadState::Desensitizing => ...,
-      UploadState::Creating => ...,
-      UploadState::Uploading => ...,
-      UploadState::Verifying => ...,
-      UploadState::Completed => ...,
-      UploadState::Failed => ...,
-      UploadState::Paused => ...,
-  }
-  ```
+After changing a SQL query or migration, check whether the checked-in SQLx offline cache must change. Runtime queries are an intentional exception when maintaining a compile-time cache entry is not worthwhile.
 
-- **Wrap values that cross subsystem boundaries.** If a `String` means different things in different contexts (tenant ID vs document ID vs file path), it needs a newtype. If a `bool` parameter controls behavior, it needs an enum.
+## Authentication and configuration
 
-## Code Style
+Firebase authentication supports email and password plus Google and Microsoft sign-in. The OAuth flow uses an authorization-code PKCE loopback; keep that native callback flow intact when changing login behavior.
 
-### Flat Control Flow
+The API client sends the Firebase ID token as a Bearer token. Keep token acquisition and refresh in the auth service rather than duplicating it in the UI or upload engine.
 
-- **Prefer early returns and `?` over deeply nested `match`.**
-- **Max nesting: 3 levels** (enforced by clippy). Use `let else`, early `return`, `?`, and extracted helpers to reduce brace depth.
+User configuration is TOML and covers server environment, upload preferences, and watched folders. Preserve existing defaults when adding a field so an older configuration remains usable.
 
-  ```rust
-  // Bad — deep nesting
-  match result {
-      Ok(doc) => {
-          if doc.gcs_uri.is_some() {
-              for task in tasks {
-                  if task.state == UploadState::Pending {
-                      process(task);
-                  }
-              }
-          }
-      }
-      Err(_) => {}
-  }
+## Upload state and storage
 
-  // Good — flat with early returns
-  let doc = result?;
-  let Some(_uri) = doc.gcs_uri else { return Ok(()); };
-  tasks.iter()
-      .filter(|t| t.state == UploadState::Pending)
-      .for_each(process);
-  ```
+The upload queue is persisted in SQLite so queued work and its deduplication data survive an app restart. Changes to queue identity, hashes, or persisted states must keep the database representation and upload engine in agreement.
 
-- **Match arms with >3 lines dispatch to helpers.**
+File deduplication uses BLAKE3 hashes. Keep hashing tied to the current file content; do not treat a path alone as proof that a file is unchanged.
 
-### Functional Style (preferred, not mandatory)
+The core upload engine validates and queues files, creates the backend document, transfers the file, verifies completion, and reports progress to the UI through `UploadEvent`.
 
-Prefer functional patterns when they make the code clearer. Use imperative style when it's simpler.
+Keep document creation and file transfer as separate requests. The API creates the document and returns a signed URL; the client sends file bytes directly to the storage provider, then asks the API to verify the result.
 
-- **Prefer iterator pipelines for collection transforms.**
-- **Prefer `collect::<Result<Vec<_>, _>>()?` for fallible transforms.**
-- **Prefer folds for recursive data construction.**
-- **Prefer `split_first()` and slice patterns over indexing.**
-- **Prefer declarative matching over flag variables.**
+The GCS path uses signed URLs. Other configured S3-compatible storage providers stay behind the storage abstraction; do not put provider-specific request code in the Dioxus UI.
 
-## Refactoring Philosophy
+`lw-app` listens for core upload events and invokes core async operations. Preserve this direction when changing progress reporting or cancellation so UI state does not become a second upload engine.
 
-- **Expanding blast radius to reduce tech debt is encouraged.** If adding a field to an enum touches 15 match sites, do it.
-- **Fix violations in touched files.** When modifying a file, fix issues in that file — don't defer.
-- **Proactive refactoring over workarounds.** If existing code doesn't accommodate a new feature cleanly, refactor the existing code rather than hacking around it.
+## Media validation
 
-## Structural Limits
+Video checks use ffprobe through the core validation path. Keep accepted-media decisions in core so files selected from watched folders and files selected in the UI receive the same checks.
 
-| Constraint | Limit |
-|---|---|
-| Function length | 150 lines |
-| Nesting depth | 3 levels |
-| Module file lines | 500 |
+Validation failures use typed errors that the queue and UI can present. Do not replace them with a generic string at the boundary or discard the reason a file was rejected.
 
-## Lint Quick Reference
+## Workspace and release boundaries
 
-Enforced via `cargo clippy -- -D warnings` and `clippy.toml`. Hard errors:
+`xtask` owns release packaging and version/tag changes. The `cargo xtask release vX.Y.Z` command performs those changes and creates a commit and tag; do not run it for ordinary code edits.
 
-| Denied | Use instead |
-|---|---|
-| `.unwrap()` | `.expect("reason")`, `?`, `.ok_or()` |
-| `Result<T, ()>` | Meaningful error type |
-| `if !cond { panic!() }` | `assert!(cond, ...)` |
-| `thread_local!` | Pass state via parameters |
+## Upload state transitions
 
-### Style (auto-fixable)
+The upload states are the `UploadState` enum in `crates/lw-core/src/models.rs`. The former desensitization stage was removed on purpose because its strip pass also removed capture tags embedded before upload (see `crates/lw-core/src/upload.rs` and migration `0009_retire_desensitizing_state.sql`); do not reintroduce it.
 
-| Flagged pattern | Use instead |
-|---|---|
-| `.filter().map()` | `.filter_map()` |
-| `.find().map()` | `.find_map()` |
-| `.map().flatten()` | `.flat_map()` |
-| `for i in 0..v.len()` | `for item in &v` or `.enumerate()` |
-| `for x in v.iter()` | `for x in &v` |
-| `format!("{}", x)` | `format!("{x}")` |
-| `let x = if let Some(v) = y { v } else { return }` | `let Some(x) = y else { return }` |
+Keep the enum, persisted queue state, restart behavior, and UI progress events aligned when adding or changing a state. A state that is not decoded after restart can strand a queued file.
+
+The core owns state transitions and sends progress through `UploadEvent`. The UI observes those events; it should not invent a competing state machine for the same upload.
+
+Database migrations and SQLx offline data must match any persistent-state change. Prefer the compile-checked query macros when their cache can be maintained; use the documented runtime-query exception when it cannot.
+
+## Packaging and dependencies
+
+`xtask` bundles ffmpeg and exiftool and generates platform icons. Update release packaging when a bundled runtime tool changes; a local installation is not part of a release artifact.
+
+Shared dependencies are declared at workspace level. When a justified crate is added, keep member manifests and the workspace lockfile consistent.
+
+The app shell should keep calling core APIs for file processing rather than growing a second platform-specific upload path.
